@@ -59,9 +59,11 @@ tests/                pytest suite + fixture builders
 python odna.py --db oceandna_catalog.db init-db
 
 # 2. ingest metadata from a two-column map file (metadata csv, data dir),
-#    same format as scripts/.../example_map_file.txt. --seqdata-root enables
-#    on-disk R1/R2 + orphan checks when the data is reachable.
+#    same format as scripts/.../example_map_file.txt. Per-project CSVs are
+#    looked up in --metadata-root (default: the map file's own dir).
+#    --seqdata-root enables on-disk R1/R2 + orphan checks when data is reachable.
 python odna.py --db oceandna_catalog.db ingest map_file.txt \
+    --metadata-root ../raw_sequence_metadata \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 
 # 3. checksums: run rclone md5sum on BOTH sides, then load + compare

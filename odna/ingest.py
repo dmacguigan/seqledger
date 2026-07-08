@@ -130,10 +130,16 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
     return project_id, findings, status
 
 
-def ingest_map_file(conn, map_file_path, seqdata_root=None):
-    """Ingest all projects listed in a two-column map file."""
+def ingest_map_file(conn, map_file_path, seqdata_root=None, metadata_root=None):
+    """Ingest all projects listed in a two-column map file.
+
+    Per-project metadata CSVs are resolved relative to metadata_root when their
+    path is not absolute and not found in the CWD. Defaults to the map file's
+    own directory.
+    """
     results = []
-    metadata_root = os.path.dirname(os.path.abspath(map_file_path))
+    if metadata_root is None:
+        metadata_root = os.path.dirname(os.path.abspath(map_file_path))
     for metadata_filename, seq_data_relpath in read_map_file(map_file_path):
         metadata_path = metadata_filename
         if not os.path.isabs(metadata_path) and not os.path.exists(metadata_path):

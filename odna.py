@@ -39,7 +39,8 @@ def cmd_init_db(args):
 def cmd_ingest(args):
     conn = odb.connect(args.db)
     odb.init_db(conn)
-    results = oingest.ingest_map_file(conn, args.map_file, seqdata_root=args.seqdata_root)
+    results = oingest.ingest_map_file(conn, args.map_file, seqdata_root=args.seqdata_root,
+                                      metadata_root=args.metadata_root)
     conn.close()
     n_fail = 0
     for project_id, findings, status in results:
@@ -111,6 +112,8 @@ def build_parser():
 
     pi = sub.add_parser("ingest", help="load CSV map files")
     pi.add_argument("map_file", help="two-column map file (metadata csv, data dir)")
+    pi.add_argument("--metadata-root",
+                    help="dir holding the per-project metadata CSVs (default: map file's dir)")
     pi.add_argument("--seqdata-root", help="optional root of raw_sequence_data for disk checks")
     pi.set_defaults(func=cmd_ingest)
 

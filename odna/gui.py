@@ -23,4 +23,7 @@ def launch(db_path, port=8501, login_host="hydra-login01.si.edu"):
         "--server.port", str(port),
         "--server.headless", "true",
     ]
-    subprocess.run(cmd, env=env)
+    try:
+        subprocess.run(cmd, env=env)
+    except KeyboardInterrupt:
+        print("\nGUI stopped.")

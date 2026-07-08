@@ -32,6 +32,10 @@ _MIGRATIONS = [
     ("projects", "seqdata_root", "TEXT"),
     ("projects", "owner_uid", "INTEGER"),
     ("projects", "owner_name", "TEXT"),
+    ("projects", "data_check_status", "TEXT"),
+    ("projects", "data_check_n_missing", "INTEGER"),
+    ("projects", "data_check_n_orphan", "INTEGER"),
+    ("projects", "data_check_date", "TEXT"),
     ("files", "owner_uid", "INTEGER"),
     ("files", "owner_name", "TEXT"),
 ]

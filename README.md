@@ -73,8 +73,12 @@ rclone md5sum /Volumes/nmnh-ocean-dna/Hydra_backup/store/raw_sequence_data > pdr
 python odna.py --db oceandna_catalog.db checksums --store store.md5 --pdrive pdrive.md5
 #   add --source ingest for new data, --project X to scope to one project
 
-# 4. re-check the whole catalog
-python odna.py --db oceandna_catalog.db validate
+# 4. re-check the whole catalog: two per-project results
+#    - data-files: reciprocal mapfile <-> disk (missing files + orphans);
+#      needs --seqdata-root to scan disk, and is persisted to `projects`.
+#    - checksum: Store vs P-drive md5 (from the `checksums` step above).
+python odna.py --db oceandna_catalog.db validate \
+    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 
 # 5. lookups
 python odna.py --db oceandna_catalog.db query summary
@@ -107,8 +111,9 @@ run that locally, then open `http://localhost:8501`. Read-only, three views (sid
 
 - **Samples** - one row per sample; the on-screen table stays lean, but the CSV
   export carries the full absolute R1/R2 paths + owner.
-- **Projects** - per-project summary stats (sample/file counts, backup verified,
-  mismatches, owner), like the CLI `query summary`.
+- **Projects** - per-project summary stats plus two check fields:
+  `data_files` (mapfile <-> disk reciprocal: OK / "N missing, M orphan") and
+  `checksum` (Store vs P-drive: verified / "N mismatch" / incomplete).
 - **Files** - one row per FASTQ: full absolute path, size, owner, backup status.
 
 Each view filters/searches and downloads CSV.
@@ -122,8 +127,11 @@ records validation runs. See `schema.sql`.
 
 Ownership + size (`owner_name` / `owner_uid` / `size_bytes` on `files`, plus
 `owner_name` / `seqdata_root` on `projects`) are captured during `ingest` when
-`--seqdata-root` is reachable; re-run ingest to refresh. `init-db` auto-migrates
-older catalogs by adding the new columns.
+`--seqdata-root` is reachable; re-run ingest to refresh. The data-files check result
+(`data_check_status` / `data_check_n_missing` / `data_check_n_orphan` /
+`data_check_date` on `projects`) is written by `validate --seqdata-root`; the checksum
+result is derived from `files.md5_match`. `init-db` auto-migrates older catalogs by
+adding the new columns.
 
 ## Open items
 

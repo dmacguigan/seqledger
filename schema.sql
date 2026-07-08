@@ -15,6 +15,11 @@ CREATE TABLE IF NOT EXISTS projects (
     owner_uid         INTEGER,          -- OS uid owning the project data dir
     owner_name        TEXT,             -- resolved username for owner_uid
     date_ingested     TEXT,             -- ISO date the project was ingested
+    -- data-files reciprocal check (mapfile <-> disk), refreshed by `validate`
+    data_check_status    TEXT,          -- 'ok' | 'issues' | 'unchecked'
+    data_check_n_missing INTEGER,       -- mapfile R1/R2 not found on disk
+    data_check_n_orphan  INTEGER,       -- on-disk fastq.gz not in any mapfile
+    data_check_date      TEXT,          -- ISO date of the last data-files check
     notes             TEXT
 );
 

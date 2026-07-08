@@ -59,12 +59,40 @@ def load_projects(db_path, mtime):
         SELECT p.project_id, p.source, p.description,
                (SELECT COUNT(*) FROM samples s WHERE s.project_id = p.project_id) AS n_samples,
                (SELECT COUNT(*) FROM files f WHERE f.project_id = p.project_id) AS n_files,
-               COALESCE(b.verified, 0) AS backup_verified,
-               COALESCE(b.n_mismatch, 0) AS n_mismatch,
-               p.owner_name, p.seq_data_relpath AS data_dir, p.date_ingested
+               COALESCE(p.data_check_status, 'unchecked') AS data_check_status,
+               p.data_check_n_missing, p.data_check_n_orphan,
+               (SELECT COUNT(*) FROM files f
+                  WHERE f.project_id = p.project_id AND f.md5_match = 0) AS n_mismatch,
+               (SELECT COUNT(*) FROM files f
+                  WHERE f.project_id = p.project_id AND f.md5_match IS NULL) AS n_uncompared,
+               p.owner_name, p.seq_data_relpath AS data_dir,
+               p.data_check_date, p.date_ingested
         FROM projects p
-        LEFT JOIN backups b ON b.project_id = p.project_id AND b.location = 'pdrive'
         ORDER BY p.project_id""")
+
+
+def data_files_label(row):
+    status = row["data_check_status"]
+    if status == "ok":
+        return "OK"
+    if status != "issues":
+        return "unchecked"
+    parts = []
+    if row["data_check_n_missing"]:
+        parts.append(f"{int(row['data_check_n_missing'])} missing")
+    if row["data_check_n_orphan"]:
+        parts.append(f"{int(row['data_check_n_orphan'])} orphan")
+    return ", ".join(parts) or "issues"
+
+
+def checksum_label(row):
+    if row["n_files"] == 0:
+        return "no files"
+    if row["n_mismatch"]:
+        return f"{int(row['n_mismatch'])} mismatch"
+    if row["n_uncompared"]:
+        return f"incomplete ({int(row['n_uncompared'])} uncompared)"
+    return "verified"
 
 
 @st.cache_data(ttl=60)
@@ -129,15 +157,28 @@ def projects_view(df):
     with st.sidebar:
         st.header("Filters")
         search = st.text_input("Search (project, description)")
+        data_only = st.checkbox("Only data-files issues")
+        cs_only = st.checkbox("Only checksum issues")
     view = df
     if search:
         s = search.lower()
         mask = (view["project_id"].str.lower().str.contains(s, na=False)
                 | view["description"].str.lower().str.contains(s, na=False))
         view = view[mask]
-    st.caption(f"{len(view)} of {len(df)} projects")
-    st.dataframe(view, width="stretch", hide_index=True)
-    _download(view, "oceandna_projects.csv")
+    if data_only:
+        view = view[view["data_check_status"] == "issues"]
+    if cs_only:
+        view = view[(view["n_mismatch"] > 0) | (view["n_uncompared"] > 0)]
+
+    show = view.copy()
+    show["data_files"] = show.apply(data_files_label, axis=1) if len(show) else []
+    show["checksum"] = show.apply(checksum_label, axis=1) if len(show) else []
+    st.caption(f"{len(view)} of {len(df)} projects "
+               "(data_files from `validate --seqdata-root`; checksum from `checksums`)")
+    cols = ["project_id", "source", "description", "n_samples", "n_files",
+            "data_files", "checksum", "owner_name", "data_dir", "date_ingested"]
+    st.dataframe(show[cols], width="stretch", hide_index=True)
+    _download(show, "oceandna_projects.csv")
 
 
 def files_view(df):

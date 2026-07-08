@@ -5,6 +5,10 @@ between metadata and files is done by EXACT basename, both directions, fixing th
 substring bug in the old validate_seq_data.py.
 """
 
+import glob
+import os
+from datetime import date
+
 from .db import METADATA_SUFFIX, header_uniqid_column
 
 FAIL = "FAIL"
@@ -102,32 +106,108 @@ def overall_status(findings):
     return "pass"
 
 
-def validate_catalog(conn):
-    """Re-check the whole catalog from stored data. Returns {project_id: [Finding]}.
+def check_data_files(conn, project_id, seq_data_relpath, seqdata_root):
+    """Reciprocal mapfile <-> disk check for one project.
 
-    Reports: files with no recorded md5, Store/P-drive md5 mismatches, and UniqIDs
-    shared across projects.
+    Returns dict: status ('ok'|'issues'|'unchecked'), n_missing, n_orphan,
+    missing (mapfile R1/R2 not on disk), orphan (disk fastq.gz not in mapfile).
+    'unchecked' when the data dir is unreachable.
     """
-    results = {}
+    db_files = {r["filename"] for r in conn.execute(
+        "SELECT filename FROM files WHERE project_id=?", (project_id,))}
+    data_dir = os.path.join(seqdata_root, seq_data_relpath)
+    if not os.path.isdir(data_dir):
+        return {"status": "unchecked", "n_missing": None, "n_orphan": None,
+                "missing": [], "orphan": []}
+    disk = {os.path.basename(p)
+            for p in glob.glob(os.path.join(data_dir, "*.fastq.gz"))}
+    missing = sorted(db_files - disk)
+    orphan = sorted(disk - db_files)
+    status = "ok" if not missing and not orphan else "issues"
+    return {"status": status, "n_missing": len(missing), "n_orphan": len(orphan),
+            "missing": missing, "orphan": orphan}
 
-    def add(project_id, level, message):
-        results.setdefault(project_id, []).append(Finding(level, message))
 
-    cur = conn.execute(
-        "SELECT project_id, filename, md5, md5_match FROM files ORDER BY project_id, filename")
-    for r in cur.fetchall():
-        if r["md5"] is None:
-            add(r["project_id"], WARN, f"{r['filename']}: no md5 recorded (not yet checksummed)")
-        elif r["md5_match"] == 0:
-            add(r["project_id"], WARN, f"{r['filename']}: Store/P-drive md5 mismatch")
+def check_checksums(conn, project_id):
+    """Store vs P-drive md5 status for one project, from stored md5_match.
 
-    cur = conn.execute(
-        """SELECT uniq_id, GROUP_CONCAT(DISTINCT project_id) AS projects, COUNT(DISTINCT project_id) AS n
+    Returns dict: status ('verified'|'mismatch'|'incomplete'|'empty'),
+    n_files, n_mismatch, n_uncompared.
+    """
+    r = conn.execute(
+        """SELECT COUNT(*) AS n,
+                  SUM(CASE WHEN md5_match=0 THEN 1 ELSE 0 END) AS n_mismatch,
+                  SUM(CASE WHEN md5_match IS NULL THEN 1 ELSE 0 END) AS n_uncompared
+           FROM files WHERE project_id=?""", (project_id,)).fetchone()
+    n = r["n"] or 0
+    n_mismatch = r["n_mismatch"] or 0
+    n_uncompared = r["n_uncompared"] or 0
+    if n == 0:
+        status = "empty"
+    elif n_mismatch > 0:
+        status = "mismatch"
+    elif n_uncompared > 0:
+        status = "incomplete"
+    else:
+        status = "verified"
+    return {"status": status, "n_files": n, "n_mismatch": n_mismatch,
+            "n_uncompared": n_uncompared}
+
+
+def validate_catalog(conn, seqdata_root=None):
+    """Run both per-project checks over the whole catalog.
+
+    Data-files reciprocal check runs (and is persisted to `projects`) only when
+    seqdata_root is given; otherwise the last stored data-check result is read
+    back. The checksum check always runs from stored md5s. UniqIDs shared across
+    projects are surfaced as extra notes.
+
+    Returns {project_id: {"data": {...}, "checksum": {...}, "notes": [Finding]}}.
+    """
+    projects = conn.execute(
+        "SELECT project_id, seq_data_relpath FROM projects ORDER BY project_id"
+    ).fetchall()
+
+    shared = {}
+    for r in conn.execute(
+        """SELECT uniq_id, GROUP_CONCAT(DISTINCT project_id) AS projects,
+                  COUNT(DISTINCT project_id) AS n
            FROM samples WHERE uniq_id IS NOT NULL AND uniq_id != ''
-           GROUP BY uniq_id HAVING n > 1""")
-    for r in cur.fetchall():
+           GROUP BY uniq_id HAVING n > 1"""):
         for project_id in r["projects"].split(","):
-            add(project_id, WARN,
-                f"UniqID '{r['uniq_id']}' shared across projects: {r['projects']}")
+            shared.setdefault(project_id, []).append((r["uniq_id"], r["projects"]))
 
+    today = date.today().isoformat()
+    results = {}
+    for p in projects:
+        project_id = p["project_id"]
+
+        if seqdata_root:
+            data = check_data_files(conn, project_id, p["seq_data_relpath"], seqdata_root)
+            if data["status"] != "unchecked":
+                conn.execute(
+                    """UPDATE projects SET data_check_status=?, data_check_n_missing=?,
+                         data_check_n_orphan=?, data_check_date=? WHERE project_id=?""",
+                    (data["status"], data["n_missing"], data["n_orphan"], today, project_id))
+        else:
+            row = conn.execute(
+                """SELECT data_check_status, data_check_n_missing, data_check_n_orphan
+                   FROM projects WHERE project_id=?""", (project_id,)).fetchone()
+            data = {"status": row["data_check_status"] or "unchecked",
+                    "n_missing": row["data_check_n_missing"],
+                    "n_orphan": row["data_check_n_orphan"], "missing": [], "orphan": []}
+
+        checksum = check_checksums(conn, project_id)
+
+        notes = []
+        for fn in data["missing"]:
+            notes.append(Finding(WARN, f"mapfile file '{fn}' not found on disk"))
+        for fn in data["orphan"]:
+            notes.append(Finding(WARN, f"disk file '{fn}' not referenced in mapfile"))
+        for uniq_id, projs in shared.get(project_id, []):
+            notes.append(Finding(WARN, f"UniqID '{uniq_id}' shared across projects: {projs}"))
+
+        results[project_id] = {"data": data, "checksum": checksum, "notes": notes}
+
+    conn.commit()
     return results

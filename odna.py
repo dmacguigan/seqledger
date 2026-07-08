@@ -65,16 +65,44 @@ def cmd_checksums(args):
         print(f"    WARN: {w}")
 
 
+def _data_label(data):
+    if data["status"] == "ok":
+        return "OK"
+    if data["status"] == "unchecked":
+        return "unchecked"
+    parts = []
+    if data.get("n_missing"):
+        parts.append(f"{data['n_missing']} missing")
+    if data.get("n_orphan"):
+        parts.append(f"{data['n_orphan']} orphan")
+    return ", ".join(parts) or "issues"
+
+
+def _checksum_label(cs):
+    if cs["status"] == "verified":
+        return "verified"
+    if cs["status"] == "mismatch":
+        return f"{cs['n_mismatch']} mismatch"
+    if cs["status"] == "incomplete":
+        return f"incomplete ({cs['n_uncompared']} uncompared)"
+    return "no files"
+
+
 def cmd_validate(args):
     conn = odb.connect(args.db)
-    results = ovalidate.validate_catalog(conn)
+    results = ovalidate.validate_catalog(conn, seqdata_root=args.seqdata_root)
     conn.close()
     if not results:
-        print("no problems found")
+        print("catalog is empty")
         return
+    if not args.seqdata_root:
+        print("(data-files check skipped: pass --seqdata-root to scan disk)\n")
     for project_id in sorted(results):
-        print(project_id)
-        for f in results[project_id]:
+        r = results[project_id]
+        print(f"{project_id}"
+              f"\n    data-files: {_data_label(r['data'])}"
+              f"\n    checksum:   {_checksum_label(r['checksum'])}")
+        for f in r["notes"]:
             print(f"    {f.level}: {f.message}")
 
 
@@ -94,8 +122,8 @@ def cmd_query(args):
                     ["project_id", "filename", "store_md5", "pdrive_md5"])
     elif args.what == "summary":
         _print_rows(oquery.project_summary(conn),
-                    ["project_id", "source", "n_samples", "n_files", "verified",
-                     "n_mismatch", "owner_name"])
+                    ["project_id", "source", "n_samples", "n_files",
+                     "data_check_status", "n_mismatch", "n_uncompared", "owner_name"])
     conn.close()
 
 
@@ -125,7 +153,10 @@ def build_parser():
     pc.add_argument("--source", default="backfill", choices=["ingest", "backfill"])
     pc.set_defaults(func=cmd_checksums)
 
-    sub.add_parser("validate", help="re-check the catalog").set_defaults(func=cmd_validate)
+    pv = sub.add_parser("validate", help="re-check the catalog (data-files + checksum)")
+    pv.add_argument("--seqdata-root",
+                    help="root of raw_sequence_data; enables the on-disk data-files check")
+    pv.set_defaults(func=cmd_validate)
 
     pq = sub.add_parser("query", help="lookups")
     pq.add_argument("what", choices=["uniq-id", "search", "unbacked", "mismatches", "summary"])

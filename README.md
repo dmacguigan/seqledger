@@ -48,7 +48,7 @@ kept for pip users).
 ```
 schema.sql            SQLite DDL (source of truth for tables)
 odna.py               CLI entry point
-odna/                 package: db, ingest, checksums, validate, query, gui
+odna/                 package: db, ingest, checksums, validate, taxonomy, query, gui
 app/streamlit_app.py  read-only browse GUI
 tests/                pytest suite + fixture builders
 ```
@@ -80,12 +80,22 @@ python odna.py --db oceandna_catalog.db checksums --store store.md5 --pdrive pdr
 python odna.py --db oceandna_catalog.db validate \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 
-# 5. lookups
+# 5. taxonomy: resolve free-text Taxon -> NCBI TaxID + lineage
+#    Downloads a pinned NCBI taxdump into <db dir>/.taxonomy (once), indexes it,
+#    resolves every distinct sample Taxon (exact, then genus-anchored fuzzy),
+#    writes the results into the `taxa` table + a review CSV.
+python odna.py --db oceandna_catalog.db taxonomy resolve
+#    edit confirmed_taxid in taxonomy_review.csv for any wrong fuzzy/unresolved
+#    rows, then fold the overrides back in:
+python odna.py --db oceandna_catalog.db taxonomy apply --review taxonomy_review.csv
+
+# 6. lookups
 python odna.py --db oceandna_catalog.db query summary
 python odna.py --db oceandna_catalog.db query uniq-id "USNM 477715"
 python odna.py --db oceandna_catalog.db query search Urophycis
 python odna.py --db oceandna_catalog.db query unbacked
 python odna.py --db oceandna_catalog.db query mismatches
+python odna.py --db oceandna_catalog.db query taxa      # fuzzy/unresolved taxa
 ```
 
 ### Backfill of existing data
@@ -117,7 +127,11 @@ run that locally, then open `http://localhost:8501`. Read-only, three views (sid
   project row to drill into its data_files issues (each missing / orphan file,
   with sample info where known).
 - **Files** - one row per FASTQ: full absolute path, size, owner, backup status.
+- **Taxonomy** - interactive Plotly sunburst of the catalog's taxonomic breadth
+  (filter by project, pick the deepest rank, toggle the `unknown` bucket) plus a
+  per-rank sample-count bar chart. Populated by `taxonomy resolve`.
 
+The Samples view also links each row to its NCBI datasets taxonomy browser page.
 Each view filters/searches and downloads CSV.
 
 ## Schema
@@ -125,7 +139,14 @@ Each view filters/searches and downloads CSV.
 `projects` (1 per sequencing project) -> `samples` (1 per sample, extra map-file
 columns kept as JSON) -> `files` (R1/R2, with `store_md5` / `pdrive_md5` /
 `md5_match`). `backups` summarizes per-project verification; `validation_log`
-records validation runs. See `schema.sql`.
+records validation runs. `taxa` holds the NCBI resolution per distinct raw Taxon
+string (taxid, ranked lineage columns `tax_domain`..`tax_species`, `match_type`,
+`confirmed`), joined to `samples.taxon`. See `schema.sql`.
+
+Taxonomy resolution is pure-Python (stdlib): the NCBI taxdump is parsed once into
+`<db dir>/.taxonomy/taxdump.sqlite` (git-ignored), then exact `name -> taxid` with
+a genus-anchored fuzzy fallback. Mirrors RiboPilot's `R/taxonomy.R` approach
+without the `taxonkit` binary.
 
 Ownership + size (`owner_name` / `owner_uid` / `size_bytes` on `files`, plus
 `owner_name` / `seqdata_root` on `projects`) are captured during `ingest` when

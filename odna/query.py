@@ -17,6 +17,14 @@ def find_sample(conn, term):
         (like, like, like)).fetchall()
 
 
+def unresolved_taxa(conn):
+    """Taxa that did not resolve to an exact/confirmed NCBI match."""
+    return conn.execute(
+        """SELECT taxon, match_type, taxid, sci_name, rank FROM taxa
+           WHERE match_type NOT IN ('exact', 'confirmed')
+           ORDER BY match_type, taxon""").fetchall()
+
+
 def unbacked_projects(conn):
     """Projects with no verified pdrive backup."""
     return conn.execute(

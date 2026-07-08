@@ -56,6 +56,29 @@ CREATE TABLE IF NOT EXISTS files (
 );
 CREATE INDEX IF NOT EXISTS idx_files_sample ON files(sample_pk);
 
+-- Controlled taxonomy per distinct raw Taxon string (shared across samples).
+-- Populated by `odna.py taxonomy resolve` against a local NCBI taxdump.
+CREATE TABLE IF NOT EXISTS taxa (
+    taxon        TEXT PRIMARY KEY,   -- raw samples.taxon string
+    clean        TEXT,               -- normalized 'Genus species'
+    match_type   TEXT,               -- exact | fuzzy_species | fuzzy_genus | unresolved | confirmed
+    taxid        INTEGER,
+    sci_name     TEXT,               -- NCBI scientific name of the matched node
+    rank         TEXT,               -- finest resolved rank
+    tax_domain   TEXT,
+    tax_kingdom  TEXT,
+    tax_phylum   TEXT,
+    tax_class    TEXT,
+    tax_order    TEXT,
+    tax_family   TEXT,
+    tax_genus    TEXT,
+    tax_species  TEXT,
+    lineage      TEXT,               -- '; '-joined ranked lineage, for display
+    alternatives TEXT,               -- top fuzzy candidates
+    confirmed    INTEGER DEFAULT 0,  -- 1 once a user confirms/overrides via apply
+    date_resolved TEXT
+);
+
 -- One row per project backup location, summarizing verification state.
 CREATE TABLE IF NOT EXISTS backups (
     backup_pk    INTEGER PRIMARY KEY,

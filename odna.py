@@ -6,11 +6,13 @@ Subcommands:
   ingest      load CSV map files (metadata only) into the catalog
   checksums   load + compare `rclone md5sum` output from Store and P-drive
   validate    re-check the catalog and print findings
-  query       lookups (uniq-id, search, unbacked, mismatches, summary)
+  taxonomy    resolve sample taxa to NCBI TaxIDs (resolve / apply)
+  query       lookups (uniq-id, search, unbacked, mismatches, summary, taxa)
   gui         launch the Streamlit browse GUI (prints SSH tunnel command)
 """
 
 import argparse
+import os
 import sys
 
 from odna import db as odb
@@ -120,10 +122,42 @@ def cmd_query(args):
     elif args.what == "mismatches":
         _print_rows(oquery.mismatched_files(conn),
                     ["project_id", "filename", "store_md5", "pdrive_md5"])
+    elif args.what == "taxa":
+        _print_rows(oquery.unresolved_taxa(conn),
+                    ["taxon", "match_type", "taxid", "sci_name", "rank"])
     elif args.what == "summary":
         _print_rows(oquery.project_summary(conn),
                     ["project_id", "source", "n_samples", "n_files",
                      "data_check_status", "n_mismatch", "n_uncompared", "owner_name"])
+    conn.close()
+
+
+def _default_taxdir(db_path):
+    return os.path.join(os.path.dirname(os.path.abspath(db_path)) or ".", ".taxonomy")
+
+
+def cmd_taxonomy(args):
+    from odna import taxonomy as otax
+    conn = odb.connect(args.db)
+    odb.init_db(conn)
+    taxdir = args.taxdir or _default_taxdir(args.db)
+    if args.action == "resolve":
+        if args.force_download:
+            otax.ensure_taxdump(taxdir, force=True)
+            otax.build_index(taxdir, force=True)
+        elif args.rebuild_index:
+            otax.build_index(taxdir, force=True)
+        results = otax.resolve_catalog(conn, taxdir, redo=args.redo)
+        review = os.path.join(os.path.dirname(os.path.abspath(args.db)) or ".",
+                              "taxonomy_review.csv")
+        otax.write_review_csv(results, review)
+        n_flag = sum(1 for d in results if d["match_type"] != "exact")
+        print(f"resolved {len(results)} taxa ({n_flag} fuzzy/unresolved)")
+        print(f"review + edit confirmed_taxid in: {review}")
+        print(f"then: odna.py --db {args.db} taxonomy apply --review {review}")
+    elif args.action == "apply":
+        n = otax.apply_review(conn, taxdir, args.review)
+        print(f"applied {n} confirmed taxid(s)")
     conn.close()
 
 
@@ -159,9 +193,23 @@ def build_parser():
     pv.set_defaults(func=cmd_validate)
 
     pq = sub.add_parser("query", help="lookups")
-    pq.add_argument("what", choices=["uniq-id", "search", "unbacked", "mismatches", "summary"])
+    pq.add_argument("what", choices=["uniq-id", "search", "unbacked", "mismatches",
+                                     "summary", "taxa"])
     pq.add_argument("term", nargs="?", default="")
     pq.set_defaults(func=cmd_query)
+
+    pt = sub.add_parser("taxonomy", help="resolve sample taxa to NCBI TaxIDs")
+    tsub = pt.add_subparsers(dest="action", required=True)
+    tr = tsub.add_parser("resolve",
+                         help="download/index taxdump, resolve taxa, write review CSV")
+    tr.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
+    tr.add_argument("--force-download", action="store_true", help="re-download the taxdump")
+    tr.add_argument("--rebuild-index", action="store_true", help="rebuild the taxdump index")
+    tr.add_argument("--redo", action="store_true", help="re-resolve confirmed taxa too")
+    ta = tsub.add_parser("apply", help="apply confirmed_taxid overrides from a review CSV")
+    ta.add_argument("--review", required=True, help="edited taxonomy_review.csv")
+    ta.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
+    pt.set_defaults(func=cmd_taxonomy)
 
     pg = sub.add_parser("gui", help="launch Streamlit browse GUI")
     pg.add_argument("--port", type=int, default=8501)

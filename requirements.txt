@@ -1,0 +1,5 @@
+# Core tooling (ingest, checksums, validate, query) uses only the Python stdlib.
+# These are needed only for the GUI and the test suite.
+streamlit>=1.30
+pandas>=2.0
+pytest>=7.0

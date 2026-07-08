@@ -154,6 +154,15 @@ def check_checksums(conn, project_id):
             "n_uncompared": n_uncompared}
 
 
+def _persist_data_check_issues(conn, project_id, missing, orphan):
+    """Rewrite the project's data-files issue rows (missing + orphan filenames)."""
+    conn.execute("DELETE FROM data_check_issues WHERE project_id=?", (project_id,))
+    conn.executemany(
+        "INSERT INTO data_check_issues(project_id, kind, filename) VALUES (?,?,?)",
+        [(project_id, "missing", fn) for fn in missing]
+        + [(project_id, "orphan", fn) for fn in orphan])
+
+
 def validate_catalog(conn, seqdata_root=None):
     """Run both per-project checks over the whole catalog.
 
@@ -189,6 +198,7 @@ def validate_catalog(conn, seqdata_root=None):
                     """UPDATE projects SET data_check_status=?, data_check_n_missing=?,
                          data_check_n_orphan=?, data_check_date=? WHERE project_id=?""",
                     (data["status"], data["n_missing"], data["n_orphan"], today, project_id))
+                _persist_data_check_issues(conn, project_id, data["missing"], data["orphan"])
         else:
             row = conn.execute(
                 """SELECT data_check_status, data_check_n_missing, data_check_n_orphan

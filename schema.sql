@@ -69,6 +69,16 @@ CREATE TABLE IF NOT EXISTS backups (
     UNIQUE (project_id, location)
 );
 
+-- Per-file data-files issues from the last `validate --seqdata-root` run.
+-- Rewritten per project each run; feeds the GUI drill-down.
+CREATE TABLE IF NOT EXISTS data_check_issues (
+    issue_pk   INTEGER PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL,          -- 'missing' (in mapfile, not on disk) | 'orphan' (on disk, not in mapfile)
+    filename   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_data_check_issues_project ON data_check_issues(project_id);
+
 -- Log of validation runs.
 CREATE TABLE IF NOT EXISTS validation_log (
     run_pk         INTEGER PRIMARY KEY,

@@ -113,7 +113,9 @@ run that locally, then open `http://localhost:8501`. Read-only, three views (sid
   export carries the full absolute R1/R2 paths + owner.
 - **Projects** - per-project summary stats plus two check fields:
   `data_files` (mapfile <-> disk reciprocal: OK / "N missing, M orphan") and
-  `checksum` (Store vs P-drive: verified / "N mismatch" / incomplete).
+  `checksum` (Store vs P-drive: verified / "N mismatch" / incomplete). Select a
+  project row to drill into its data_files issues (each missing / orphan file,
+  with sample info where known).
 - **Files** - one row per FASTQ: full absolute path, size, owner, backup status.
 
 Each view filters/searches and downloads CSV.
@@ -129,9 +131,10 @@ Ownership + size (`owner_name` / `owner_uid` / `size_bytes` on `files`, plus
 `owner_name` / `seqdata_root` on `projects`) are captured during `ingest` when
 `--seqdata-root` is reachable; re-run ingest to refresh. The data-files check result
 (`data_check_status` / `data_check_n_missing` / `data_check_n_orphan` /
-`data_check_date` on `projects`) is written by `validate --seqdata-root`; the checksum
-result is derived from `files.md5_match`. `init-db` auto-migrates older catalogs by
-adding the new columns.
+`data_check_date` on `projects`) is written by `validate --seqdata-root`; the same run
+rewrites the per-file `data_check_issues` table (missing / orphan filenames) that backs
+the GUI drill-down. The checksum result is derived from `files.md5_match`. `init-db`
+auto-migrates older catalogs by adding the new columns.
 
 ## Open items
 

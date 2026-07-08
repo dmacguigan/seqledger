@@ -71,6 +71,17 @@ def load_projects(db_path, mtime):
         ORDER BY p.project_id""")
 
 
+@st.cache_data(ttl=60)
+def load_data_issues(db_path, mtime):
+    return _sql(db_path, """
+        SELECT i.project_id, i.kind, i.filename,
+               s.sample_id, f.role, s.taxon, s.uniq_id
+        FROM data_check_issues i
+        LEFT JOIN files f ON f.project_id = i.project_id AND f.filename = i.filename
+        LEFT JOIN samples s ON s.sample_pk = f.sample_pk
+        ORDER BY i.project_id, i.kind, i.filename""")
+
+
 def data_files_label(row):
     status = row["data_check_status"]
     if status == "ok":
@@ -153,7 +164,7 @@ def samples_view(df):
     _download(view, "oceandna_samples.csv")
 
 
-def projects_view(df):
+def projects_view(df, issues):
     with st.sidebar:
         st.header("Filters")
         search = st.text_input("Search (project, description)")
@@ -173,12 +184,28 @@ def projects_view(df):
     show = view.copy()
     show["data_files"] = show.apply(data_files_label, axis=1) if len(show) else []
     show["checksum"] = show.apply(checksum_label, axis=1) if len(show) else []
-    st.caption(f"{len(view)} of {len(df)} projects "
-               "(data_files from `validate --seqdata-root`; checksum from `checksums`)")
+    st.caption(f"{len(view)} of {len(df)} projects. Select a row to list its "
+               "data_files issues below (missing / orphan files).")
     cols = ["project_id", "source", "description", "n_samples", "n_files",
             "data_files", "checksum", "owner_name", "data_dir", "date_ingested"]
-    st.dataframe(show[cols], width="stretch", hide_index=True)
+    event = st.dataframe(show[cols], width="stretch", hide_index=True,
+                         on_select="rerun", selection_mode="single-row",
+                         key="projects_table")
     _download(show, "oceandna_projects.csv")
+
+    sel = event.selection.rows if event and event.selection else []
+    if sel:
+        pid = show.iloc[sel[0]]["project_id"]
+        sub = issues[issues["project_id"] == pid]
+        st.subheader(f"Data-files issues: {pid}")
+        if len(sub):
+            st.dataframe(
+                sub[["kind", "filename", "sample_id", "role", "taxon", "uniq_id"]],
+                width="stretch", hide_index=True)
+            _download(sub, f"{pid}_data_issues.csv")
+        else:
+            st.info("No recorded data-files issues. "
+                    "Run `validate --seqdata-root` to refresh.")
 
 
 def files_view(df):
@@ -221,7 +248,8 @@ def main():
     if view_name == "Samples":
         samples_view(load_samples(DB_PATH, mtime))
     elif view_name == "Projects":
-        projects_view(load_projects(DB_PATH, mtime))
+        projects_view(load_projects(DB_PATH, mtime),
+                      load_data_issues(DB_PATH, mtime))
     else:
         files_view(load_files(DB_PATH, mtime))
 

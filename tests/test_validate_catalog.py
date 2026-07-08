@@ -50,6 +50,28 @@ def test_data_check_orphan_file(tmp_path):
     assert res["data"]["n_orphan"] == 1 and "extra.fastq.gz" in res["data"]["orphan"]
 
 
+def test_data_check_issues_persisted(tmp_path):
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    os.remove(os.path.join(root, "genohub-1_X", "s1_2.fastq.gz"))
+    with gzip.open(os.path.join(root, "genohub-1_X", "extra.fastq.gz"), "wb") as f:
+        f.write(b"x")
+    oval.validate_catalog(conn, seqdata_root=root)
+    got = {(r["kind"], r["filename"]) for r in conn.execute(
+        "SELECT kind, filename FROM data_check_issues WHERE project_id='genohub-1_X'")}
+    assert got == {("missing", "s1_2.fastq.gz"), ("orphan", "extra.fastq.gz")}
+
+    # re-run after fixing -> issue rows cleared
+    with gzip.open(os.path.join(root, "genohub-1_X", "s1_2.fastq.gz"), "wb") as f:
+        f.write(b"x")
+    os.remove(os.path.join(root, "genohub-1_X", "extra.fastq.gz"))
+    oval.validate_catalog(conn, seqdata_root=root)
+    n = conn.execute(
+        "SELECT COUNT(*) AS n FROM data_check_issues WHERE project_id='genohub-1_X'"
+    ).fetchone()["n"]
+    assert n == 0
+
+
 def test_checksum_status_transitions(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
     conn, root = _setup(tmp_path, rows)

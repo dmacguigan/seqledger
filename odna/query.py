@@ -37,10 +37,12 @@ def mismatched_files(conn):
 
 def project_summary(conn):
     return conn.execute(
-        """SELECT p.project_id, p.source,
+        """SELECT p.project_id, p.source, p.description,
                   (SELECT COUNT(*) FROM samples s WHERE s.project_id = p.project_id) AS n_samples,
                   (SELECT COUNT(*) FROM files f WHERE f.project_id = p.project_id) AS n_files,
-                  COALESCE(b.verified, 0) AS verified
+                  COALESCE(b.verified, 0) AS verified,
+                  COALESCE(b.n_mismatch, 0) AS n_mismatch,
+                  p.owner_name, p.seq_data_relpath, p.seqdata_root, p.date_ingested
            FROM projects p
            LEFT JOIN backups b ON b.project_id = p.project_id AND b.location = 'pdrive'
            ORDER BY p.project_id""").fetchall()

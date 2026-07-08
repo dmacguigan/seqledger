@@ -103,8 +103,15 @@ python odna.py --db /scratch/nmnh_ocean_dna/oceandna_catalog.db gui --port 8501
 requirements.txt`.)
 
 It prints the exact `ssh -N -L 8501:NODE:8501 you@hydra-login01.si.edu` command;
-run that locally, then open `http://localhost:8501`. Read-only: filter by project /
-backup status, search by sample / taxon / UniqID, download CSV.
+run that locally, then open `http://localhost:8501`. Read-only, three views (sidebar):
+
+- **Samples** - one row per sample; the on-screen table stays lean, but the CSV
+  export carries the full absolute R1/R2 paths + owner.
+- **Projects** - per-project summary stats (sample/file counts, backup verified,
+  mismatches, owner), like the CLI `query summary`.
+- **Files** - one row per FASTQ: full absolute path, size, owner, backup status.
+
+Each view filters/searches and downloads CSV.
 
 ## Schema
 
@@ -112,6 +119,11 @@ backup status, search by sample / taxon / UniqID, download CSV.
 columns kept as JSON) -> `files` (R1/R2, with `store_md5` / `pdrive_md5` /
 `md5_match`). `backups` summarizes per-project verification; `validation_log`
 records validation runs. See `schema.sql`.
+
+Ownership + size (`owner_name` / `owner_uid` / `size_bytes` on `files`, plus
+`owner_name` / `seqdata_root` on `projects`) are captured during `ingest` when
+`--seqdata-root` is reachable; re-run ingest to refresh. `init-db` auto-migrates
+older catalogs by adding the new columns.
 
 ## Open items
 

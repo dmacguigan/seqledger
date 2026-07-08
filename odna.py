@@ -94,7 +94,8 @@ def cmd_query(args):
                     ["project_id", "filename", "store_md5", "pdrive_md5"])
     elif args.what == "summary":
         _print_rows(oquery.project_summary(conn),
-                    ["project_id", "source", "n_samples", "n_files", "verified"])
+                    ["project_id", "source", "n_samples", "n_files", "verified",
+                     "n_mismatch", "owner_name"])
     conn.close()
 
 

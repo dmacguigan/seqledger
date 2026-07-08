@@ -27,10 +27,29 @@ def connect(db_path):
     return conn
 
 
+# Columns added after the initial schema. Applied to pre-existing DBs on init.
+_MIGRATIONS = [
+    ("projects", "seqdata_root", "TEXT"),
+    ("projects", "owner_uid", "INTEGER"),
+    ("projects", "owner_name", "TEXT"),
+    ("files", "owner_uid", "INTEGER"),
+    ("files", "owner_name", "TEXT"),
+]
+
+
+def _migrate(conn):
+    """Add any columns missing from an older DB (idempotent)."""
+    for table, column, decl in _MIGRATIONS:
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def init_db(conn, schema_path=SCHEMA_PATH):
-    """Create tables from schema.sql (idempotent)."""
+    """Create tables from schema.sql, then apply migrations (idempotent)."""
     with open(schema_path) as f:
         conn.executescript(f.read())
+    _migrate(conn)
     conn.commit()
 
 

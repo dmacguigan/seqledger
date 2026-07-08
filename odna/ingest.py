@@ -7,8 +7,36 @@ import json
 import os
 from datetime import date
 
+try:
+    import pwd
+except ImportError:  # non-Unix; ownership capture unavailable
+    pwd = None
+
 from .db import header_uniqid_column, parse_project_id
 from .validate import validate_metadata, overall_status
+
+
+def _owner_name(uid, cache):
+    """Resolve a uid to a username, cached. Falls back to the numeric uid."""
+    if uid in cache:
+        return cache[uid]
+    name = str(uid)
+    if pwd is not None:
+        try:
+            name = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            pass
+    cache[uid] = name
+    return name
+
+
+def _stat_owner(path, cache):
+    """Return (owner_uid, owner_name, size_bytes) for a path, or (None, None, None)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None, None, None
+    return st.st_uid, _owner_name(st.st_uid, cache), st.st_size
 
 
 def read_map_file(map_file_path):
@@ -64,19 +92,20 @@ def _known_uniq_ids(conn, exclude_project):
 
 
 def _upsert_project(conn, project_id, source, number, description, metadata_filename,
-                    seq_data_relpath):
+                    seq_data_relpath, seqdata_root=None, owner_uid=None, owner_name=None):
     conn.execute(
         """INSERT INTO projects
              (project_id, source, project_number, description, metadata_file,
-              seq_data_relpath, date_ingested)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+              seq_data_relpath, seqdata_root, owner_uid, owner_name, date_ingested)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id) DO UPDATE SET
              source=excluded.source, project_number=excluded.project_number,
              description=excluded.description, metadata_file=excluded.metadata_file,
              seq_data_relpath=excluded.seq_data_relpath,
-             date_ingested=excluded.date_ingested""",
+             seqdata_root=excluded.seqdata_root, owner_uid=excluded.owner_uid,
+             owner_name=excluded.owner_name, date_ingested=excluded.date_ingested""",
         (project_id, source, number, description, metadata_filename,
-         seq_data_relpath, date.today().isoformat()))
+         seq_data_relpath, seqdata_root, owner_uid, owner_name, date.today().isoformat()))
 
 
 def _upsert_sample(conn, project_id, sample_id, taxon, uniq_id, extra_json):
@@ -92,14 +121,22 @@ def _upsert_sample(conn, project_id, sample_id, taxon, uniq_id, extra_json):
     return cur.fetchone()["sample_pk"]
 
 
-def _upsert_file(conn, project_id, sample_pk, role, filename, rel_path):
-    # Do not clobber md5 columns on re-ingest.
+def _upsert_file(conn, project_id, sample_pk, role, filename, rel_path,
+                 size_bytes=None, owner_uid=None, owner_name=None):
+    # Do not clobber md5 columns on re-ingest. Refresh size/owner only when known
+    # (COALESCE keeps prior values if the file was unreachable this run).
     conn.execute(
-        """INSERT INTO files (project_id, sample_pk, role, filename, rel_path)
-           VALUES (?, ?, ?, ?, ?)
+        """INSERT INTO files
+             (project_id, sample_pk, role, filename, rel_path,
+              size_bytes, owner_uid, owner_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, filename) DO UPDATE SET
-             sample_pk=excluded.sample_pk, role=excluded.role, rel_path=excluded.rel_path""",
-        (project_id, sample_pk, role, filename, rel_path))
+             sample_pk=excluded.sample_pk, role=excluded.role, rel_path=excluded.rel_path,
+             size_bytes=COALESCE(excluded.size_bytes, files.size_bytes),
+             owner_uid=COALESCE(excluded.owner_uid, files.owner_uid),
+             owner_name=COALESCE(excluded.owner_name, files.owner_name)""",
+        (project_id, sample_pk, role, filename, rel_path,
+         size_bytes, owner_uid, owner_name))
 
 
 def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
@@ -110,10 +147,18 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
     header, rows = _read_csv(metadata_path)
 
     disk_filenames = None
+    proj_owner_uid = proj_owner_name = None
+    disk_stats = {}  # filename -> (size_bytes, owner_uid, owner_name)
+    uid_cache = {}
     if seqdata_root:
         data_dir = os.path.join(seqdata_root, seq_data_relpath)
-        disk_filenames = {os.path.basename(p)
-                          for p in glob.glob(os.path.join(data_dir, "*.fastq.gz"))}
+        proj_owner_uid, proj_owner_name, _ = _stat_owner(data_dir, uid_cache)
+        disk_filenames = set()
+        for p in glob.glob(os.path.join(data_dir, "*.fastq.gz")):
+            fn = os.path.basename(p)
+            disk_filenames.add(fn)
+            uid, name, size = _stat_owner(p, uid_cache)
+            disk_stats[fn] = (size, uid, name)
 
     findings, has_fail = validate_metadata(
         metadata_filename, header, rows, disk_filenames,
@@ -124,8 +169,10 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
         return project_id, findings, status
 
     uniqid_col = header_uniqid_column(header)
+    abs_root = os.path.abspath(seqdata_root) if seqdata_root else None
     _upsert_project(conn, project_id, source, number, description,
-                    metadata_filename, seq_data_relpath)
+                    metadata_filename, seq_data_relpath, seqdata_root=abs_root,
+                    owner_uid=proj_owner_uid, owner_name=proj_owner_name)
 
     core = set(["ID", "R1", "R2", "Taxon", uniqid_col])
     for row in rows:
@@ -139,7 +186,9 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
         for role in ("R1", "R2"):
             filename = row[role].strip()
             rel_path = os.path.join(seq_data_relpath, filename)
-            _upsert_file(conn, project_id, sample_pk, role, filename, rel_path)
+            size, uid, name = disk_stats.get(filename, (None, None, None))
+            _upsert_file(conn, project_id, sample_pk, role, filename, rel_path,
+                         size_bytes=size, owner_uid=uid, owner_name=name)
 
     conn.commit()
     return project_id, findings, status

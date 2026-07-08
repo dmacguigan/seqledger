@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS projects (
     description       TEXT,              -- free-text project description
     metadata_file     TEXT,             -- map file name, e.g. ..._mapfile.csv
     seq_data_relpath  TEXT,             -- data dir path relative to raw_sequence_data root
+    seqdata_root      TEXT,             -- absolute raw_sequence_data root at ingest time
+    owner_uid         INTEGER,          -- OS uid owning the project data dir
+    owner_name        TEXT,             -- resolved username for owner_uid
     date_ingested     TEXT,             -- ISO date the project was ingested
     notes             TEXT
 );
@@ -36,6 +39,8 @@ CREATE TABLE IF NOT EXISTS files (
     filename     TEXT NOT NULL,          -- basename, e.g. sample_1.fastq.gz
     rel_path     TEXT,                   -- path relative to raw_sequence_data root
     size_bytes   INTEGER,
+    owner_uid    INTEGER,                -- OS uid owning the file
+    owner_name   TEXT,                   -- resolved username for owner_uid
     md5          TEXT,                   -- authoritative md5 (store side once verified)
     md5_source   TEXT,                   -- 'ingest' | 'backfill'
     store_md5    TEXT,                   -- md5 from Store side

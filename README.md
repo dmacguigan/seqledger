@@ -39,8 +39,9 @@ Gaps this addresses:
   MitoPilot pattern.
 
 Core tooling (ingest / checksums / validate / query) uses only the Python stdlib,
-so it runs on a Hydra login node or a Mac with no `pip install`. Only the GUI needs
-`streamlit` + `pandas` (`requirements.txt`).
+so it runs on a Hydra login node or a Mac with no install step. Only the GUI needs
+`streamlit` + `pandas`, provided as a conda env (`environment.yml`; `requirements.txt`
+kept for pip users).
 
 ## Layout
 
@@ -93,9 +94,13 @@ Same `checksums` command with `--source backfill` (the default). Run it per proj
 On Hydra (login node or `srun --pty` node), pointing at a DB copy on Scratch:
 
 ```bash
-pip install -r requirements.txt      # once, in a venv
+conda env create -f environment.yml     # once; creates the `odna` env
+conda activate odna                      # or: mamba env create -f environment.yml
 python odna.py --db /scratch/nmnh_ocean_dna/oceandna_catalog.db gui --port 8501
 ```
+
+(Existing env? `conda env update -f environment.yml`. Pip users: `pip install -r
+requirements.txt`.)
 
 It prints the exact `ssh -N -L 8501:NODE:8501 you@hydra-login01.si.edu` command;
 run that locally, then open `http://localhost:8501`. Read-only: filter by project /

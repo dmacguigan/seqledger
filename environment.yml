@@ -1,0 +1,10 @@
+# Conda env for the GUI + test suite. Core tooling (ingest, checksums,
+# validate, query) needs none of this; it runs on the Python stdlib alone.
+name: odna
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - streamlit>=1.30
+  - pandas>=2.0
+  - pytest>=7.0

@@ -2,6 +2,7 @@
 
 import csv
 import glob
+import io
 import json
 import os
 from datetime import date
@@ -29,15 +30,29 @@ def read_map_file(map_file_path):
     return entries
 
 
+def _read_text(path):
+    """Read a metadata CSV, tolerating Excel exports that aren't UTF-8.
+
+    Tries UTF-8 (with BOM), then falls back to cp1252 (Windows Excel default).
+    """
+    with open(path, "rb") as f:
+        data = f.read()
+    for enc in ("utf-8-sig", "cp1252"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 def _read_csv(metadata_path):
-    with open(metadata_path, newline="") as f:
-        reader = csv.reader(f)
-        header = next(reader, [])
-        rows = []
-        for raw in reader:
-            if not any(cell.strip() for cell in raw):
-                continue
-            rows.append({header[i]: raw[i] for i in range(min(len(header), len(raw)))})
+    reader = csv.reader(io.StringIO(_read_text(metadata_path)))
+    header = next(reader, [])
+    rows = []
+    for raw in reader:
+        if not any(cell.strip() for cell in raw):
+            continue
+        rows.append({header[i]: raw[i] for i in range(min(len(header), len(raw)))})
     return header, rows
 
 

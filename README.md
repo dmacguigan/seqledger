@@ -35,8 +35,7 @@ Gaps this addresses:
   then compared. Piggybacks on the backup the data manager already runs; no hashing
   burden on users. The same step backfills existing already-backed-up data (a
   one-time catch-up that doubles as the first real backup audit).
-- **Frontend:** read-only Streamlit GUI served on Hydra over an SSH tunnel, the
-  MitoPilot pattern.
+- **Frontend:** read-only Streamlit GUI served on Hydra over an SSH tunnel
 
 Core tooling (ingest / checksums / validate / query) uses only the Python stdlib,
 so it runs on a Hydra login node or a Mac with no install step. Only the GUI needs
@@ -103,7 +102,7 @@ python odna.py --db oceandna_catalog.db query taxa      # fuzzy/unresolved taxa
 Same `checksums` command with `--source backfill` (the default). Run it per project
 (`--project ...`) in the background so you don't monopolize Store read bandwidth.
 
-### GUI (over SSH tunnel, MitoPilot-style)
+### GUI (over SSH tunnel)
 
 On Hydra (login node or `srun --pty` node), pointing at a DB copy on Scratch:
 

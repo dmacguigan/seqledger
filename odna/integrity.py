@@ -1,9 +1,11 @@
-"""Gzip + FASTQ structural integrity checking for cataloged FASTQ files.
+"""Gzip integrity checking for cataloged FASTQ files.
 
-Stream-decompresses each *.fastq.gz to EOF (stdlib gzip == `gzip -t`, catching
-truncation / CRC / bit-rot) while validating the FASTQ 4-line record structure,
-then compares R1/R2 read counts per sample (parity). Results are persisted to
-the `files` table and summarized per project into `validation_log`.
+Bulk-decompresses each *.fastq.gz to EOF (stdlib gzip == `gzip -t`, catching
+truncation / CRC / bit-rot -- i.e. "reads cleanly and is not corrupt"), counts
+reads from a C-level newline tally, and compares R1/R2 read counts per sample
+(parity). Results are persisted to the `files` table and summarized per project
+into `validation_log`. This is deliberately not FastQC: it verifies the data is
+readable and intact without the (slower) per-read analysis, and keeps no reports.
 
 Stdlib only. Decompression releases the GIL, so files are checked concurrently
 with a ThreadPoolExecutor; all DB writes happen on the calling thread.
@@ -23,31 +25,33 @@ FORMAT_ERROR = "format_error"  # decompresses but not valid FASTQ
 UNCHECKED = "unchecked"        # file not found on disk / no root known
 
 
-def check_fastq_gz(path):
-    """Stream-decompress one .fastq.gz, validating gzip + FASTQ structure.
+def check_fastq_gz(path, chunk_size=1 << 20):
+    """Verify one .fastq.gz reads cleanly and is not corrupt.
 
-    Returns {"status", "n_reads", "detail"}. A single pass validates both the
-    gzip stream (errors surface as the trailer/CRC is read at EOF) and the
-    FASTQ record structure (every 1st line starts '@', every 3rd starts '+',
-    total lines divisible by 4).
+    Bulk-decompresses the stream in binary chunks to EOF -- this is the `gzip -t`
+    check (any truncation / CRC / bit-rot surfaces as a decode error) and is
+    ~30x cheaper than iterating lines in Python, which throttled throughput. Read
+    count comes from a C-level newline tally (bytes.count), and a line count that
+    is not a multiple of 4 is flagged as a structural (format) error.
+
+    Returns {"status", "n_reads", "detail"}. Note: this validates that the data
+    decompresses intact; it does not check per-record '@'/'+' framing.
     """
     n_lines = 0
-    bad_format = None
+    ended_nl = True
     try:
         with gzip.open(path, "rb") as fh:
-            for line in fh:
-                pos = n_lines % 4
-                if bad_format is None:
-                    if pos == 0 and not line.startswith(b"@"):
-                        bad_format = f"line {n_lines + 1}: header does not start with '@'"
-                    elif pos == 2 and not line.startswith(b"+"):
-                        bad_format = f"line {n_lines + 1}: separator does not start with '+'"
-                n_lines += 1
+            while True:
+                chunk = fh.read(chunk_size)
+                if not chunk:
+                    break
+                n_lines += chunk.count(b"\n")
+                ended_nl = chunk.endswith(b"\n")
     except (gzip.BadGzipFile, EOFError, zlib.error, OSError) as e:
         return {"status": GZIP_ERROR, "n_reads": None, "detail": str(e)}
 
-    if bad_format is not None:
-        return {"status": FORMAT_ERROR, "n_reads": None, "detail": bad_format}
+    if not ended_nl:  # final record without a trailing newline still counts
+        n_lines += 1
     if n_lines % 4 != 0:
         return {"status": FORMAT_ERROR, "n_reads": None,
                 "detail": f"line count {n_lines} is not a multiple of 4"}

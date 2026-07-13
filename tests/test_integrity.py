@@ -52,11 +52,13 @@ def test_check_fastq_gz_truncated(tmp_path):
     assert oint.check_fastq_gz(p)["status"] == oint.GZIP_ERROR
 
 
-def test_check_fastq_gz_bad_header(tmp_path):
+def test_check_fastq_gz_bad_header_not_flagged(tmp_path):
+    # Per-record '@'/'+' framing is intentionally not checked (gzip-integrity
+    # only); a well-formed, cleanly-decompressing file passes.
     p = str(tmp_path / "a.fastq.gz")
     with gzip.open(p, "wb") as f:
         f.write(b"notheader\nACGT\n+\nIIII\n")
-    assert oint.check_fastq_gz(p)["status"] == oint.FORMAT_ERROR
+    assert oint.check_fastq_gz(p)["status"] == oint.OK
 
 
 def test_check_fastq_gz_line_count(tmp_path):
@@ -64,6 +66,14 @@ def test_check_fastq_gz_line_count(tmp_path):
     with gzip.open(p, "wb") as f:
         f.write(b"@r1\nACGT\n+\n")  # 3 lines, not a multiple of 4
     assert oint.check_fastq_gz(p)["status"] == oint.FORMAT_ERROR
+
+
+def test_check_fastq_gz_no_trailing_newline(tmp_path):
+    p = str(tmp_path / "a.fastq.gz")
+    with gzip.open(p, "wb") as f:
+        f.write(b"@r1\nACGT\n+\nIIII")  # 4 lines, last has no trailing newline
+    res = oint.check_fastq_gz(p)
+    assert res["status"] == oint.OK and res["n_reads"] == 1
 
 
 # ---- catalog driver ---------------------------------------------------------
@@ -97,7 +107,7 @@ def test_catalog_truncated_fails(tmp_path):
 def test_catalog_format_error(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
     conn, root = _setup(tmp_path, rows)
-    _write_gz(root, "s1_1.fastq.gz", b"notheader\nACGT\n+\nIIII\n")
+    _write_gz(root, "s1_1.fastq.gz", b"@r1\nACGT\n+\n")  # 3 lines -> not a multiple of 4
     res = oint.check_catalog_integrity(conn, seqdata_root=root)["genohub-1_X"]
     assert res["status"] == "fail" and res["n_format_error"] == 1
 

@@ -49,16 +49,16 @@ def load_samples(db_path, mtime):
                          || COALESCE(t.sci_name, s.taxon) END AS ncbi_url,
                (SELECT {_FULL_PATH} FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
-                    AND f.role = 'R1') AS r1_path,
+                    AND f.read = 'R1') AS r1_path,
                (SELECT f.owner_name FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
-                    AND f.role = 'R1') AS r1_owner,
+                    AND f.read = 'R1') AS r1_owner,
                (SELECT {_FULL_PATH} FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
-                    AND f.role = 'R2') AS r2_path,
+                    AND f.read = 'R2') AS r2_path,
                (SELECT f.owner_name FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
-                    AND f.role = 'R2') AS r2_owner
+                    AND f.read = 'R2') AS r2_owner
         FROM samples s
         JOIN projects p ON p.project_id = s.project_id
         LEFT JOIN backups b ON b.project_id = s.project_id AND b.location = 'pdrive'
@@ -105,7 +105,7 @@ def load_projects(db_path, mtime):
 def load_data_issues(db_path, mtime):
     return _sql(db_path, """
         SELECT i.project_id, i.kind, i.filename,
-               s.sample_id, f.role, s.taxon, s.uniq_id
+               s.sample_id, f.read, s.taxon, s.uniq_id
         FROM data_check_issues i
         LEFT JOIN files f ON f.project_id = i.project_id AND f.filename = i.filename
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
@@ -155,7 +155,7 @@ def integrity_label(row):
 @st.cache_data(ttl=60)
 def load_files(db_path, mtime):
     return _sql(db_path, f"""
-        SELECT f.project_id, s.sample_id, f.role, f.filename,
+        SELECT f.project_id, s.sample_id, f.read, f.filename,
                {_FULL_PATH} AS full_path,
                f.size_bytes, f.owner_name,
                CASE f.md5_match WHEN 1 THEN 'OK' WHEN 0 THEN 'MISMATCH'
@@ -165,7 +165,7 @@ def load_files(db_path, mtime):
         FROM files f
         JOIN projects p ON p.project_id = f.project_id
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
-        ORDER BY f.project_id, s.sample_id, f.role""")
+        ORDER BY f.project_id, s.sample_id, f.read""")
 
 
 def human_size(n):
@@ -260,7 +260,7 @@ def projects_view(df, issues):
         st.subheader(f"Data-files issues: {pid}")
         if len(sub):
             st.dataframe(
-                sub[["kind", "filename", "sample_id", "role", "taxon", "uniq_id"]],
+                sub[["kind", "filename", "sample_id", "read", "taxon", "uniq_id"]],
                 width="stretch", hide_index=True)
             _download(sub, f"{pid}_data_issues.csv")
         else:
@@ -293,7 +293,7 @@ def files_view(df):
     show = view.copy()
     show["size"] = show["size_bytes"].map(human_size)
     st.dataframe(
-        show[["project_id", "sample_id", "role", "filename", "full_path",
+        show[["project_id", "sample_id", "read", "filename", "full_path",
               "size", "owner_name", "backup", "integrity", "n_reads",
               "integrity_date"]],
         width="stretch", hide_index=True,

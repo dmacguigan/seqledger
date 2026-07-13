@@ -159,8 +159,8 @@ def _persist_data_check_issues(conn, project_id, missing, orphan):
     conn.execute("DELETE FROM data_check_issues WHERE project_id=?", (project_id,))
     conn.executemany(
         "INSERT INTO data_check_issues(project_id, kind, filename) VALUES (?,?,?)",
-        [(project_id, "missing", fn) for fn in missing]
-        + [(project_id, "orphan", fn) for fn in orphan])
+        [(project_id, "missing from disk", fn) for fn in missing]
+        + [(project_id, "missing from mapfile", fn) for fn in orphan])
 
 
 def validate_catalog(conn, seqdata_root=None):

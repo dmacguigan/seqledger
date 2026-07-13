@@ -59,7 +59,8 @@ def test_data_check_issues_persisted(tmp_path):
     oval.validate_catalog(conn, seqdata_root=root)
     got = {(r["kind"], r["filename"]) for r in conn.execute(
         "SELECT kind, filename FROM data_check_issues WHERE project_id='genohub-1_X'")}
-    assert got == {("missing", "s1_2.fastq.gz"), ("orphan", "extra.fastq.gz")}
+    assert got == {("missing from disk", "s1_2.fastq.gz"),
+                   ("missing from mapfile", "extra.fastq.gz")}
 
     # re-run after fixing -> issue rows cleared
     with gzip.open(os.path.join(root, "genohub-1_X", "s1_2.fastq.gz"), "wb") as f:
@@ -83,7 +84,7 @@ def test_checksum_status_transitions(tmp_path):
     assert oval.check_checksums(conn, "genohub-1_X")["status"] == "verified"
 
     conn.execute(
-        "UPDATE files SET md5_match=0 WHERE project_id='genohub-1_X' AND role='R2'")
+        "UPDATE files SET md5_match=0 WHERE project_id='genohub-1_X' AND read='R2'")
     cs = oval.check_checksums(conn, "genohub-1_X")
     assert cs["status"] == "mismatch" and cs["n_mismatch"] == 1
 

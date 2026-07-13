@@ -84,9 +84,9 @@ def test_catalog_all_ok(tmp_path):
     res = oint.check_catalog_integrity(conn, seqdata_root=root)["genohub-1_X"]
     assert res["status"] == "pass"
     assert res["n_files"] == 2 and res["n_ok"] == 2
-    got = {r["role"]: (r["integrity_status"], r["gz_ok"], r["n_reads"])
+    got = {r["read"]: (r["integrity_status"], r["gz_ok"], r["n_reads"])
            for r in conn.execute(
-               "SELECT role, integrity_status, gz_ok, n_reads FROM files")}
+               "SELECT read, integrity_status, gz_ok, n_reads FROM files")}
     assert got["R1"] == ("ok", 1, 1) and got["R2"] == ("ok", 1, 1)
     log = conn.execute(
         "SELECT status FROM validation_log WHERE project_id='genohub-1_X'").fetchone()
@@ -100,7 +100,7 @@ def test_catalog_truncated_fails(tmp_path):
     res = oint.check_catalog_integrity(conn, seqdata_root=root)["genohub-1_X"]
     assert res["status"] == "fail" and res["n_gzip_error"] == 1
     row = conn.execute(
-        "SELECT integrity_status, gz_ok FROM files WHERE role='R2'").fetchone()
+        "SELECT integrity_status, gz_ok FROM files WHERE read='R2'").fetchone()
     assert row["integrity_status"] == "gzip_error" and row["gz_ok"] == 0
 
 
@@ -129,7 +129,7 @@ def test_catalog_unchecked_missing_file(tmp_path):
     res = oint.check_catalog_integrity(conn, seqdata_root=root)["genohub-1_X"]
     assert res["status"] == "warn" and res["n_unchecked"] == 1
     row = conn.execute(
-        "SELECT integrity_status, gz_ok FROM files WHERE role='R2'").fetchone()
+        "SELECT integrity_status, gz_ok FROM files WHERE read='R2'").fetchone()
     assert row["integrity_status"] == "unchecked" and row["gz_ok"] is None
 
 

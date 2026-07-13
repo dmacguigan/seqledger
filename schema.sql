@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS files (
     file_pk      INTEGER PRIMARY KEY,
     project_id   TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
     sample_pk    INTEGER REFERENCES samples(sample_pk) ON DELETE CASCADE,
-    role         TEXT,                   -- 'R1' | 'R2'
+    read         TEXT,                   -- 'R1' | 'R2'
     filename     TEXT NOT NULL,          -- basename, e.g. sample_1.fastq.gz
     rel_path     TEXT,                   -- path relative to raw_sequence_data root
     size_bytes   INTEGER,
@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS backups (
 CREATE TABLE IF NOT EXISTS data_check_issues (
     issue_pk   INTEGER PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
-    kind       TEXT NOT NULL,          -- 'missing' (in mapfile, not on disk) | 'orphan' (on disk, not in mapfile)
+    kind       TEXT NOT NULL,          -- 'missing from disk' (in mapfile, not on disk) | 'missing from mapfile' (on disk, not in mapfile)
     filename   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_data_check_issues_project ON data_check_issues(project_id);

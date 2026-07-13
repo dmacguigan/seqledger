@@ -254,14 +254,26 @@ def _dedup(taxa):
     return out
 
 
-def resolve_taxa(taxa, taxdir):
-    """Resolve a list of raw Taxon strings (deduped). Returns list of dicts."""
+def resolve_taxa(taxa, taxdir, progress=True):
+    """Resolve a list of raw Taxon strings (deduped). Returns list of dicts.
+
+    With progress=True, prints a live 'resolved i/total' counter to stdout.
+    """
     build_index(taxdir)
     idx = open_index(taxdir)
+    taxa = _dedup(taxa)
+    total = len(taxa)
+    out = []
     try:
-        return [_resolve_one(idx, t) for t in _dedup(taxa)]
+        for i, t in enumerate(taxa, 1):
+            out.append(_resolve_one(idx, t))
+            if progress and (i % 100 == 0 or i == total):
+                print(f"\r  resolved {i}/{total} taxa", end="", flush=True)
+        if progress and total:
+            print()
     finally:
         idx.close()
+    return out
 
 
 # ---- catalog integration ----------------------------------------------------

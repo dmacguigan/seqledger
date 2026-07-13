@@ -45,7 +45,8 @@ def load_samples(db_path, mtime):
                t.sci_name AS tax_name, t.match_type AS tax_match,
                t.taxid AS taxid, t.lineage AS lineage,
                CASE WHEN t.taxid IS NOT NULL
-                    THEN '{NCBI_TAX_URL}' || t.taxid || '/' END AS ncbi_url,
+                    THEN '{NCBI_TAX_URL}' || t.taxid || '/#'
+                         || COALESCE(t.sci_name, s.taxon) END AS ncbi_url,
                (SELECT {_FULL_PATH} FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
                     AND f.role = 'R1') AS r1_path,
@@ -180,14 +181,16 @@ def samples_view(df):
 
     st.caption(f"{len(view)} of {len(df)} samples "
                "(full R1/R2 paths, taxid + lineage are in the CSV export)")
-    on_screen = ["project_id", "sample_id", "taxon", "tax_name", "tax_match",
-                 "uniq_id", "backup_verified", "ncbi_url"]
+    on_screen = ["project_id", "sample_id", "taxon", "ncbi_url", "tax_match",
+                 "uniq_id", "backup_verified"]
     st.dataframe(
         view[on_screen], width="stretch", hide_index=True,
         column_config={
-            "tax_name": "NCBI match",
             "tax_match": "match type",
-            "ncbi_url": st.column_config.LinkColumn("NCBI taxon", display_text="view")})
+            # The matched name (carried in the URL fragment) is the link label,
+            # linking to its NCBI datasets taxonomy page.
+            "ncbi_url": st.column_config.LinkColumn(
+                "NCBI taxon match", display_text=r"#(.+)$")})
     _download(view, "oceandna_samples.csv")
 
 
@@ -262,9 +265,30 @@ def files_view(df):
     _download(view, "oceandna_files.csv")
 
 
-def taxonomy_view(df):
+@st.cache_data(ttl=60)
+def _taxonomy_counts(db_path, mtime, chosen, depth, include_unknown):
+    """Per-lineage sample counts for the sunburst, cached across reruns.
+
+    Grouping ~6k samples over up to 8 rank columns is the per-interaction cost;
+    caching on (projects, depth, include_unknown) keeps filter/slider changes
+    from re-grouping every rerun. Returns (counts_df, n_samples, n_projects).
+    """
+    df = load_taxonomy(db_path, mtime)
+    cols = RANK_COLS[:depth]
+    v = df if not chosen else df[df["project_id"].isin(list(chosen))]
+    v = v[["project_id"] + cols].copy()
+    for c in cols:
+        v[c] = v[c].replace("", pd.NA).fillna("unknown")
+    if not include_unknown:
+        v = v[v[cols[-1]] != "unknown"]
+    counts = v.groupby(cols, sort=False).size().reset_index(name="samples")
+    return counts, len(v), v["project_id"].nunique()
+
+
+def taxonomy_view(db_path, mtime):
     import plotly.express as px
 
+    df = load_taxonomy(db_path, mtime)  # cached; used only for the project list
     with st.sidebar:
         st.header("Filters")
         projects = sorted(df["project_id"].unique())
@@ -272,32 +296,31 @@ def taxonomy_view(df):
         depth_label = st.selectbox("Deepest rank", RANK_LABELS,
                                    index=RANK_LABELS.index("order"))
         include_unknown = st.checkbox("Include 'unknown'", value=True)
-
-    view = df
-    if chosen:
-        view = view[view["project_id"].isin(chosen)]
+        ring_cap = st.slider(
+            "Initial rings shown", 2, len(RANK_COLS), 4,
+            help="The sunburst renders this many rings; click a wedge to drill deeper.")
 
     depth = RANK_LABELS.index(depth_label) + 1
     cols = RANK_COLS[:depth]
-    v = view.copy()
-    for c in cols:
-        v[c] = v[c].replace("", pd.NA).fillna("unknown")
-    if not include_unknown:
-        v = v[v[cols[-1]] != "unknown"]
+    counts, n_samples, n_proj = _taxonomy_counts(
+        db_path, mtime, tuple(chosen), depth, include_unknown)
 
-    st.caption(f"{len(v)} samples across {v['project_id'].nunique()} project(s); "
+    st.caption(f"{n_samples} samples across {n_proj} project(s); "
                "run `taxonomy resolve` to (re)populate. Unranked -> 'unknown'.")
-    if not len(v):
+    if not n_samples:
         st.info("No resolved taxonomy yet. Run `odna.py taxonomy resolve`.")
         return
 
-    counts = v.groupby(cols).size().reset_index(name="samples")
     fig = px.sunburst(counts, path=cols, values="samples")
+    # Render only the outer `ring_cap` rings up front; deeper rings load on click.
+    # At species depth the tree has thousands of leaf wedges, and drawing them all
+    # is what makes the initial paint slow -- maxdepth caps the drawn arcs.
+    fig.update_traces(maxdepth=min(ring_cap, depth))
     fig.update_layout(margin=dict(t=10, l=10, r=10, b=10))
     st.plotly_chart(fig, width="stretch")
 
     st.subheader(f"Sample count by {depth_label}")
-    bar = (v[cols[-1]].value_counts().rename_axis(depth_label)
+    bar = (counts.groupby(cols[-1])["samples"].sum().rename_axis(depth_label)
            .reset_index(name="samples").set_index(depth_label))
     st.bar_chart(bar, width="stretch")
     _download(counts, "oceandna_taxonomy_counts.csv")
@@ -321,7 +344,7 @@ def main():
     elif view_name == "Files":
         files_view(load_files(DB_PATH, mtime))
     else:
-        taxonomy_view(load_taxonomy(DB_PATH, mtime))
+        taxonomy_view(DB_PATH, mtime)
 
 
 if __name__ == "__main__":

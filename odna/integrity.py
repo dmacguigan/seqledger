@@ -12,7 +12,8 @@ with a ThreadPoolExecutor; all DB writes happen on the calling thread.
 import gzip
 import os
 import zlib
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import date
 
 # Per-file integrity_status values.
@@ -120,15 +121,23 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
     results = {}  # file_pk -> result dict
     if to_check:
         total = len(to_check)
-        step = 1 if total <= 50 else max(1, total // 100)
         if progress:
-            print(f"checking {total} cataloged file(s) on disk ...", flush=True)
+            print(f"checking {total} cataloged file(s) on disk "
+                  "(reading every byte; large files take a while) ...", flush=True)
         with ThreadPoolExecutor(max_workers=jobs) as ex:
             futures = {ex.submit(_check_path, p): pk for pk, p in to_check.items()}
-            for i, fut in enumerate(as_completed(futures), 1):
-                results[futures[fut]] = fut.result()
-                if progress and (i == 1 or i % step == 0 or i == total):
-                    print(f"\r  checked {i}/{total} files", end="", flush=True)
+            pending = set(futures)
+            start = time.monotonic()
+            # Poll with a timeout so a heartbeat (with elapsed time) prints every
+            # few seconds even while the first large file is still being read --
+            # otherwise there is no output until the first whole file completes.
+            while pending:
+                done, pending = wait(pending, timeout=5, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    results[futures[fut]] = fut.result()
+                if progress:
+                    print(f"\r  checked {len(results)}/{total} files "
+                          f"({int(time.monotonic() - start)}s)   ", end="", flush=True)
         if progress:
             print()
     for pk in paths:

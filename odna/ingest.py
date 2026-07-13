@@ -143,7 +143,7 @@ def _upsert_file(conn, project_id, sample_pk, read, filename, rel_path,
     return was_new
 
 
-def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
+def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, prune=False):
     """Validate and load one project.
 
     Returns (project_id, findings, status, stats). `stats` summarizes what the
@@ -153,7 +153,16 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
       new_files      -- file rows created (candidates for an integrity check)
       changed_taxa   -- set of new/changed Taxon strings (may need re-resolving)
       orphan_samples -- sample_ids in the catalog but absent from this CSV
-    On a FAIL (nothing written), stats is all-zero/empty.
+      pruned_samples -- sample_ids deleted from the catalog (only when prune=True)
+      pruned_files   -- count of stale file rows deleted (only when prune=True)
+
+    With prune=True, rows that the (corrected) CSV no longer references are
+    deleted: samples dropped from the CSV (their files cascade) and any file row
+    whose filename is no longer listed (e.g. a filename typo fixed in place).
+    This clears the samples/files that a stale mapfile left flagged as missing;
+    the caller should re-run `validate --seqdata-root` afterwards to refresh
+    data_check_issues and the checksum/status columns. On a FAIL (nothing
+    written), stats is all-zero/empty and no pruning happens.
     """
     metadata_filename = os.path.basename(metadata_path)
     project_id, source, number, description = parse_project_id(seq_data_relpath)
@@ -180,7 +189,8 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
     status = overall_status(findings)
 
     stats = {"new_samples": 0, "changed_samples": 0, "new_files": 0,
-             "changed_taxa": set(), "orphan_samples": []}
+             "changed_taxa": set(), "orphan_samples": [], "pruned_samples": [],
+             "pruned_files": 0}
     if has_fail:
         return project_id, findings, status, stats
 
@@ -194,6 +204,7 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
     existing = {r["sample_id"]: r["taxon"] for r in conn.execute(
         "SELECT sample_id, taxon FROM samples WHERE project_id=?", (project_id,))}
     csv_ids = set()
+    csv_files = set()
 
     core = set(["ID", "R1", "R2", "Taxon", uniqid_col])
     for row in rows:
@@ -215,6 +226,7 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
 
         for read in ("R1", "R2"):
             filename = row[read].strip()
+            csv_files.add(filename)
             rel_path = os.path.join(seq_data_relpath, filename)
             size, uid, name = disk_stats.get(filename, (None, None, None))
             if _upsert_file(conn, project_id, sample_pk, read, filename, rel_path,
@@ -222,16 +234,30 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
                 stats["new_files"] += 1
 
     stats["orphan_samples"] = sorted(set(existing) - csv_ids)
+
+    if prune:
+        # Drop samples the corrected CSV no longer lists (files cascade), then any
+        # remaining file row whose filename is no longer referenced (in-place fix).
+        conn.executemany(
+            "DELETE FROM samples WHERE project_id=? AND sample_id=?",
+            [(project_id, sid) for sid in stats["orphan_samples"]])
+        stats["pruned_samples"] = list(stats["orphan_samples"])
+        placeholders = ",".join("?" * len(csv_files)) or "NULL"
+        cur = conn.execute(
+            f"DELETE FROM files WHERE project_id=? AND filename NOT IN ({placeholders})",
+            (project_id, *csv_files))
+        stats["pruned_files"] = cur.rowcount
+
     conn.commit()
     return project_id, findings, status, stats
 
 
-def ingest_map_file(conn, map_file_path, seqdata_root=None, metadata_root=None):
+def ingest_map_file(conn, map_file_path, seqdata_root=None, metadata_root=None, prune=False):
     """Ingest all projects listed in a two-column map file.
 
     Per-project metadata CSVs are resolved relative to metadata_root when their
     path is not absolute and not found in the CWD. Defaults to the map file's
-    own directory.
+    own directory. prune=True is forwarded to each project (see ingest_project).
     """
     results = []
     if metadata_root is None:
@@ -240,5 +266,6 @@ def ingest_map_file(conn, map_file_path, seqdata_root=None, metadata_root=None):
         metadata_path = metadata_filename
         if not os.path.isabs(metadata_path) and not os.path.exists(metadata_path):
             metadata_path = os.path.join(metadata_root, metadata_filename)
-        results.append(ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root))
+        results.append(ingest_project(conn, metadata_path, seq_data_relpath,
+                                      seqdata_root, prune=prune))
     return results

@@ -67,7 +67,9 @@ def cmd_ingest(args):
     Re-ingesting a project upserts its rows (Taxon edits included). The pipeline
     steps are gated so unchanged re-runs are cheap: integrity only touches
     projects with never-checked files, taxonomy only runs when unresolved taxa
-    exist. Samples dropped from a CSV are reported but left in place (not pruned).
+    exist. Samples dropped from a CSV are reported but left in place unless
+    --prune is given, which deletes samples/files the corrected CSV no longer
+    references (then re-run `validate --seqdata-root` to refresh status).
     """
     from odna import integrity as ointegrity
     from odna import taxonomy as otax
@@ -77,10 +79,11 @@ def cmd_ingest(args):
 
     print("== ingest ==")
     results = oingest.ingest_map_file(conn, args.map_file, seqdata_root=args.seqdata_root,
-                                      metadata_root=args.metadata_root)
+                                      metadata_root=args.metadata_root, prune=args.prune)
     n_fail = 0
     ingested = []  # project_ids that did not FAIL
     tot_new = tot_changed = tot_files = 0
+    tot_pruned_s = tot_pruned_f = 0
     for project_id, findings, status, stats in results:
         print(f"[{icons[status]}] {project_id}")
         for f in findings:
@@ -92,10 +95,22 @@ def cmd_ingest(args):
         tot_new += stats["new_samples"]
         tot_changed += stats["changed_samples"]
         tot_files += stats["new_files"]
-        for sid in stats["orphan_samples"]:
-            print(f"    WARN: sample {sid} in catalog but not in this CSV (kept; not pruned)")
+        tot_pruned_s += len(stats["pruned_samples"])
+        tot_pruned_f += stats["pruned_files"]
+        if args.prune:
+            for sid in stats["pruned_samples"]:
+                print(f"    pruned: sample {sid} (dropped from CSV) and its files")
+            if stats["pruned_files"]:
+                print(f"    pruned: {stats['pruned_files']} stale file row(s) no longer in CSV")
+        else:
+            for sid in stats["orphan_samples"]:
+                print(f"    WARN: sample {sid} in catalog but not in this CSV "
+                      f"(kept; re-run with --prune to remove)")
     print(f"ingested {len(results)} project(s), {n_fail} rejected (FAIL); "
           f"{tot_new} new sample(s), {tot_changed} changed, {tot_files} new file(s)")
+    if args.prune and (tot_pruned_s or tot_pruned_f):
+        print(f"pruned {tot_pruned_s} sample(s) and {tot_pruned_f} stale file row(s); "
+              f"re-run `validate --seqdata-root` to refresh data-files + checksum status")
 
     if not args.skip_integrity:
         print("\n== integrity ==")
@@ -288,6 +303,9 @@ def build_parser():
     pi.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
     pi.add_argument("--skip-integrity", action="store_true", help="skip the integrity step")
     pi.add_argument("--skip-taxonomy", action="store_true", help="skip the taxonomy step")
+    pi.add_argument("--prune", action="store_true",
+                    help="delete catalog samples/files the CSV no longer lists "
+                         "(then re-run `validate --seqdata-root`)")
     pi.set_defaults(func=cmd_ingest)
 
     pc = sub.add_parser("checksums", help="load + compare rclone md5sum output")

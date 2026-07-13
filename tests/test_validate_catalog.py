@@ -95,3 +95,45 @@ def test_validate_without_seqdata_root_reads_stored(tmp_path):
     oval.validate_catalog(conn, seqdata_root=root)  # persists 'ok'
     res = oval.validate_catalog(conn)["genohub-1_X"]  # no disk scan
     assert res["data"]["status"] == "ok"
+
+
+def test_prune_clears_rows_dropped_from_csv(tmp_path):
+    # s1 backed on disk; bad1/bad2 listed in CSV but absent on disk -> flagged missing.
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1"),
+            ("bad1", "bad1_1.fastq.gz", "bad1_2.fastq.gz", "Gadus", "U2"),
+            ("bad2", "bad2_1.fastq.gz", "bad2_2.fastq.gz", "Gadus", "U3")]
+    root = str(tmp_path / "raw_sequence_data")
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows,
+                 disk_files=["s1_1.fastq.gz", "s1_2.fastq.gz"])
+    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
+    conn = odb.connect(str(tmp_path / "cat.db"))
+    odb.init_db(conn)
+    oingest.ingest_map_file(conn, map_file, seqdata_root=root)
+    assert oval.validate_catalog(conn, seqdata_root=root)["genohub-1_X"]["data"]["n_missing"] == 4
+
+    # user removes the two bad rows; without --prune the stale rows still flag missing
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows[:1],
+                 disk_files=["s1_1.fastq.gz", "s1_2.fastq.gz"])
+    oingest.ingest_map_file(conn, map_file, seqdata_root=root)
+    assert oval.validate_catalog(conn, seqdata_root=root)["genohub-1_X"]["data"]["n_missing"] == 4
+
+    # re-ingest with prune -> stale samples/files gone, project clean
+    res = oingest.ingest_map_file(conn, map_file, seqdata_root=root, prune=True)
+    assert res[0][3]["pruned_samples"] == ["bad1", "bad2"]
+    data = oval.validate_catalog(conn, seqdata_root=root)["genohub-1_X"]["data"]
+    assert data["status"] == "ok" and data["n_missing"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM samples").fetchone()["n"] == 1
+    assert conn.execute("SELECT COUNT(*) AS n FROM files").fetchone()["n"] == 2
+
+
+def test_prune_drops_file_renamed_in_place(tmp_path):
+    # A filename typo fixed within a surviving row leaves the old file row stale.
+    rows = [("s1", "s1_1.fastq.gz", "TYPO_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv",
+                 [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
+    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
+    res = oingest.ingest_map_file(conn, map_file, seqdata_root=root, prune=True)
+    assert res[0][3]["pruned_files"] == 1
+    got = {r["filename"] for r in conn.execute("SELECT filename FROM files")}
+    assert got == {"s1_1.fastq.gz", "s1_2.fastq.gz"}

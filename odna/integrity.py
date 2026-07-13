@@ -53,6 +53,17 @@ def check_fastq_gz(path):
     return {"status": OK, "n_reads": n_lines // 4, "detail": None}
 
 
+def _check_path(path):
+    """Existence + integrity for one path (runs in a worker thread).
+
+    Missing files are 'unchecked' (a stat/open done here so the network round-trip
+    is parallelized); present files are validated by check_fastq_gz.
+    """
+    if not os.path.isfile(path):
+        return {"status": UNCHECKED, "n_reads": None, "detail": "not found on disk"}
+    return check_fastq_gz(path)
+
+
 def _resolve_path(seqdata_root, row):
     """Absolute on-disk path for a files row, or None if no root is known."""
     root = seqdata_root or row["seqdata_root"]
@@ -99,26 +110,32 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
     sql += " ORDER BY f.project_id"
     rows = conn.execute(sql, params).fetchall()
 
-    # Resolve paths on the calling thread; check present files concurrently.
-    if progress:
-        print(f"scanning {len(rows)} cataloged file(s) on disk ...", flush=True)
+    # Resolve paths on the calling thread. The on-disk existence check is done
+    # inside the workers (not a serial os.path.isfile pass here): over thousands
+    # of files on a network mount each stat() is a round-trip, and doing them
+    # serially would hang silently for minutes before the first progress tick.
     paths = {r["file_pk"]: _resolve_path(seqdata_root, r) for r in rows}
-    to_check = {pk: p for pk, p in paths.items() if p and os.path.isfile(p)}
+    to_check = {pk: p for pk, p in paths.items() if p}
 
     results = {}  # file_pk -> result dict
     if to_check:
         total = len(to_check)
         step = 1 if total <= 50 else max(1, total // 100)
+        if progress:
+            print(f"checking {total} cataloged file(s) on disk ...", flush=True)
         with ThreadPoolExecutor(max_workers=jobs) as ex:
-            futures = {ex.submit(check_fastq_gz, p): pk for pk, p in to_check.items()}
+            futures = {ex.submit(_check_path, p): pk for pk, p in to_check.items()}
             for i, fut in enumerate(as_completed(futures), 1):
                 results[futures[fut]] = fut.result()
                 if progress and (i == 1 or i % step == 0 or i == total):
                     print(f"\r  checked {i}/{total} files", end="", flush=True)
         if progress:
             print()
-    elif progress:
-        print("  no cataloged files found on disk to check "
+    for pk in paths:
+        results.setdefault(pk, {"status": UNCHECKED, "n_reads": None, "detail": None})
+
+    if progress and all(r["status"] == UNCHECKED for r in results.values()) and results:
+        print("  note: all files came back 'unchecked' -- none were found on disk "
               "(is --seqdata-root correct, and are the files mounted?)")
     for pk in paths:
         results.setdefault(pk, {"status": UNCHECKED, "n_reads": None, "detail": None})

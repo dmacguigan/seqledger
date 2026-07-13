@@ -4,6 +4,31 @@ import os
 from datetime import date
 
 
+def _decode_md5_file(path):
+    """Read a checksum file, tolerating BOMs and non-UTF-8 encodings.
+
+    Windows/PowerShell (e.g. `Get-FileHash | Out-File`) writes UTF-16 with a
+    byte-order mark, which the default utf-8 reader chokes on. Sniff the BOM,
+    then fall back to utf-8 and finally latin-1 (never raises).
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    for bom, enc in (
+        (b"\xff\xfe\x00\x00", "utf-32-le"),
+        (b"\x00\x00\xfe\xff", "utf-32-be"),
+        (b"\xff\xfe", "utf-16-le"),
+        (b"\xfe\xff", "utf-16-be"),
+        (b"\xef\xbb\xbf", "utf-8-sig"),
+    ):
+        if raw.startswith(bom):
+            # utf-16/32 decoders keep the BOM as a leading U+FEFF; drop it.
+            return raw.decode(enc).lstrip("\ufeff")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
 def parse_md5sum(path):
     """Parse `rclone md5sum` / coreutils md5sum output.
 
@@ -11,8 +36,8 @@ def parse_md5sum(path):
     relative to the root that was hashed (the raw_sequence_data directory).
     """
     result = {}
-    with open(path) as f:
-        for line in f:
+    text = _decode_md5_file(path)
+    for line in text.splitlines():
             line = line.rstrip("\n")
             if not line.strip():
                 continue

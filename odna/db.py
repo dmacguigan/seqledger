@@ -38,6 +38,10 @@ _MIGRATIONS = [
     ("projects", "data_check_date", "TEXT"),
     ("files", "owner_uid", "INTEGER"),
     ("files", "owner_name", "TEXT"),
+    ("files", "integrity_status", "TEXT"),
+    ("files", "gz_ok", "INTEGER"),
+    ("files", "n_reads", "INTEGER"),
+    ("files", "integrity_date", "TEXT"),
 ]
 
 

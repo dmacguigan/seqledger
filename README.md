@@ -47,7 +47,7 @@ kept for pip users).
 ```
 schema.sql            SQLite DDL (source of truth for tables)
 odna.py               CLI entry point
-odna/                 package: db, ingest, checksums, validate, taxonomy, query, gui
+odna/                 package: db, ingest, checksums, validate, integrity, taxonomy, query, gui
 app/streamlit_app.py  read-only browse GUI
 tests/                pytest suite + fixture builders
 ```
@@ -79,10 +79,24 @@ python odna.py --db oceandna_catalog.db checksums --store store.md5 --pdrive pdr
 python odna.py --db oceandna_catalog.db validate \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 
+# 4b. integrity: gzip + FASTQ structural check of cataloged files.
+#    Stream-decompresses each *.fastq.gz to EOF (== `gzip -t`, catches truncation
+#    / CRC corruption), validates the FASTQ 4-line record structure, and compares
+#    R1/R2 read counts per sample. Per-file results land in `files`
+#    (integrity_status, gz_ok, n_reads); a per-project run status is logged to
+#    `validation_log`. Reads every byte, so it is a separate opt-in step; files
+#    are checked concurrently (--jobs, default min(8, CPU count)).
+python odna.py --db oceandna_catalog.db integrity \
+    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
+#    (--seqdata-root is optional; each project's ingest-time root is used by default)
+
 # 5. taxonomy: resolve free-text Taxon -> NCBI TaxID + lineage
 #    Downloads a pinned NCBI taxdump into <db dir>/.taxonomy (once), indexes it,
 #    resolves every distinct sample Taxon (exact, then genus-anchored fuzzy),
 #    writes the results into the `taxa` table + a review CSV.
+#    NOTE: if you built a taxdump index before this version, rebuild it once so
+#    the new tax_names(taxid) index (large speed-up) is applied:
+#        python odna.py --db oceandna_catalog.db taxonomy resolve --rebuild-index
 python odna.py --db oceandna_catalog.db taxonomy resolve
 #    edit confirmed_taxid in taxonomy_review.csv for any wrong fuzzy/unresolved
 #    rows, then fold the overrides back in:

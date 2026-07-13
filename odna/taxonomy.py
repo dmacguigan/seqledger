@@ -96,6 +96,7 @@ def build_index(taxdir, force=False):
              for p in _iter_dmp(os.path.join(taxdir, "names.dmp"))))
         con.executescript(
             "CREATE INDEX idx_names_lower ON tax_names(name_lower);"
+            "CREATE INDEX idx_names_taxid ON tax_names(taxid);"
             "CREATE INDEX idx_nodes_parent ON tax_nodes(parent);")
         con.commit()
     finally:
@@ -130,25 +131,36 @@ def _sci_name(idx, taxid):
 
 
 def ranked_lineage(idx, taxid):
-    """Walk parents to root; return (sci_name, finest_rank, {tax_<rank>: name})."""
+    """Walk parents to root; return (sci_name, finest_rank, {tax_<rank>: name}).
+
+    The parent chain is walked via the tax_nodes PK (indexed), then every
+    scientific name for the chain is fetched in a single batched query -- this
+    avoids an N+1 _sci_name lookup per ancestor for each resolved taxon.
+    """
     ranks = {c: None for c in RANK_COLUMNS}
-    sci_name = finest_rank = None
+    chain = []  # [(taxid, rank)] from the input node up to (but not incl.) root
     cur = taxid
     seen = set()
-    first = True
     while cur and cur not in seen and cur != 1:
         seen.add(cur)
         row = idx.execute("SELECT parent, rank FROM tax_nodes WHERE taxid=?", (cur,)).fetchone()
         if row is None:
             break
         parent, rank = row
-        nm = _sci_name(idx, cur)
-        if first:
-            sci_name, finest_rank, first = nm, rank, False
+        chain.append((cur, rank))
+        cur = parent
+    if not chain:
+        return None, None, ranks
+    ids = [c[0] for c in chain]
+    names = dict(idx.execute(
+        "SELECT taxid, name FROM tax_names "
+        "WHERE name_class='scientific name' AND taxid IN (%s)"
+        % ",".join("?" * len(ids)), ids).fetchall())
+    for tid, rank in chain:
         col_rank = _RANK_ALIASES.get(rank, rank)
         if col_rank in RANKS:
-            ranks["tax_" + col_rank] = nm
-        cur = parent
+            ranks["tax_" + col_rank] = names.get(tid)
+    sci_name, finest_rank = names.get(chain[0][0]), chain[0][1]
     return sci_name, finest_rank, ranks
 
 

@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS files (
     pdrive_md5   TEXT,                   -- md5 from P-drive side
     md5_match    INTEGER,                -- 1 match, 0 mismatch, NULL not compared
     date_hashed  TEXT,
+    -- gzip/FASTQ integrity check, refreshed by `integrity`
+    integrity_status TEXT,               -- 'ok' | 'gzip_error' | 'format_error' | 'unchecked'
+    gz_ok            INTEGER,            -- 1 ok, 0 corrupt, NULL unchecked
+    n_reads          INTEGER,            -- FASTQ read count (lines/4) when readable
+    integrity_date   TEXT,              -- ISO date of the last integrity check
     UNIQUE (project_id, filename)
 );
 CREATE INDEX IF NOT EXISTS idx_files_sample ON files(sample_pk);

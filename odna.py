@@ -6,6 +6,7 @@ Subcommands:
   ingest      load CSV map files (metadata only) into the catalog
   checksums   load + compare `rclone md5sum` output from Store and P-drive
   validate    re-check the catalog and print findings
+  integrity   gzip + FASTQ structural integrity check of cataloged files
   taxonomy    resolve sample taxa to NCBI TaxIDs (resolve / apply)
   query       lookups (uniq-id, search, unbacked, mismatches, summary, taxa)
   gui         launch the Streamlit browse GUI (prints SSH tunnel command)
@@ -108,6 +109,26 @@ def cmd_validate(args):
             print(f"    {f.level}: {f.message}")
 
 
+def cmd_integrity(args):
+    from odna import integrity as ointegrity
+    conn = odb.connect(args.db)
+    odb.init_db(conn)
+    results = ointegrity.check_catalog_integrity(
+        conn, seqdata_root=args.seqdata_root, only_project=args.project, jobs=args.jobs)
+    conn.close()
+    if not results:
+        print("no cataloged files to check")
+        return
+    icons = {"pass": "OK", "warn": "WARN", "fail": "FAIL"}
+    for project_id in sorted(results):
+        s = results[project_id]
+        print(f"[{icons[s['status']]}] {project_id}: {s['n_files']} file(s), "
+              f"{s['n_ok']} ok, {s['n_gzip_error']} gzip-error, "
+              f"{s['n_format_error']} format-error, {s['n_unchecked']} unchecked")
+        for w in s["parity_warnings"]:
+            print(f"    WARN: read-count parity: {w}")
+
+
 def cmd_query(args):
     conn = odb.connect(args.db)
     if args.what == "uniq-id":
@@ -191,6 +212,14 @@ def build_parser():
     pv.add_argument("--seqdata-root",
                     help="root of raw_sequence_data; enables the on-disk data-files check")
     pv.set_defaults(func=cmd_validate)
+
+    pin = sub.add_parser("integrity", help="gzip + FASTQ integrity check of cataloged files")
+    pin.add_argument("--seqdata-root",
+                     help="root of raw_sequence_data (default: each project's stored root)")
+    pin.add_argument("--project", help="limit to one project_id")
+    pin.add_argument("--jobs", type=int, default=None,
+                     help="concurrent workers (default: min(8, CPU count))")
+    pin.set_defaults(func=cmd_integrity)
 
     pq = sub.add_parser("query", help="lookups")
     pq.add_argument("what", choices=["uniq-id", "search", "unbacked", "mismatches",

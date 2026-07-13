@@ -353,13 +353,60 @@ def taxonomy_view(db_path, mtime):
     # is what makes the initial paint slow -- maxdepth caps the drawn arcs.
     fig.update_traces(maxdepth=min(ring_cap, depth))
     fig.update_layout(margin=dict(t=10, l=10, r=10, b=10))
-    st.plotly_chart(fig, width="stretch")
+    event = st.plotly_chart(fig, width="stretch", on_select="rerun", key="sunburst")
 
+    # Clicking a wedge filters the bar chart below to that node's subtree, so it
+    # tracks wherever the user drills in the sunburst. px.sunburst builds each
+    # wedge id as the "/"-joined lineage from the root, which pins the exact
+    # subtree; fall back to matching the label if no id comes back.
+    lineage = _selected_lineage(event, counts, cols)
+    sub = counts
+    for col, val in zip(cols, lineage):
+        sub = sub[sub[col] == val]
+
+    if lineage:
+        st.caption("Bar chart scoped to: " + " › ".join(lineage)
+                   + "  — click the sunburst center to reset.")
     st.subheader(f"Sample count by {depth_label}")
-    bar = (counts.groupby(cols[-1])["samples"].sum().rename_axis(depth_label)
-           .reset_index(name="samples").set_index(depth_label))
-    st.bar_chart(bar, width="stretch")
+    if sub.empty:
+        st.info(f"No {depth_label}-level samples under this selection.")
+    else:
+        bar = (sub.groupby(cols[-1])["samples"].sum().rename_axis(depth_label)
+               .reset_index(name="samples").set_index(depth_label))
+        st.bar_chart(bar, width="stretch")
     _download(counts, "oceandna_taxonomy_counts.csv")
+
+
+def _selected_lineage(event, counts, cols):
+    """Ancestor path (root->clicked wedge) of the sunburst selection, or [].
+
+    Returns the list of rank values from the outermost ring down to the clicked
+    wedge; an empty list means nothing (or the root) is selected, so the bar
+    chart shows everything.
+    """
+    try:
+        points = event.selection["points"]
+    except (AttributeError, KeyError, TypeError):
+        return []
+    if not points:
+        return []
+    pt = points[0]
+    # Preferred: the wedge id is the "/"-joined lineage (e.g. "Eukaryota/Animalia").
+    wid = pt.get("id") or pt.get("label")
+    if not wid:
+        return []
+    lineage = [p for p in str(wid).split("/") if p]
+    # Guard against a stale/ambiguous id: keep it only if it names a real subtree.
+    for col, val in zip(cols, lineage):
+        if not (counts[col] == val).any():
+            # id form didn't line up; try matching the bare label to one column.
+            label = pt.get("label")
+            for c in cols:
+                if label is not None and (counts[c] == label).any():
+                    return list(counts.loc[counts[c] == label, cols[:cols.index(c) + 1]]
+                                .iloc[0])
+            return []
+    return lineage[:len(cols)]
 
 
 def main():

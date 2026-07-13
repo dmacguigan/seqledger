@@ -125,6 +125,9 @@ def _upsert_file(conn, project_id, sample_pk, role, filename, rel_path,
                  size_bytes=None, owner_uid=None, owner_name=None):
     # Do not clobber md5 columns on re-ingest. Refresh size/owner only when known
     # (COALESCE keeps prior values if the file was unreachable this run).
+    was_new = conn.execute(
+        "SELECT 1 FROM files WHERE project_id=? AND filename=?",
+        (project_id, filename)).fetchone() is None
     conn.execute(
         """INSERT INTO files
              (project_id, sample_pk, role, filename, rel_path,
@@ -137,10 +140,21 @@ def _upsert_file(conn, project_id, sample_pk, role, filename, rel_path,
              owner_name=COALESCE(excluded.owner_name, files.owner_name)""",
         (project_id, sample_pk, role, filename, rel_path,
          size_bytes, owner_uid, owner_name))
+    return was_new
 
 
 def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
-    """Validate and load one project. Returns (project_id, findings, status)."""
+    """Validate and load one project.
+
+    Returns (project_id, findings, status, stats). `stats` summarizes what the
+    upsert changed so the caller can drive integrity/taxonomy only where needed:
+      new_samples    -- sample_ids not previously in the catalog
+      changed_samples-- existing samples whose Taxon changed in the CSV
+      new_files      -- file rows created (candidates for an integrity check)
+      changed_taxa   -- set of new/changed Taxon strings (may need re-resolving)
+      orphan_samples -- sample_ids in the catalog but absent from this CSV
+    On a FAIL (nothing written), stats is all-zero/empty.
+    """
     metadata_filename = os.path.basename(metadata_path)
     project_id, source, number, description = parse_project_id(seq_data_relpath)
 
@@ -165,8 +179,10 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
         known_uniq_ids=_known_uniq_ids(conn, project_id))
     status = overall_status(findings)
 
+    stats = {"new_samples": 0, "changed_samples": 0, "new_files": 0,
+             "changed_taxa": set(), "orphan_samples": []}
     if has_fail:
-        return project_id, findings, status
+        return project_id, findings, status, stats
 
     uniqid_col = header_uniqid_column(header)
     abs_root = os.path.abspath(seqdata_root) if seqdata_root else None
@@ -174,11 +190,25 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
                     metadata_filename, seq_data_relpath, seqdata_root=abs_root,
                     owner_uid=proj_owner_uid, owner_name=proj_owner_name)
 
+    # Snapshot existing samples so we can tell new vs changed vs (dropped) orphans.
+    existing = {r["sample_id"]: r["taxon"] for r in conn.execute(
+        "SELECT sample_id, taxon FROM samples WHERE project_id=?", (project_id,))}
+    csv_ids = set()
+
     core = set(["ID", "R1", "R2", "Taxon", uniqid_col])
     for row in rows:
         sample_id = row["ID"].strip()
         taxon = row["Taxon"].strip()
         uniq_id = row[uniqid_col].strip()
+        csv_ids.add(sample_id)
+        if sample_id not in existing:
+            stats["new_samples"] += 1
+            if taxon:
+                stats["changed_taxa"].add(taxon)
+        elif existing[sample_id] != taxon:
+            stats["changed_samples"] += 1
+            if taxon:
+                stats["changed_taxa"].add(taxon)
         extra = {k: v for k, v in row.items() if k not in core}
         extra_json = json.dumps(extra) if extra else None
         sample_pk = _upsert_sample(conn, project_id, sample_id, taxon, uniq_id, extra_json)
@@ -187,11 +217,13 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None):
             filename = row[role].strip()
             rel_path = os.path.join(seq_data_relpath, filename)
             size, uid, name = disk_stats.get(filename, (None, None, None))
-            _upsert_file(conn, project_id, sample_pk, role, filename, rel_path,
-                         size_bytes=size, owner_uid=uid, owner_name=name)
+            if _upsert_file(conn, project_id, sample_pk, role, filename, rel_path,
+                            size_bytes=size, owner_uid=uid, owner_name=name):
+                stats["new_files"] += 1
 
+    stats["orphan_samples"] = sorted(set(existing) - csv_ids)
     conn.commit()
-    return project_id, findings, status
+    return project_id, findings, status, stats
 
 
 def ingest_map_file(conn, map_file_path, seqdata_root=None, metadata_root=None):

@@ -28,7 +28,7 @@ def test_ingest_populates_tables(tmp_path):
     conn = _fresh_db(tmp_path)
     results = oingest.ingest_map_file(conn, map_file, seqdata_root=root)
 
-    project_id, findings, status = results[0]
+    project_id, findings, status, stats = results[0]
     assert project_id == "genohub-1249488_WHF2"
     assert status == "pass", findings
 

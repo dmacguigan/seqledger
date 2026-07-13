@@ -1,0 +1,174 @@
+import importlib.util
+import os
+
+from odna import db as odb
+from helpers import make_project, write_map_file
+from test_taxonomy import _write_taxdump
+
+
+def _load_cli():
+    """Load odna.py (the CLI script) by path; `import odna` gets the package."""
+    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "odna.py")
+    spec = importlib.util.spec_from_file_location("odna_cli", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_ingest_runs_all_three(tmp_path, capsys):
+    root = str(tmp_path / "raw_sequence_data")
+    os.makedirs(root, exist_ok=True)
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
+    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
+    taxdir = _write_taxdump(str(tmp_path / "tax"))
+    db = str(tmp_path / "cat.db")
+
+    cli = _load_cli()
+    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
+
+    conn = odb.connect(db)
+    # ingest happened
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
+    # integrity ran and persisted (valid gzip fixtures -> ok)
+    assert conn.execute(
+        "SELECT integrity_status FROM files WHERE role='R1'").fetchone()[0] == "ok"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM validation_log WHERE project_id='genohub-1_X'"
+    ).fetchone()[0] == 1
+    # taxonomy resolved
+    assert conn.execute(
+        "SELECT taxid FROM taxa WHERE taxon='Gadus morhua'").fetchone()[0] == 8049
+    # review CSV written next to the DB
+    assert os.path.exists(os.path.join(os.path.dirname(db), "taxonomy_review.csv"))
+
+    out = capsys.readouterr().out
+    assert "== ingest ==" in out and "== integrity ==" in out
+    assert "== taxonomy resolve ==" in out and "ingest complete." in out
+    assert "1 new sample(s)" in out
+
+
+def test_ingest_skip_flags(tmp_path):
+    root = str(tmp_path / "raw_sequence_data")
+    os.makedirs(root, exist_ok=True)
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
+    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
+    db = str(tmp_path / "cat.db")
+
+    cli = _load_cli()
+    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root,
+              "--skip-integrity", "--skip-taxonomy"])
+
+    conn = odb.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
+    # integrity + taxonomy skipped -> nothing persisted for them
+    assert conn.execute(
+        "SELECT integrity_status FROM files WHERE role='R1'").fetchone()[0] is None
+    assert conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0] == 0
+
+
+def test_ingest_without_seqdata_root_skips_integrity(tmp_path, capsys):
+    # No --seqdata-root: files aren't on disk to check, so integrity is skipped
+    # with a note, but taxonomy still runs.
+    root = str(tmp_path / "raw_sequence_data")
+    os.makedirs(root, exist_ok=True)
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
+    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
+    taxdir = _write_taxdump(str(tmp_path / "tax"))
+    db = str(tmp_path / "cat.db")
+
+    cli = _load_cli()
+    cli.main(["--db", db, "ingest", mf, "--taxdir", taxdir])
+
+    out = capsys.readouterr().out
+    assert "skipped: pass --seqdata-root" in out
+    conn = odb.connect(db)
+    assert conn.execute(
+        "SELECT integrity_status FROM files WHERE role='R1'").fetchone()[0] is None
+    # taxonomy still resolved
+    assert conn.execute(
+        "SELECT taxid FROM taxa WHERE taxon='Gadus morhua'").fetchone()[0] == 8049
+
+
+def test_reingest_unchanged_gates_both_steps(tmp_path, capsys):
+    # A second, identical ingest should not re-run integrity or taxonomy.
+    root = str(tmp_path / "raw_sequence_data")
+    os.makedirs(root, exist_ok=True)
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
+    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
+    taxdir = _write_taxdump(str(tmp_path / "tax"))
+    db = str(tmp_path / "cat.db")
+
+    cli = _load_cli()
+    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
+    capsys.readouterr()  # discard first run's output
+
+    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
+    out = capsys.readouterr().out
+    assert "0 new sample(s), 0 changed, 0 new file(s)" in out
+    assert "(no new/unchecked files)" in out
+    assert "(no new taxa to resolve)" in out
+
+    conn = odb.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
+
+
+def test_reingest_changed_taxon_reresolves(tmp_path, capsys):
+    # Editing a sample's Taxon updates the row and resolves the new name.
+    root = str(tmp_path / "raw_sequence_data")
+    os.makedirs(root, exist_ok=True)
+    taxdir = _write_taxdump(str(tmp_path / "tax"))
+    db = str(tmp_path / "cat.db")
+    cli = _load_cli()
+
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv",
+                 [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")])
+    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
+    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
+    capsys.readouterr()
+
+    # Rewrite the CSV with a corrected species name, re-ingest.
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv",
+                 [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus macrocephalus", "U1")])
+    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
+    out = capsys.readouterr().out
+    assert "0 new sample(s), 1 changed" in out
+
+    conn = odb.connect(db)
+    assert conn.execute(
+        "SELECT taxon FROM samples WHERE sample_id='s1'").fetchone()[0] == "Gadus macrocephalus"
+    # the new name got resolved
+    assert conn.execute(
+        "SELECT taxid FROM taxa WHERE taxon='Gadus macrocephalus'").fetchone()[0] == 8050
+
+
+def test_reingest_reports_dropped_sample_as_orphan(tmp_path, capsys):
+    # A sample removed from the CSV is warned about but kept (not pruned).
+    root = str(tmp_path / "raw_sequence_data")
+    os.makedirs(root, exist_ok=True)
+    db = str(tmp_path / "cat.db")
+    cli = _load_cli()
+
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", [
+        ("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1"),
+        ("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "Gadus morhua", "U2"),
+    ])
+    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
+    # No --seqdata-root: keep this focused on orphan detection, no disk warnings.
+    cli.main(["--db", db, "ingest", mf, "--skip-taxonomy"])
+    capsys.readouterr()
+
+    # Drop s2 from the CSV, re-ingest.
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", [
+        ("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1"),
+    ])
+    cli.main(["--db", db, "ingest", mf, "--skip-taxonomy"])
+    out = capsys.readouterr().out
+    assert "sample s2 in catalog but not in this CSV" in out
+
+    conn = odb.connect(db)
+    # s2 is kept, not pruned
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 2

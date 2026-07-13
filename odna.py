@@ -3,11 +3,10 @@
 
 Subcommands:
   init-db     create the catalog schema
-  ingest      load CSV map files (metadata only) into the catalog
+  ingest      load CSV map file(s); auto-run integrity + taxonomy on new/changed data
   checksums   load + compare `rclone md5sum` output from Store and P-drive
   validate    re-check the catalog and print findings
   integrity   gzip + FASTQ structural integrity check of cataloged files
-  onboard     new batch: ingest + integrity + taxonomy resolve in one command
   taxonomy    resolve sample taxa to NCBI TaxIDs (resolve / apply)
   query       lookups (uniq-id, search, unbacked, mismatches, summary, taxa)
   gui         launch the Streamlit browse GUI (prints SSH tunnel command)
@@ -40,21 +39,103 @@ def cmd_init_db(args):
     print(f"initialized schema in {args.db}")
 
 
+def _has_unchecked_files(conn, project_id):
+    """True if the project has any file that integrity has never checked."""
+    return conn.execute(
+        "SELECT 1 FROM files WHERE project_id=? AND integrity_status IS NULL LIMIT 1",
+        (project_id,)).fetchone() is not None
+
+
+def _has_unresolved_taxa(conn):
+    """True if any sample taxon has no row in the taxa table yet.
+
+    Gates the taxonomy step on *new* taxa (a fresh name, or one changed to a
+    string never resolved before) rather than on confirmation status -- taxa
+    stay unconfirmed until a manual `taxonomy apply`, so gating on `confirmed`
+    would re-resolve (and reload the taxdump) on every re-ingest. When the step
+    does run, resolve_catalog(redo=False) still refreshes all unconfirmed taxa.
+    """
+    return conn.execute(
+        """SELECT 1 FROM samples s LEFT JOIN taxa t ON t.taxon = s.taxon
+           WHERE s.taxon IS NOT NULL AND s.taxon != ''
+             AND t.taxon IS NULL LIMIT 1""").fetchone() is not None
+
+
 def cmd_ingest(args):
+    """Ingest a map file, then auto-run integrity + taxonomy on new/changed data.
+
+    Re-ingesting a project upserts its rows (Taxon edits included). The pipeline
+    steps are gated so unchanged re-runs are cheap: integrity only touches
+    projects with never-checked files, taxonomy only runs when unresolved taxa
+    exist. Samples dropped from a CSV are reported but left in place (not pruned).
+    """
+    from odna import integrity as ointegrity
+    from odna import taxonomy as otax
+    icons = {"pass": "OK", "warn": "WARN", "fail": "FAIL"}
     conn = odb.connect(args.db)
     odb.init_db(conn)
+
+    print("== ingest ==")
     results = oingest.ingest_map_file(conn, args.map_file, seqdata_root=args.seqdata_root,
                                       metadata_root=args.metadata_root)
-    conn.close()
     n_fail = 0
-    for project_id, findings, status in results:
-        icon = {"pass": "OK", "warn": "WARN", "fail": "FAIL"}[status]
-        print(f"[{icon}] {project_id}")
+    ingested = []  # project_ids that did not FAIL
+    tot_new = tot_changed = tot_files = 0
+    for project_id, findings, status, stats in results:
+        print(f"[{icons[status]}] {project_id}")
         for f in findings:
             print(f"    {f.level}: {f.message}")
         if status == "fail":
             n_fail += 1
-    print(f"\ningested {len(results)} project(s), {n_fail} rejected (FAIL)")
+            continue
+        ingested.append(project_id)
+        tot_new += stats["new_samples"]
+        tot_changed += stats["changed_samples"]
+        tot_files += stats["new_files"]
+        for sid in stats["orphan_samples"]:
+            print(f"    WARN: sample {sid} in catalog but not in this CSV (kept; not pruned)")
+    print(f"ingested {len(results)} project(s), {n_fail} rejected (FAIL); "
+          f"{tot_new} new sample(s), {tot_changed} changed, {tot_files} new file(s)")
+
+    if not args.skip_integrity:
+        print("\n== integrity ==")
+        if not args.seqdata_root:
+            print("(skipped: pass --seqdata-root to check files on disk)")
+        else:
+            pending = [pid for pid in ingested if _has_unchecked_files(conn, pid)]
+            if not pending:
+                print("(no new/unchecked files)")
+            for pid in pending:
+                res = ointegrity.check_catalog_integrity(
+                    conn, seqdata_root=args.seqdata_root, only_project=pid, jobs=args.jobs)
+                s = res.get(pid)
+                if s is None:
+                    print(f"[--] {pid}: no files")
+                    continue
+                print(f"[{icons[s['status']]}] {pid}: {s['n_files']} file(s), "
+                      f"{s['n_ok']} ok, {s['n_gzip_error']} gzip-error, "
+                      f"{s['n_format_error']} format-error, {s['n_unchecked']} unchecked")
+                for w in s["parity_warnings"]:
+                    print(f"    WARN: read-count parity: {w}")
+
+    if not args.skip_taxonomy:
+        print("\n== taxonomy resolve ==")
+        if not _has_unresolved_taxa(conn):
+            print("(no new taxa to resolve)")
+        else:
+            taxdir = args.taxdir or _default_taxdir(args.db)
+            tax_results = otax.resolve_catalog(conn, taxdir, redo=False)
+            review = os.path.join(os.path.dirname(os.path.abspath(args.db)) or ".",
+                                  "taxonomy_review.csv")
+            otax.write_review_csv(tax_results, review)
+            n_flag = sum(1 for d in tax_results if d["match_type"] != "exact")
+            print(f"resolved {len(tax_results)} taxa ({n_flag} fuzzy/unresolved)")
+            if tax_results:
+                print(f"review + edit confirmed_taxid in: {review}")
+                print(f"then: odna.py --db {args.db} taxonomy apply --review {review}")
+
+    conn.close()
+    print("\ningest complete.")
 
 
 def cmd_checksums(args):
@@ -130,62 +211,6 @@ def cmd_integrity(args):
             print(f"    WARN: read-count parity: {w}")
 
 
-def cmd_onboard(args):
-    """Ingest + integrity + taxonomy resolve for a new batch, one map file."""
-    from odna import integrity as ointegrity
-    from odna import taxonomy as otax
-    icons = {"pass": "OK", "warn": "WARN", "fail": "FAIL"}
-    conn = odb.connect(args.db)
-    odb.init_db(conn)
-
-    print("== ingest ==")
-    results = oingest.ingest_map_file(conn, args.map_file, seqdata_root=args.seqdata_root,
-                                      metadata_root=args.metadata_root)
-    n_fail = 0
-    new_projects = []
-    for project_id, findings, status in results:
-        print(f"[{icons[status]}] {project_id}")
-        for f in findings:
-            print(f"    {f.level}: {f.message}")
-        if status == "fail":
-            n_fail += 1
-        else:
-            new_projects.append(project_id)
-    print(f"ingested {len(results)} project(s), {n_fail} rejected (FAIL)")
-
-    if not args.skip_integrity:
-        print("\n== integrity ==")
-        if not new_projects:
-            print("(no newly ingested projects to check)")
-        for pid in new_projects:
-            res = ointegrity.check_catalog_integrity(
-                conn, seqdata_root=args.seqdata_root, only_project=pid, jobs=args.jobs)
-            s = res.get(pid)
-            if s is None:
-                print(f"[--] {pid}: no files")
-                continue
-            print(f"[{icons[s['status']]}] {pid}: {s['n_files']} file(s), "
-                  f"{s['n_ok']} ok, {s['n_gzip_error']} gzip-error, "
-                  f"{s['n_format_error']} format-error, {s['n_unchecked']} unchecked")
-            for w in s["parity_warnings"]:
-                print(f"    WARN: read-count parity: {w}")
-
-    if not args.skip_taxonomy:
-        print("\n== taxonomy resolve ==")
-        taxdir = args.taxdir or _default_taxdir(args.db)
-        tax_results = otax.resolve_catalog(conn, taxdir, redo=False)
-        review = os.path.join(os.path.dirname(os.path.abspath(args.db)) or ".",
-                              "taxonomy_review.csv")
-        otax.write_review_csv(tax_results, review)
-        n_flag = sum(1 for d in tax_results if d["match_type"] != "exact")
-        print(f"resolved {len(tax_results)} taxa ({n_flag} fuzzy/unresolved)")
-        print(f"review + edit confirmed_taxid in: {review}")
-        print(f"then: odna.py --db {args.db} taxonomy apply --review {review}")
-
-    conn.close()
-    print("\nonboard complete.")
-
-
 def cmd_query(args):
     conn = odb.connect(args.db)
     if args.what == "uniq-id":
@@ -251,11 +276,18 @@ def build_parser():
 
     sub.add_parser("init-db").set_defaults(func=cmd_init_db)
 
-    pi = sub.add_parser("ingest", help="load CSV map files")
+    pi = sub.add_parser(
+        "ingest",
+        help="load CSV map file(s); auto-run integrity + taxonomy on new/changed data")
     pi.add_argument("map_file", help="two-column map file (metadata csv, data dir)")
     pi.add_argument("--metadata-root",
                     help="dir holding the per-project metadata CSVs (default: map file's dir)")
-    pi.add_argument("--seqdata-root", help="optional root of raw_sequence_data for disk checks")
+    pi.add_argument("--seqdata-root",
+                    help="root of raw_sequence_data; enables disk checks + the integrity step")
+    pi.add_argument("--jobs", type=int, default=None, help="integrity worker count")
+    pi.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
+    pi.add_argument("--skip-integrity", action="store_true", help="skip the integrity step")
+    pi.add_argument("--skip-taxonomy", action="store_true", help="skip the taxonomy step")
     pi.set_defaults(func=cmd_ingest)
 
     pc = sub.add_parser("checksums", help="load + compare rclone md5sum output")
@@ -277,19 +309,6 @@ def build_parser():
     pin.add_argument("--jobs", type=int, default=None,
                      help="concurrent workers (default: min(8, CPU count))")
     pin.set_defaults(func=cmd_integrity)
-
-    po = sub.add_parser("onboard",
-                        help="new batch: ingest + integrity + taxonomy resolve in one go")
-    po.add_argument("map_file", help="two-column map file (metadata csv, data dir)")
-    po.add_argument("--metadata-root",
-                    help="dir holding the per-project metadata CSVs (default: map file's dir)")
-    po.add_argument("--seqdata-root", required=True,
-                    help="root of raw_sequence_data (files must be on disk for integrity)")
-    po.add_argument("--jobs", type=int, default=None, help="integrity worker count")
-    po.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
-    po.add_argument("--skip-integrity", action="store_true", help="skip the integrity step")
-    po.add_argument("--skip-taxonomy", action="store_true", help="skip the taxonomy step")
-    po.set_defaults(func=cmd_onboard)
 
     pq = sub.add_parser("query", help="lookups")
     pq.add_argument("what", choices=["uniq-id", "search", "unbacked", "mismatches",

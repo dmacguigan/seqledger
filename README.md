@@ -55,14 +55,6 @@ tests/                pytest suite + fixture builders
 ## Usage
 
 ```bash
-# 0. new batch, all at once: ingest + integrity + taxonomy resolve.
-#    (init-db is implicit; checksums stay separate as they need rclone output,
-#    and `taxonomy apply` stays a manual review step.) Steps 1/4b/5 below run
-#    the same stages individually.
-python odna.py --db oceandna_catalog.db onboard map_file.txt \
-    --metadata-root ../raw_sequence_metadata \
-    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
-
 # 1. create the catalog
 python odna.py --db oceandna_catalog.db init-db
 
@@ -70,6 +62,17 @@ python odna.py --db oceandna_catalog.db init-db
 #    same format as scripts/.../example_map_file.txt. Per-project CSVs are
 #    looked up in --metadata-root (default: the map file's own dir).
 #    --seqdata-root enables on-disk R1/R2 + orphan checks when data is reachable.
+#
+#    ingest is self-driving: after loading rows it auto-runs the integrity and
+#    taxonomy-resolve steps (4b + 5 below) on whatever is new or changed. It
+#    upserts, so re-running on an edited CSV updates the rows (Taxon edits
+#    included) and re-resolves any changed name. The follow-on steps are gated
+#    so unchanged re-runs are cheap: integrity only touches files it has never
+#    checked (and needs --seqdata-root to reach them on disk), taxonomy only
+#    runs when a genuinely new Taxon string appears. Samples dropped from a CSV
+#    are reported but kept, not pruned. Use --skip-integrity / --skip-taxonomy
+#    to load metadata only; checksums stay separate (they need rclone output)
+#    and `taxonomy apply` stays a manual review step.
 python odna.py --db oceandna_catalog.db ingest map_file.txt \
     --metadata-root ../raw_sequence_metadata \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data

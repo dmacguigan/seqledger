@@ -12,7 +12,7 @@ with a ThreadPoolExecutor; all DB writes happen on the calling thread.
 import gzip
 import os
 import zlib
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 
 # Per-file integrity_status values.
@@ -75,12 +75,15 @@ def _log_run(conn, project_id, status, today):
         (project_id, today, status))
 
 
-def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=None):
+def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=None,
+                            progress=True):
     """Check gzip/FASTQ integrity for cataloged files and persist results.
 
     seqdata_root overrides the per-project stored root (else projects.seqdata_root
     is used). only_project limits to one project_id. jobs sets the worker count
-    (default min(8, cpu count)). Returns {project_id: summary_dict}.
+    (default min(8, cpu count)). With progress=True, prints a live 'checked
+    i/total files' counter (this reads every byte, so it can take a while).
+    Returns {project_id: summary_dict}.
     """
     if jobs is None:
         jobs = min(8, os.cpu_count() or 1)
@@ -102,10 +105,15 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
 
     results = {}  # file_pk -> result dict
     if to_check:
+        total = len(to_check)
         with ThreadPoolExecutor(max_workers=jobs) as ex:
             futures = {ex.submit(check_fastq_gz, p): pk for pk, p in to_check.items()}
-            for fut, pk in futures.items():
-                results[pk] = fut.result()
+            for i, fut in enumerate(as_completed(futures), 1):
+                results[futures[fut]] = fut.result()
+                if progress and (i % 25 == 0 or i == total):
+                    print(f"\r  checked {i}/{total} files", end="", flush=True)
+        if progress:
+            print()
     for pk in paths:
         results.setdefault(pk, {"status": UNCHECKED, "n_reads": None, "detail": None})
 

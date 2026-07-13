@@ -162,38 +162,52 @@ def name_to_taxid(idx, name):
     return rows[0][0]
 
 
-def build_genus_index(idx):
-    """{first_char: [(name_lower, name, taxid)]} for all genus-rank scientific names.
+# Ranks indexed for fuzzy name correction: genus plus the higher ranks, so a
+# single misspelled genus OR a misspelled family/order/etc can be corrected.
+_INDEX_RANKS = (
+    "genus", "subfamily", "family", "superfamily", "infraorder", "suborder",
+    "order", "superorder", "infraclass", "subclass", "class", "superclass",
+    "subphylum", "phylum", "kingdom", "superkingdom",
+)
 
-    Built once per resolve run to back fuzzy genus correction without an
-    all-rows scan per lookup.
+
+def build_name_index(idx, ranks=_INDEX_RANKS):
+    """{first_char: [(name_lower, name, taxid, rank)]} for scientific names at ranks.
+
+    Built once per resolve run to back fuzzy name correction without an all-rows
+    scan per lookup.
     """
     index = {}
-    for name, taxid in idx.execute(
-            "SELECT nm.name, nm.taxid FROM tax_names nm "
-            "JOIN tax_nodes nd ON nd.taxid = nm.taxid "
-            "WHERE nd.rank='genus' AND nm.name_class='scientific name'"):
-        index.setdefault(name[:1].lower(), []).append((name.lower(), name, taxid))
+    q = ("SELECT nm.name, nm.taxid, nd.rank FROM tax_names nm "
+         "JOIN tax_nodes nd ON nd.taxid = nm.taxid "
+         "WHERE nm.name_class='scientific name' AND nd.rank IN (%s)"
+         % ",".join("?" * len(ranks)))
+    for name, taxid, rank in idx.execute(q, ranks):
+        index.setdefault(name[:1].lower(), []).append((name.lower(), name, taxid, rank))
     return index
 
 
-def fuzzy_genus(genus_index, genus, max_dist=2):
-    """Nearest genus-rank name within max_dist edits. Returns (taxid, name) or None.
+def fuzzy_name(name_index, query, allowed_ranks=None, max_dist=2):
+    """Nearest indexed name within max_dist edits. Returns (taxid, name, rank) or None.
 
-    Pruned to the same first letter and a length window so a single misspelled
-    genus (e.g. 'Bragmaceros' -> 'Bregmaceros') is corrected cheaply.
+    Pruned to the same first letter and a length window so a single misspelling
+    (e.g. 'Bragmaceros' -> 'Bregmaceros', 'Ophiidiae' -> 'Ophidiidae') is
+    corrected cheaply. allowed_ranks restricts candidates (e.g. genus-only when
+    anchoring a binomial); the smallest edit distance wins.
     """
-    gl = genus.lower()
+    ql = query.lower()
     best = None
-    for nl, name, taxid in genus_index.get(gl[:1], ()):
-        if abs(len(nl) - len(gl)) > max_dist:
+    for nl, name, taxid, rank in name_index.get(ql[:1], ()):
+        if allowed_ranks is not None and rank not in allowed_ranks:
             continue
-        dist = _levenshtein(gl, nl)
+        if abs(len(nl) - len(ql)) > max_dist:
+            continue
+        dist = _levenshtein(ql, nl)
         if dist <= max_dist and (best is None or dist < best[0]):
-            best = (dist, taxid, name)
+            best = (dist, taxid, name, rank)
             if dist == 0:
                 break
-    return (best[1], best[2]) if best else None
+    return (best[1], best[2], best[3]) if best else None
 
 
 def ranked_lineage(idx, taxid):
@@ -287,14 +301,15 @@ def _exact(idx, d, cand, taxid):
     return d
 
 
-def _resolve_one(idx, taxon, genus_index=None):
+def _resolve_one(idx, taxon, name_index=None):
     """Resolve one raw Taxon string across the many real-world formats.
 
     Order (first hit wins): exact binomial (most specific pair first, then the
     leading two tokens) -> genus-anchored fuzzy species -> exact single name
-    (genus / higher rank / informal group) -> fuzzy-corrected genus. Handles
-    rank-path forms (Family_Genus_species), placeholders (..._NA, sp. nov,
-    complex), open nomenclature (cf./aff.), and genus typos.
+    (genus / higher rank / informal group) -> fuzzy-corrected genus or higher
+    taxon. Handles rank-path forms (Family_Genus_species), placeholders
+    (..._NA, sp. nov, complex), open nomenclature (cf./aff.), and typos in a
+    genus or a higher-rank name.
     """
     toks = _tokenize(taxon)
     d = _blank(taxon, clean_taxon(taxon))
@@ -322,10 +337,10 @@ def _resolve_one(idx, taxon, genus_index=None):
                    if gi + 1 < len(toks) and not toks[gi + 1][:1].isupper() else None)
         if epithet:
             gtx = name_to_taxid(idx, genus)
-            if gtx is None and genus_index is not None:
-                hit = fuzzy_genus(genus_index, genus)
+            if gtx is None and name_index is not None:
+                hit = fuzzy_name(name_index, genus, allowed_ranks={"genus"})
                 if hit is not None:
-                    gtx, genus = hit
+                    gtx, genus, _ = hit
             if gtx is not None:
                 cand = f"{genus} {epithet}"
                 sp = genus_species(idx, gtx)
@@ -349,14 +364,17 @@ def _resolve_one(idx, taxon, genus_index=None):
         if tx is not None:
             return _exact(idx, d, cand, tx)
 
-    # 4. last resort: fuzzy-correct a lone genus that had no usable epithet.
-    if caps and genus_index is not None:
-        hit = fuzzy_genus(genus_index, caps[-1])
+    # 4. last resort: fuzzy-correct a lone capitalized token (genus or higher).
+    #    Distance 1 only: this path is unconstrained (no epithet to corroborate),
+    #    and a distance-2 higher-rank "correction" can silently map to an
+    #    unrelated taxon (e.g. fish 'Ophiidiae' -> mite 'Oppiidae').
+    if caps and name_index is not None:
+        hit = fuzzy_name(name_index, caps[-1], max_dist=1)
         if hit is not None:
-            gtx, gname = hit
-            d["match_type"] = "fuzzy_genus"
-            d["clean"] = gname
-            _fill_lineage(idx, d, gtx)
+            tx, name, rank = hit
+            d["match_type"] = "fuzzy_genus" if rank == "genus" else "fuzzy_higher"
+            d["clean"] = name
+            _fill_lineage(idx, d, tx)
             return d
     return d
 
@@ -377,13 +395,13 @@ def resolve_taxa(taxa, taxdir, progress=True):
     """
     build_index(taxdir)
     idx = open_index(taxdir)
-    genus_index = build_genus_index(idx)
+    name_index = build_name_index(idx)
     taxa = _dedup(taxa)
     total = len(taxa)
     out = []
     try:
         for i, t in enumerate(taxa, 1):
-            out.append(_resolve_one(idx, t, genus_index))
+            out.append(_resolve_one(idx, t, name_index))
             if progress and (i % 100 == 0 or i == total):
                 print(f"\r  resolved {i}/{total} taxa", end="", flush=True)
         if progress and total:

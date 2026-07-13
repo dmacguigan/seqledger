@@ -138,6 +138,14 @@ def test_informal_lowercase_group(tmp_path):
     assert d["match_type"] == "exact" and d["taxid"] == 8040
 
 
+def test_fuzzy_higher_rank(tmp_path):
+    """A misspelled higher-rank name (family) is fuzzy-corrected."""
+    taxdir = _write_taxdump(str(tmp_path / "tax"))
+    d = _resolve(taxdir, "Gaddidae")  # typo of family Gadidae
+    assert d["match_type"] == "fuzzy_higher"
+    assert d["taxid"] == 8040 and d["rank"] == "family"
+
+
 def test_ranked_lineage_columns(tmp_path):
     taxdir = _write_taxdump(str(tmp_path / "tax"))
     d = _resolve(taxdir, "Gadus morhua")

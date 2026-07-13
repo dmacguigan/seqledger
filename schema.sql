@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_files_sample ON files(sample_pk);
 CREATE TABLE IF NOT EXISTS taxa (
     taxon        TEXT PRIMARY KEY,   -- raw samples.taxon string
     clean        TEXT,               -- normalized 'Genus species'
-    match_type   TEXT,               -- exact | fuzzy_species | fuzzy_genus | unresolved | confirmed
+    match_type   TEXT,               -- exact | fuzzy_species | fuzzy_genus | fuzzy_higher | unresolved | confirmed
     taxid        INTEGER,
     sci_name     TEXT,               -- NCBI scientific name of the matched node
     rank         TEXT,               -- finest resolved rank

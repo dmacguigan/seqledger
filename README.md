@@ -55,6 +55,14 @@ tests/                pytest suite + fixture builders
 ## Usage
 
 ```bash
+# 0. new batch, all at once: ingest + integrity + taxonomy resolve.
+#    (init-db is implicit; checksums stay separate as they need rclone output,
+#    and `taxonomy apply` stays a manual review step.) Steps 1/4b/5 below run
+#    the same stages individually.
+python odna.py --db oceandna_catalog.db onboard map_file.txt \
+    --metadata-root ../raw_sequence_metadata \
+    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
+
 # 1. create the catalog
 python odna.py --db oceandna_catalog.db init-db
 

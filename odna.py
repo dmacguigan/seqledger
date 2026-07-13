@@ -7,6 +7,7 @@ Subcommands:
   checksums   load + compare `rclone md5sum` output from Store and P-drive
   validate    re-check the catalog and print findings
   integrity   gzip + FASTQ structural integrity check of cataloged files
+  onboard     new batch: ingest + integrity + taxonomy resolve in one command
   taxonomy    resolve sample taxa to NCBI TaxIDs (resolve / apply)
   query       lookups (uniq-id, search, unbacked, mismatches, summary, taxa)
   gui         launch the Streamlit browse GUI (prints SSH tunnel command)
@@ -129,6 +130,62 @@ def cmd_integrity(args):
             print(f"    WARN: read-count parity: {w}")
 
 
+def cmd_onboard(args):
+    """Ingest + integrity + taxonomy resolve for a new batch, one map file."""
+    from odna import integrity as ointegrity
+    from odna import taxonomy as otax
+    icons = {"pass": "OK", "warn": "WARN", "fail": "FAIL"}
+    conn = odb.connect(args.db)
+    odb.init_db(conn)
+
+    print("== ingest ==")
+    results = oingest.ingest_map_file(conn, args.map_file, seqdata_root=args.seqdata_root,
+                                      metadata_root=args.metadata_root)
+    n_fail = 0
+    new_projects = []
+    for project_id, findings, status in results:
+        print(f"[{icons[status]}] {project_id}")
+        for f in findings:
+            print(f"    {f.level}: {f.message}")
+        if status == "fail":
+            n_fail += 1
+        else:
+            new_projects.append(project_id)
+    print(f"ingested {len(results)} project(s), {n_fail} rejected (FAIL)")
+
+    if not args.skip_integrity:
+        print("\n== integrity ==")
+        if not new_projects:
+            print("(no newly ingested projects to check)")
+        for pid in new_projects:
+            res = ointegrity.check_catalog_integrity(
+                conn, seqdata_root=args.seqdata_root, only_project=pid, jobs=args.jobs)
+            s = res.get(pid)
+            if s is None:
+                print(f"[--] {pid}: no files")
+                continue
+            print(f"[{icons[s['status']]}] {pid}: {s['n_files']} file(s), "
+                  f"{s['n_ok']} ok, {s['n_gzip_error']} gzip-error, "
+                  f"{s['n_format_error']} format-error, {s['n_unchecked']} unchecked")
+            for w in s["parity_warnings"]:
+                print(f"    WARN: read-count parity: {w}")
+
+    if not args.skip_taxonomy:
+        print("\n== taxonomy resolve ==")
+        taxdir = args.taxdir or _default_taxdir(args.db)
+        tax_results = otax.resolve_catalog(conn, taxdir, redo=False)
+        review = os.path.join(os.path.dirname(os.path.abspath(args.db)) or ".",
+                              "taxonomy_review.csv")
+        otax.write_review_csv(tax_results, review)
+        n_flag = sum(1 for d in tax_results if d["match_type"] != "exact")
+        print(f"resolved {len(tax_results)} taxa ({n_flag} fuzzy/unresolved)")
+        print(f"review + edit confirmed_taxid in: {review}")
+        print(f"then: odna.py --db {args.db} taxonomy apply --review {review}")
+
+    conn.close()
+    print("\nonboard complete.")
+
+
 def cmd_query(args):
     conn = odb.connect(args.db)
     if args.what == "uniq-id":
@@ -220,6 +277,19 @@ def build_parser():
     pin.add_argument("--jobs", type=int, default=None,
                      help="concurrent workers (default: min(8, CPU count))")
     pin.set_defaults(func=cmd_integrity)
+
+    po = sub.add_parser("onboard",
+                        help="new batch: ingest + integrity + taxonomy resolve in one go")
+    po.add_argument("map_file", help="two-column map file (metadata csv, data dir)")
+    po.add_argument("--metadata-root",
+                    help="dir holding the per-project metadata CSVs (default: map file's dir)")
+    po.add_argument("--seqdata-root", required=True,
+                    help="root of raw_sequence_data (files must be on disk for integrity)")
+    po.add_argument("--jobs", type=int, default=None, help="integrity worker count")
+    po.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
+    po.add_argument("--skip-integrity", action="store_true", help="skip the integrity step")
+    po.add_argument("--skip-taxonomy", action="store_true", help="skip the taxonomy step")
+    po.set_defaults(func=cmd_onboard)
 
     pq = sub.add_parser("query", help="lookups")
     pq.add_argument("what", choices=["uniq-id", "search", "unbacked", "mismatches",

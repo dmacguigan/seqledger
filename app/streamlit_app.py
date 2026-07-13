@@ -88,6 +88,13 @@ def load_projects(db_path, mtime):
                   WHERE f.project_id = p.project_id AND f.md5_match = 0) AS n_mismatch,
                (SELECT COUNT(*) FROM files f
                   WHERE f.project_id = p.project_id AND f.md5_match IS NULL) AS n_uncompared,
+               (SELECT COUNT(*) FROM files f
+                  WHERE f.project_id = p.project_id AND f.integrity_status = 'ok') AS n_integrity_ok,
+               (SELECT COUNT(*) FROM files f
+                  WHERE f.project_id = p.project_id
+                    AND f.integrity_status IN ('gzip_error', 'format_error')) AS n_integrity_bad,
+               (SELECT MAX(f.integrity_date) FROM files f
+                  WHERE f.project_id = p.project_id) AS integrity_date,
                p.owner_name, p.seq_data_relpath AS data_dir,
                p.data_check_date, p.date_ingested
         FROM projects p
@@ -129,6 +136,22 @@ def checksum_label(row):
     return "verified"
 
 
+def integrity_label(row):
+    n = row["n_files"]
+    if n == 0:
+        return "no files"
+    ok = int(row["n_integrity_ok"] or 0)
+    bad = int(row["n_integrity_bad"] or 0)
+    if bad:
+        return f"{bad} corrupt"
+    if ok == 0:
+        return "unchecked"
+    rest = n - ok - bad
+    if rest:
+        return f"incomplete ({rest} unchecked)"
+    return "verified"
+
+
 @st.cache_data(ttl=60)
 def load_files(db_path, mtime):
     return _sql(db_path, f"""
@@ -136,7 +159,9 @@ def load_files(db_path, mtime):
                {_FULL_PATH} AS full_path,
                f.size_bytes, f.owner_name,
                CASE f.md5_match WHEN 1 THEN 'OK' WHEN 0 THEN 'MISMATCH'
-                    ELSE 'uncompared' END AS backup
+                    ELSE 'uncompared' END AS backup,
+               COALESCE(f.integrity_status, 'unchecked') AS integrity,
+               f.n_reads, f.integrity_date
         FROM files f
         JOIN projects p ON p.project_id = f.project_id
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
@@ -200,6 +225,7 @@ def projects_view(df, issues):
         search = st.text_input("Search (project, description)")
         data_only = st.checkbox("Only data-files issues")
         cs_only = st.checkbox("Only checksum issues")
+        integ_only = st.checkbox("Only integrity issues")
     view = df
     if search:
         s = search.lower()
@@ -210,14 +236,18 @@ def projects_view(df, issues):
         view = view[view["data_check_status"] == "issues"]
     if cs_only:
         view = view[(view["n_mismatch"] > 0) | (view["n_uncompared"] > 0)]
+    if integ_only:
+        view = view[view["n_integrity_bad"] > 0]
 
     show = view.copy()
     show["data_files"] = show.apply(data_files_label, axis=1) if len(show) else []
     show["checksum"] = show.apply(checksum_label, axis=1) if len(show) else []
+    show["integrity"] = show.apply(integrity_label, axis=1) if len(show) else []
     st.caption(f"{len(view)} of {len(df)} projects. Select a row to list its "
                "data_files issues below (missing / orphan files).")
     cols = ["project_id", "source", "description", "n_samples", "n_files",
-            "data_files", "checksum", "owner_name", "data_dir", "date_ingested"]
+            "data_files", "checksum", "integrity", "owner_name", "data_dir",
+            "date_ingested"]
     event = st.dataframe(show[cols], width="stretch", hide_index=True,
                          on_select="rerun", selection_mode="single-row",
                          key="projects_table")
@@ -244,12 +274,16 @@ def files_view(df):
         projects = sorted(df["project_id"].unique())
         chosen = st.multiselect("Project", projects)
         backup = st.selectbox("Backup status", ["All", "OK", "MISMATCH", "uncompared"])
+        integrity = st.selectbox(
+            "Integrity", ["All", "ok", "gzip_error", "format_error", "unchecked"])
         search = st.text_input("Search (sample, filename)")
     view = df
     if chosen:
         view = view[view["project_id"].isin(chosen)]
     if backup != "All":
         view = view[view["backup"] == backup]
+    if integrity != "All":
+        view = view[view["integrity"] == integrity]
     if search:
         s = search.lower()
         mask = (view["sample_id"].str.lower().str.contains(s, na=False)
@@ -260,8 +294,10 @@ def files_view(df):
     show["size"] = show["size_bytes"].map(human_size)
     st.dataframe(
         show[["project_id", "sample_id", "role", "filename", "full_path",
-              "size", "owner_name", "backup"]],
-        width="stretch", hide_index=True)
+              "size", "owner_name", "backup", "integrity", "n_reads",
+              "integrity_date"]],
+        width="stretch", hide_index=True,
+        column_config={"n_reads": "reads", "integrity_date": "checked"})
     _download(view, "oceandna_files.csv")
 
 

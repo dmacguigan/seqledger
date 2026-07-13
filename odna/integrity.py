@@ -100,20 +100,26 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
     rows = conn.execute(sql, params).fetchall()
 
     # Resolve paths on the calling thread; check present files concurrently.
+    if progress:
+        print(f"scanning {len(rows)} cataloged file(s) on disk ...", flush=True)
     paths = {r["file_pk"]: _resolve_path(seqdata_root, r) for r in rows}
     to_check = {pk: p for pk, p in paths.items() if p and os.path.isfile(p)}
 
     results = {}  # file_pk -> result dict
     if to_check:
         total = len(to_check)
+        step = 1 if total <= 50 else max(1, total // 100)
         with ThreadPoolExecutor(max_workers=jobs) as ex:
             futures = {ex.submit(check_fastq_gz, p): pk for pk, p in to_check.items()}
             for i, fut in enumerate(as_completed(futures), 1):
                 results[futures[fut]] = fut.result()
-                if progress and (i % 25 == 0 or i == total):
+                if progress and (i == 1 or i % step == 0 or i == total):
                     print(f"\r  checked {i}/{total} files", end="", flush=True)
         if progress:
             print()
+    elif progress:
+        print("  no cataloged files found on disk to check "
+              "(is --seqdata-root correct, and are the files mounted?)")
     for pk in paths:
         results.setdefault(pk, {"status": UNCHECKED, "n_reads": None, "detail": None})
 

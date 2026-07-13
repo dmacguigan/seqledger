@@ -21,23 +21,62 @@ RANKS = ["domain", "kingdom", "phylum", "class", "order", "family", "genus", "sp
 RANK_COLUMNS = ["tax_" + r for r in RANKS]
 _RANK_ALIASES = {"superkingdom": "domain"}
 
-_OPEN_NOMEN = re.compile(r"\b(sp|spp|cf|aff|nr|indet)\.?\b.*$", re.IGNORECASE)
 _PARENS = re.compile(r"\([^)]*\)")
 _WS = re.compile(r"\s+")
-_TOKEN_OK = re.compile(r"^[A-Za-z.-]+$")
+_ALPHA = re.compile(r"^[a-z][a-z-]+$")  # >=2 ASCII letters/hyphen (checked lowercased)
+
+# Tokens that carry no name information: open-nomenclature qualifiers ("sp.",
+# "cf.", ...), new-species and complex/aggregate markers, and missing-value or
+# informal placeholders. Anything here is dropped before matching. Real-world
+# Taxon strings in the catalog use these heavily, often mid-string
+# (e.g. "Family_Genus_NA", "Genus species Cmplx", "Genus cf. epithet").
+_NOISE = {
+    "sp", "spp", "cf", "aff", "nr", "indet", "nov", "n", "nsp", "gen", "new",
+    "complex", "cmplx", "cmplex", "agg", "aggregate", "f", "var", "subsp",
+    "ssp", "group", "grp", "sensu", "lato", "stricto", "or", "and",
+    "na", "unknown", "unid", "unidentified", "larva", "larvae", "juvenile",
+}
+
+
+def _tokenize(x):
+    """Split a free-text Taxon into informative name tokens.
+
+    Drops parentheticals (subgenus / author), open-nomenclature and placeholder
+    noise, single letters (morphotype codes), and any token with a digit or
+    non-ASCII character. Case is preserved so a genus (capitalized) can be told
+    from an epithet (lowercase).
+    """
+    if not x:
+        return []
+    x = _PARENS.sub(" ", x.replace("_", " "))
+    x = x.replace("?", " ").replace(":", " ").replace("/", " ")
+    out = []
+    for raw in _WS.sub(" ", x).strip().split(" "):
+        t = raw.strip(".,;'\"")
+        if t.lower() in _NOISE:
+            continue
+        if not _ALPHA.match(t.lower()):  # >=2 letters, no digits/single chars
+            continue
+        out.append(t)
+    return out
+
+
+def _binomials(toks):
+    """Candidate 'Genus species' strings from adjacent (capitalized, next) pairs."""
+    return [f"{toks[i]} {toks[i + 1].lower()}"
+            for i in range(len(toks) - 1) if toks[i][:1].isupper()]
 
 
 def clean_taxon(x):
-    """Normalize a free-text Taxon to a queryable 'Genus species' (port of R)."""
-    if not x:
-        return ""
-    x = x.strip().replace("_", " ")
-    x = _WS.sub(" ", x)
-    x = _OPEN_NOMEN.sub("", x)
-    x = _PARENS.sub("", x)
-    x = _WS.sub(" ", x).strip()
-    toks = [t for t in x.split(" ") if _TOKEN_OK.match(t)]
-    return " ".join(toks[:2])
+    """Best-guess normalized name for display (most specific binomial, else genus)."""
+    toks = _tokenize(x)
+    bins = _binomials(toks)
+    if bins:
+        return bins[-1]
+    caps = [t for t in toks if t[:1].isupper()]
+    if caps:
+        return caps[-1]
+    return toks[0] if toks else ""
 
 
 # ---- taxdump download + SQLite index ----------------------------------------
@@ -123,11 +162,38 @@ def name_to_taxid(idx, name):
     return rows[0][0]
 
 
-def _sci_name(idx, taxid):
-    row = idx.execute(
-        "SELECT name FROM tax_names WHERE taxid=? AND name_class='scientific name' LIMIT 1",
-        (taxid,)).fetchone()
-    return row[0] if row else None
+def build_genus_index(idx):
+    """{first_char: [(name_lower, name, taxid)]} for all genus-rank scientific names.
+
+    Built once per resolve run to back fuzzy genus correction without an
+    all-rows scan per lookup.
+    """
+    index = {}
+    for name, taxid in idx.execute(
+            "SELECT nm.name, nm.taxid FROM tax_names nm "
+            "JOIN tax_nodes nd ON nd.taxid = nm.taxid "
+            "WHERE nd.rank='genus' AND nm.name_class='scientific name'"):
+        index.setdefault(name[:1].lower(), []).append((name.lower(), name, taxid))
+    return index
+
+
+def fuzzy_genus(genus_index, genus, max_dist=2):
+    """Nearest genus-rank name within max_dist edits. Returns (taxid, name) or None.
+
+    Pruned to the same first letter and a length window so a single misspelled
+    genus (e.g. 'Bragmaceros' -> 'Bregmaceros') is corrected cheaply.
+    """
+    gl = genus.lower()
+    best = None
+    for nl, name, taxid in genus_index.get(gl[:1], ()):
+        if abs(len(nl) - len(gl)) > max_dist:
+            continue
+        dist = _levenshtein(gl, nl)
+        if dist <= max_dist and (best is None or dist < best[0]):
+            best = (dist, taxid, name)
+            if dist == 0:
+                break
+    return (best[1], best[2]) if best else None
 
 
 def ranked_lineage(idx, taxid):
@@ -135,7 +201,7 @@ def ranked_lineage(idx, taxid):
 
     The parent chain is walked via the tax_nodes PK (indexed), then every
     scientific name for the chain is fetched in a single batched query -- this
-    avoids an N+1 _sci_name lookup per ancestor for each resolved taxon.
+    avoids an N+1 name lookup per ancestor for each resolved taxon.
     """
     ranks = {c: None for c in RANK_COLUMNS}
     chain = []  # [(taxid, rank)] from the input node up to (but not incl.) root
@@ -214,32 +280,82 @@ def _fill_lineage(idx, d, taxid):
     d["lineage"] = "; ".join(parts) if parts else None
 
 
-def _resolve_one(idx, taxon):
-    clean = clean_taxon(taxon)
-    d = _blank(taxon, clean)
-    if not clean:
+def _exact(idx, d, cand, taxid):
+    d["match_type"] = "exact"
+    d["clean"] = cand
+    _fill_lineage(idx, d, taxid)
+    return d
+
+
+def _resolve_one(idx, taxon, genus_index=None):
+    """Resolve one raw Taxon string across the many real-world formats.
+
+    Order (first hit wins): exact binomial (most specific pair first, then the
+    leading two tokens) -> genus-anchored fuzzy species -> exact single name
+    (genus / higher rank / informal group) -> fuzzy-corrected genus. Handles
+    rank-path forms (Family_Genus_species), placeholders (..._NA, sp. nov,
+    complex), open nomenclature (cf./aff.), and genus typos.
+    """
+    toks = _tokenize(taxon)
+    d = _blank(taxon, clean_taxon(taxon))
+    if not toks:
         return d
-    tx = name_to_taxid(idx, clean)
-    if tx is not None:
-        d["match_type"] = "exact"
-        _fill_lineage(idx, d, tx)
-        return d
-    toks = clean.split(" ")
-    if len(toks) == 2:
-        genus, epithet = toks
-        gtx = name_to_taxid(idx, genus)
-        if gtx is not None:
-            sp = genus_species(idx, gtx)
-            if sp:
-                scored = sorted(sp, key=lambda r: _levenshtein(clean.lower(), r[1].lower()))
-                best_taxid, best_name = scored[0]
-                dist = _levenshtein(clean.lower(), best_name.lower())
-                if dist <= max(2, -(-len(epithet) // 3)):
-                    d["match_type"] = "fuzzy_species"
-                    d["alternatives"] = " | ".join(f"{n} [{i}]" for i, n in scored[:5])
-                    _fill_lineage(idx, d, best_taxid)
-                    return d
+
+    # 1. exact binomial: capitalized pairs (most specific first), then leading two.
+    cands = list(reversed(_binomials(toks)))
+    if len(toks) >= 2:
+        first_two = f"{toks[0]} {toks[1]}"
+        if first_two not in cands:
+            cands.append(first_two)
+    for cand in cands:
+        tx = name_to_taxid(idx, cand)
+        if tx is not None:
+            return _exact(idx, d, cand, tx)
+
+    caps = [t for t in toks if t[:1].isupper()]
+
+    # 2. genus + epithet -> fuzzy species within the genus, else fall to the genus.
+    if caps:
+        genus = caps[-1]
+        gi = toks.index(genus)
+        epithet = (toks[gi + 1].lower()
+                   if gi + 1 < len(toks) and not toks[gi + 1][:1].isupper() else None)
+        if epithet:
+            gtx = name_to_taxid(idx, genus)
+            if gtx is None and genus_index is not None:
+                hit = fuzzy_genus(genus_index, genus)
+                if hit is not None:
+                    gtx, genus = hit
+            if gtx is not None:
+                cand = f"{genus} {epithet}"
+                sp = genus_species(idx, gtx)
+                if sp:
+                    scored = sorted(sp, key=lambda r: _levenshtein(cand.lower(), r[1].lower()))
+                    best_taxid, best_name = scored[0]
+                    if _levenshtein(cand.lower(), best_name.lower()) <= max(2, -(-len(epithet) // 3)):
+                        d["match_type"] = "fuzzy_species"
+                        d["clean"] = cand
+                        d["alternatives"] = " | ".join(f"{n} [{i}]" for i, n in scored[:5])
+                        _fill_lineage(idx, d, best_taxid)
+                        return d
+                d["match_type"] = "fuzzy_genus"
+                d["clean"] = genus
+                _fill_lineage(idx, d, gtx)
+                return d
+
+    # 3. exact single name: capitalized (most specific first), then any token.
+    for cand in list(reversed(caps)) + toks:
+        tx = name_to_taxid(idx, cand)
+        if tx is not None:
+            return _exact(idx, d, cand, tx)
+
+    # 4. last resort: fuzzy-correct a lone genus that had no usable epithet.
+    if caps and genus_index is not None:
+        hit = fuzzy_genus(genus_index, caps[-1])
+        if hit is not None:
+            gtx, gname = hit
             d["match_type"] = "fuzzy_genus"
+            d["clean"] = gname
             _fill_lineage(idx, d, gtx)
             return d
     return d
@@ -261,12 +377,13 @@ def resolve_taxa(taxa, taxdir, progress=True):
     """
     build_index(taxdir)
     idx = open_index(taxdir)
+    genus_index = build_genus_index(idx)
     taxa = _dedup(taxa)
     total = len(taxa)
     out = []
     try:
         for i, t in enumerate(taxa, 1):
-            out.append(_resolve_one(idx, t))
+            out.append(_resolve_one(idx, t, genus_index))
             if progress and (i % 100 == 0 or i == total):
                 print(f"\r  resolved {i}/{total} taxa", end="", flush=True)
         if progress and total:

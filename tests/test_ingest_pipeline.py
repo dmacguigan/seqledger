@@ -172,3 +172,41 @@ def test_reingest_reports_dropped_sample_as_orphan(tmp_path, capsys):
     conn = odb.connect(db)
     # s2 is kept, not pruned
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 2
+
+
+def test_ingest_prune_refreshes_data_files_report(tmp_path, capsys):
+    # bad1's files are listed in the CSV but never created on disk -> flagged
+    # 'missing from disk'. After removing bad1 and re-ingesting with --prune, the
+    # pipeline's data-files check must clear those stale rows without a manual
+    # `validate` (the bug: pruned file rows were gone but the report still showed
+    # them missing).
+    root = str(tmp_path / "raw_sequence_data")
+    db = str(tmp_path / "cat.db")
+    cli = _load_cli()
+
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1"),
+            ("bad1", "bad1_1.fastq.gz", "bad1_2.fastq.gz", "Gadus morhua", "U2")]
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows,
+                 disk_files=["s1_1.fastq.gz", "s1_2.fastq.gz"])
+    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
+    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--skip-taxonomy"])
+
+    conn = odb.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM data_check_issues").fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT data_check_n_missing FROM projects").fetchone()[0] == 2
+    conn.close()
+
+    # user drops bad1 from the CSV, re-ingests with --prune
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows[:1],
+                 disk_files=["s1_1.fastq.gz", "s1_2.fastq.gz"])
+    capsys.readouterr()
+    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root,
+              "--skip-taxonomy", "--prune"])
+
+    conn = odb.connect(db)
+    # stale rows cleared and status recomputed clean, no manual validate needed
+    assert conn.execute("SELECT COUNT(*) FROM data_check_issues").fetchone()[0] == 0
+    assert conn.execute("SELECT data_check_n_missing FROM projects").fetchone()[0] == 0
+    assert conn.execute("SELECT data_check_status FROM projects").fetchone()[0] == "ok"
+    assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 2

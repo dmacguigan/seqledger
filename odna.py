@@ -3,7 +3,7 @@
 
 Subcommands:
   init-db     create the catalog schema
-  ingest      load CSV map file(s); auto-run integrity + taxonomy on new/changed data
+  ingest      load CSV map file(s); auto-run integrity + taxonomy, refresh data-files check
   checksums   load + compare `rclone md5sum` output from Store and P-drive
   validate    re-check the catalog and print findings
   integrity   gzip + FASTQ structural integrity check of cataloged files
@@ -62,14 +62,17 @@ def _has_unresolved_taxa(conn):
 
 
 def cmd_ingest(args):
-    """Ingest a map file, then auto-run integrity + taxonomy on new/changed data.
+    """Ingest a map file, then auto-run integrity + taxonomy and refresh the check.
 
     Re-ingesting a project upserts its rows (Taxon edits included). The pipeline
     steps are gated so unchanged re-runs are cheap: integrity only touches
     projects with never-checked files, taxonomy only runs when unresolved taxa
     exist. Samples dropped from a CSV are reported but left in place unless
     --prune is given, which deletes samples/files the corrected CSV no longer
-    references (then re-run `validate --seqdata-root` to refresh status).
+    references. A final data-files check refreshes the stored data_check_issues
+    + checksum/status (with --seqdata-root it re-validates against disk; without,
+    it just clears rows made stale by a --prune) so the report and GUI reflect
+    the ingest without a separate `validate` run.
     """
     from odna import integrity as ointegrity
     from odna import taxonomy as otax
@@ -109,8 +112,7 @@ def cmd_ingest(args):
     print(f"ingested {len(results)} project(s), {n_fail} rejected (FAIL); "
           f"{tot_new} new sample(s), {tot_changed} changed, {tot_files} new file(s)")
     if args.prune and (tot_pruned_s or tot_pruned_f):
-        print(f"pruned {tot_pruned_s} sample(s) and {tot_pruned_f} stale file row(s); "
-              f"re-run `validate --seqdata-root` to refresh data-files + checksum status")
+        print(f"pruned {tot_pruned_s} sample(s) and {tot_pruned_f} stale file row(s)")
 
     if not args.skip_integrity:
         print("\n== integrity ==")
@@ -148,6 +150,38 @@ def cmd_ingest(args):
             if tax_results:
                 print(f"review + edit confirmed_taxid in: {review}")
                 print(f"then: odna.py --db {args.db} taxonomy apply --review {review}")
+
+    # Refresh the stored data-files + checksum state. Ingest changes what's
+    # cataloged -- new/changed rows and, with --prune, deletions -- so the
+    # data_check_issues + counts (read by `validate` and the GUI) would
+    # otherwise stay stale until a manual `validate`. This is the step that
+    # makes a --prune actually clear the removed files from the report.
+    pruned_pids = [pid for pid, _, _, s in results
+                   if s["pruned_samples"] or s["pruned_files"]]
+    if ingested:
+        print("\n== data-files check ==")
+        if args.seqdata_root:
+            val = ovalidate.validate_catalog(conn, seqdata_root=args.seqdata_root)
+            for pid in ingested:
+                r = val.get(pid)
+                if r:
+                    tag = "pass" if r["data"]["status"] == "ok" else "warn"
+                    print(f"[{icons[tag]}] {pid}: data-files {_data_label(r['data'])}, "
+                          f"checksum {_checksum_label(r['checksum'])}")
+        elif pruned_pids:
+            # No disk access to recompute; drop the now-stale issue rows for
+            # pruned projects so the report does not show removed files.
+            for pid in pruned_pids:
+                conn.execute("DELETE FROM data_check_issues WHERE project_id=?", (pid,))
+                conn.execute(
+                    "UPDATE projects SET data_check_status='unchecked', "
+                    "data_check_n_missing=NULL, data_check_n_orphan=NULL WHERE project_id=?",
+                    (pid,))
+            conn.commit()
+            print("cleared stale data-files issues for pruned project(s); "
+                  "pass --seqdata-root (or run `validate --seqdata-root`) to recompute")
+        else:
+            print("(skipped: pass --seqdata-root to check files on disk)")
 
     conn.close()
     print("\ningest complete.")
@@ -293,7 +327,7 @@ def build_parser():
 
     pi = sub.add_parser(
         "ingest",
-        help="load CSV map file(s); auto-run integrity + taxonomy on new/changed data")
+        help="load CSV map file(s); auto-run integrity + taxonomy, refresh data-files check")
     pi.add_argument("map_file", help="two-column map file (metadata csv, data dir)")
     pi.add_argument("--metadata-root",
                     help="dir holding the per-project metadata CSVs (default: map file's dir)")

@@ -207,7 +207,6 @@ def samples_view(df, files_df):
         chosen = st.multiselect("Project", projects)
         backup = st.selectbox("Backup status", ["All", "Verified", "Not verified"])
         search = st.text_input("Search (sample, taxon, UniqID)")
-        show_files = st.checkbox("Show files for selected sample")
 
     view = df
     if chosen:
@@ -223,44 +222,39 @@ def samples_view(df, files_df):
                 | view["uniq_id"].str.lower().str.contains(s, na=False))
         view = view[mask]
 
-    hint = " Select a row to list its files below." if show_files else ""
-    st.caption(f"{len(view)} of {len(df)} samples "
-               f"(full R1/R2 paths, taxid + lineage are in the CSV export).{hint}")
+    st.caption(f"{len(view)} of {len(df)} samples (full R1/R2 paths, taxid + "
+               "lineage are in the CSV export). Select a row to list its files below.")
     on_screen = ["project_id", "sample_id", "taxon", "ncbi_url", "tax_match",
                  "uniq_id", "backup_verified"]
-    select_kw = dict(on_select="rerun", selection_mode="single-row",
-                     key="samples_table") if show_files else {}
     event = st.dataframe(
         view[on_screen], width="stretch", hide_index=True,
+        on_select="rerun", selection_mode="single-row", key="samples_table",
         column_config={
             "tax_match": "match type",
             # The matched name (carried in the URL fragment) is the link label,
             # linking to its NCBI datasets taxonomy page.
             "ncbi_url": st.column_config.LinkColumn(
-                "NCBI taxon match", display_text=r"#(.+)$")},
-        **select_kw)
+                "NCBI taxon match", display_text=r"#(.+)$")})
     _download(view, "oceandna_samples.csv")
 
-    if show_files:
-        sel = event.selection.rows if event and event.selection else []
-        if not sel:
-            st.info("Select a sample row above to list its files.")
-            return
-        r = view.iloc[sel[0]]
-        pid, sid = r["project_id"], r["sample_id"]
-        fsub = files_df[(files_df["project_id"] == pid)
-                        & (files_df["sample_id"] == sid)].copy()
-        st.subheader(f"Files for sample {sid} ({pid})")
-        if len(fsub):
-            fsub["size"] = fsub["size_bytes"].map(human_size)
-            st.dataframe(
-                fsub[["direction", "filename", "full_path", "size", "owner_name",
-                      "backup", "integrity", "n_reads", "integrity_date"]],
-                width="stretch", hide_index=True,
-                column_config={"n_reads": "reads", "integrity_date": "checked"})
-            _download(fsub, f"{sid}_files.csv")
-        else:
-            st.info("No files cataloged for this sample.")
+    sel = event.selection.rows if event and event.selection else []
+    if not sel:
+        return
+    r = view.iloc[sel[0]]
+    pid, sid = r["project_id"], r["sample_id"]
+    fsub = files_df[(files_df["project_id"] == pid)
+                    & (files_df["sample_id"] == sid)].copy()
+    st.subheader(f"Files for sample {sid} ({pid})")
+    if len(fsub):
+        fsub["size"] = fsub["size_bytes"].map(human_size)
+        st.dataframe(
+            fsub[["direction", "filename", "full_path", "size", "owner_name",
+                  "backup", "integrity", "n_reads", "integrity_date"]],
+            width="stretch", hide_index=True,
+            column_config={"n_reads": "reads", "integrity_date": "checked"})
+        _download(fsub, f"{sid}_files.csv")
+    else:
+        st.info("No files cataloged for this sample.")
 
 
 def projects_view(df, issues):
@@ -325,7 +319,6 @@ def files_view(df, samples_df):
         integrity = st.selectbox(
             "Integrity", ["All", "ok", "gzip_error", "format_error", "unchecked"])
         search = st.text_input("Search (sample, filename)")
-        show_sample = st.checkbox("Show sample info for selected file")
     view = df
     if chosen:
         view = view[view["project_id"].isin(chosen)]
@@ -338,45 +331,41 @@ def files_view(df, samples_df):
         mask = (view["sample_id"].str.lower().str.contains(s, na=False)
                 | view["filename"].str.lower().str.contains(s, na=False))
         view = view[mask]
-    hint = " Select a row to show its sample info below." if show_sample else ""
-    st.caption(f"{len(view)} of {len(df)} files.{hint}")
+    st.caption(f"{len(view)} of {len(df)} files. "
+               "Select a row to show its sample info below.")
     show = view.copy()
     show["size"] = show["size_bytes"].map(human_size)
     on_screen = ["project_id", "sample_id", "direction", "filename", "full_path",
                  "size", "owner_name", "backup", "integrity", "n_reads",
                  "integrity_date"]
-    select_kw = dict(on_select="rerun", selection_mode="single-row",
-                     key="files_table") if show_sample else {}
     event = st.dataframe(
         show[on_screen], width="stretch", hide_index=True,
-        column_config={"n_reads": "reads", "integrity_date": "checked"},
-        **select_kw)
+        on_select="rerun", selection_mode="single-row", key="files_table",
+        column_config={"n_reads": "reads", "integrity_date": "checked"})
     _download(view, "oceandna_files.csv")
 
-    if show_sample:
-        sel = event.selection.rows if event and event.selection else []
-        if not sel:
-            st.info("Select a file row above to show its sample info.")
-            return
-        r = show.iloc[sel[0]]
-        pid, sid = r["project_id"], r["sample_id"]
-        ssub = samples_df[(samples_df["project_id"] == pid)
-                          & (samples_df["sample_id"] == sid)]
-        st.subheader(f"Sample info: {sid} ({pid})")
-        if len(ssub):
-            cols = [c for c in ["sample_id", "taxon", "ncbi_url", "tax_match",
-                                "taxid", "lineage", "uniq_id", "backup_verified",
-                                "r1_path", "r2_path"] if c in ssub.columns]
-            st.dataframe(
-                ssub[cols], width="stretch", hide_index=True,
-                column_config={
-                    "tax_match": "match type",
-                    "ncbi_url": st.column_config.LinkColumn(
-                        "NCBI taxon match", display_text=r"#(.+)$")})
-            _download(ssub, f"{sid}_sample.csv")
-        else:
-            st.info("No sample record for this file "
-                    "(it may be an orphan not tied to a cataloged sample).")
+    sel = event.selection.rows if event and event.selection else []
+    if not sel:
+        return
+    r = show.iloc[sel[0]]
+    pid, sid = r["project_id"], r["sample_id"]
+    ssub = samples_df[(samples_df["project_id"] == pid)
+                      & (samples_df["sample_id"] == sid)]
+    st.subheader(f"Sample info: {sid} ({pid})")
+    if len(ssub):
+        cols = [c for c in ["sample_id", "taxon", "ncbi_url", "tax_match",
+                            "taxid", "lineage", "uniq_id", "backup_verified",
+                            "r1_path", "r2_path"] if c in ssub.columns]
+        st.dataframe(
+            ssub[cols], width="stretch", hide_index=True,
+            column_config={
+                "tax_match": "match type",
+                "ncbi_url": st.column_config.LinkColumn(
+                    "NCBI taxon match", display_text=r"#(.+)$")})
+        _download(ssub, f"{sid}_sample.csv")
+    else:
+        st.info("No sample record for this file "
+                "(it may be an orphan not tied to a cataloged sample).")
 
 
 @st.cache_data(ttl=60)

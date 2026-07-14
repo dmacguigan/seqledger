@@ -1,6 +1,6 @@
 # Conda env for the GUI + test suite. Core tooling (ingest, checksums,
 # validate, query) needs none of this; it runs on the Python stdlib alone.
-name: odna
+name: seqledger
 channels:
   - conda-forge
 dependencies:

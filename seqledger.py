@@ -19,11 +19,11 @@ import shlex
 import subprocess
 import sys
 
-from odna import db as odb
-from odna import ingest as oingest
-from odna import checksums as ochecksums
-from odna import query as oquery
-from odna import validate as ovalidate
+from seqledger import db as odb
+from seqledger import ingest as oingest
+from seqledger import checksums as ochecksums
+from seqledger import query as oquery
+from seqledger import validate as ovalidate
 
 
 def _print_rows(rows, cols):
@@ -77,10 +77,10 @@ def cmd_ingest(args):
     GUI reflect the ingest without a separate `validate` run.
 
     Integrity (the gzip/FASTQ byte-scan) is deliberately NOT run here -- it reads
-    every byte and is slow, so it is a separate opt-in step: run `odna.py integrity`
+    every byte and is slow, so it is a separate opt-in step: run `seqledger.py integrity`
     (or `integrity --batch` on Hydra's I/O queue) when you want it.
     """
-    from odna import taxonomy as otax
+    from seqledger import taxonomy as otax
     icons = {"pass": "OK", "warn": "WARN", "fail": "FAIL"}
     conn = odb.connect(args.db)
     odb.init_db(conn)
@@ -159,7 +159,7 @@ def cmd_ingest(args):
             print(f"resolved {len(tax_results)} taxa ({n_flag} fuzzy/unresolved)")
             if tax_results:
                 print(f"review + edit confirmed_taxid in: {review}")
-                print(f"then: odna.py --db {args.db} taxonomy apply --review {review}")
+                print(f"then: seqledger.py --db {args.db} taxonomy apply --review {review}")
 
     # Refresh the stored data-files + checksum state. Ingest changes what's
     # cataloged -- new/changed rows and, with --prune, deletions -- so the
@@ -196,8 +196,8 @@ def cmd_ingest(args):
     conn.close()
     print("\ningest complete.")
     print(f"next: run the integrity check when ready (slow; reads every byte) --\n"
-          f"  odna.py --db {args.db} integrity --seqdata-root <raw_sequence_data>\n"
-          f"  or on Hydra: odna.py --db {args.db} integrity --batch "
+          f"  seqledger.py --db {args.db} integrity --seqdata-root <raw_sequence_data>\n"
+          f"  or on Hydra: seqledger.py --db {args.db} integrity --batch "
           f"--seqdata-root <raw_sequence_data>")
 
 
@@ -282,7 +282,7 @@ def _batch_script(name, log_path, slots, mem, mres, run_cmd):
     72h wall, 12h CPU/slot, 8G/slot, 6 slots and 2 concurrent jobs per user.
     """
     return f"""#!/bin/bash
-#$ -N odna_int_{name}
+#$ -N seqledger_int_{name}
 #$ -o {log_path}
 #$ -j y
 #$ -terse
@@ -295,7 +295,7 @@ def _batch_script(name, log_path, slots, mem, mres, run_cmd):
 
 echo + `date` $JOB_NAME running on $HOSTNAME in $QUEUE with jobID=$JOB_ID
 source ~/.bashrc
-conda activate odna
+conda activate seqledger
 {run_cmd}
 status=$?
 echo = `date` $JOB_NAME done exit=$status
@@ -322,7 +322,7 @@ def _submit_batch(args, projects):
     for d in (scripts_dir, logs_dir, results_dir):
         os.makedirs(d, exist_ok=True)
 
-    odna_py = os.path.abspath(__file__)
+    seqledger_py = os.path.abspath(__file__)
     db_path = os.path.abspath(args.db)
     slots, mem = args.slots, args.mem
     mres = slots * mem
@@ -333,7 +333,7 @@ def _submit_batch(args, projects):
         script_path = os.path.join(scripts_dir, f"integrity_{safe}.job")
         out_json = os.path.join(results_dir, f"{safe}.json")
         log_path = os.path.join(logs_dir, f"integrity_{safe}.log")
-        cmd = ["python", shlex.quote(odna_py), "--db", shlex.quote(db_path),
+        cmd = ["python", shlex.quote(seqledger_py), "--db", shlex.quote(db_path),
                "integrity", "--project", shlex.quote(pid),
                "--emit-json", shlex.quote(out_json), "--jobs", str(slots)]
         if args.seqdata_root:
@@ -367,11 +367,11 @@ def _submit_batch(args, projects):
     else:
         print(f"submitted {len(job_ids)} job(s) to lTIO.sq")
     print("when the jobs finish, merge their results into the catalog:")
-    print(f"  python {odna_py} --db {db_path} integrity --collect {results_dir}")
+    print(f"  python {seqledger_py} --db {db_path} integrity --collect {results_dir}")
 
 
 def cmd_integrity(args):
-    from odna import integrity as ointegrity
+    from seqledger import integrity as ointegrity
     conn = odb.connect(args.db)
     odb.init_db(conn)
 
@@ -440,7 +440,7 @@ def _default_taxdir(db_path):
 
 
 def cmd_taxonomy(args):
-    from odna import taxonomy as otax
+    from seqledger import taxonomy as otax
     conn = odb.connect(args.db)
     odb.init_db(conn)
     taxdir = args.taxdir or _default_taxdir(args.db)
@@ -459,7 +459,7 @@ def cmd_taxonomy(args):
         n_flag = sum(1 for d in results if d["match_type"] != "exact")
         print(f"resolved {len(results)} taxa ({n_flag} fuzzy/unresolved)")
         print(f"review + edit confirmed_taxid in: {review}")
-        print(f"then: odna.py --db {args.db} taxonomy apply --review {review}")
+        print(f"then: seqledger.py --db {args.db} taxonomy apply --review {review}")
     elif args.action == "apply":
         n = otax.apply_review(conn, taxdir, args.review)
         print(f"applied {n} confirmed taxid(s)")
@@ -467,7 +467,7 @@ def cmd_taxonomy(args):
 
 
 def cmd_gui(args):
-    from odna import gui as ogui
+    from seqledger import gui as ogui
     ogui.launch(args.db, port=args.port)
 
 

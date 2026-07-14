@@ -2,9 +2,9 @@ import gzip
 import json
 import os
 
-from odna import db as odb
-from odna import ingest as oingest
-from odna import integrity as oint
+from seqledger import db as odb
+from seqledger import ingest as oingest
+from seqledger import integrity as oint
 from helpers import make_project, write_map_file
 
 

@@ -1,4 +1,4 @@
-from odna.validate import validate_metadata, FAIL, WARN
+from seqledger.validate import validate_metadata, FAIL, WARN
 
 HEADER = ["ID", "R1", "R2", "Taxon", "UniqID"]
 

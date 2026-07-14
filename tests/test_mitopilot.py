@@ -1,6 +1,6 @@
 """MitoPilot map-file builder for the GUI Grab & Go export."""
 
-from odna import mitopilot as omito
+from seqledger import mitopilot as omito
 
 
 def _samples():

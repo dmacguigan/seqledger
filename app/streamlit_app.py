@@ -1,6 +1,6 @@
 """Read-only Streamlit GUI for browsing the Ocean DNA sequence data catalog.
 
-Launch via `python odna.py gui --db PATH` (which sets ODNA_DB and prints the SSH
+Launch via `python seqledger.py gui --db PATH` (which sets SEQLEDGER_DB and prints the SSH
 tunnel command). No SQL knowledge required: pick a view, search, filter, download CSV.
 
 Views:
@@ -18,10 +18,10 @@ import sys
 import pandas as pd
 import streamlit as st
 
-# Reach the odna package (this app lives in data_management_db/app/).
+# Reach the seqledger package (this app lives in data_management_db/app/).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from odna import rclone as orclone  # noqa: E402
-from odna import mitopilot as omito  # noqa: E402
+from seqledger import rclone as orclone  # noqa: E402
+from seqledger import mitopilot as omito  # noqa: E402
 
 NCBI_TAX_URL = "https://www.ncbi.nlm.nih.gov/datasets/taxonomy/"
 RANK_COLS = ["tax_domain", "tax_kingdom", "tax_phylum", "tax_class",
@@ -29,7 +29,7 @@ RANK_COLS = ["tax_domain", "tax_kingdom", "tax_phylum", "tax_class",
 RANK_LABELS = ["domain", "kingdom", "phylum", "class",
                "order", "family", "genus", "species"]
 
-DB_PATH = os.environ.get("ODNA_DB", "oceandna_catalog.db")
+DB_PATH = os.environ.get("SEQLEDGER_DB", "oceandna_catalog.db")
 
 # Full absolute path when the seqdata_root was captured at ingest, else the relpath.
 _FULL_PATH = "COALESCE(p.seqdata_root || '/' || f.rel_path, f.rel_path)"
@@ -481,7 +481,7 @@ def taxonomy_view(db_path, mtime):
     st.caption(f"{n_samples} samples across {n_proj} project(s); "
                "run `taxonomy resolve` to (re)populate. Unranked -> 'unknown'.")
     if not n_samples:
-        st.info("No resolved taxonomy yet. Run `odna.py taxonomy resolve`.")
+        st.info("No resolved taxonomy yet. Run `seqledger.py taxonomy resolve`.")
         return
 
     fig = px.sunburst(counts, path=cols, values="samples")
@@ -716,7 +716,7 @@ def custom_table_view(samples_df, paths_df):
                "`qsub <file>.job` from the login node (lTIO: 6 slots/user, 2 concurrent).")
     st.code(script, language="bash")
     st.download_button("Download submission script", script.encode(),
-                       "odna_rclone_copy.job", "text/x-shellscript")
+                       "seqledger_rclone_copy.job", "text/x-shellscript")
 
 
 def main():

@@ -1,6 +1,6 @@
 import os
 
-from odna import db as odb
+from seqledger import db as odb
 
 
 def _cols(conn, table):

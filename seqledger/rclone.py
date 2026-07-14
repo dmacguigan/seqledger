@@ -69,7 +69,7 @@ def estimate_size(file_rows):
 
 
 def build_copy_script(groups, dest, transfers=4, slots=4, mem=4,
-                      job_name="odna_rclone_copy", est_bytes=None, n_files=None):
+                      job_name="seqledger_rclone_copy", est_bytes=None, n_files=None):
     """Return a Hydra qsub script that rclone-copies the grouped files to dest.
 
     groups: list of (src_root, [rel_path, ...]) from group_by_root.

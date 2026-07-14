@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS idx_files_sample ON files(sample_pk);
 
 -- Controlled taxonomy per distinct raw Taxon string (shared across samples).
--- Populated by `odna.py taxonomy resolve` against a local NCBI taxdump.
+-- Populated by `seqledger.py taxonomy resolve` against a local NCBI taxdump.
 CREATE TABLE IF NOT EXISTS taxa (
     taxon        TEXT PRIMARY KEY,   -- raw samples.taxon string
     clean        TEXT,               -- normalized 'Genus species'

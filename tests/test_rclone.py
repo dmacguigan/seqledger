@@ -1,6 +1,6 @@
 """rclone copy-job builder for the GUI custom-table export."""
 
-from odna import rclone as orclone
+from seqledger import rclone as orclone
 
 
 def _rows():

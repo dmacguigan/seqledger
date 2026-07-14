@@ -1,8 +1,8 @@
 import os
 import pwd
 
-from odna import db as odb
-from odna import ingest as oingest
+from seqledger import db as odb
+from seqledger import ingest as oingest
 from helpers import make_project, write_map_file
 
 

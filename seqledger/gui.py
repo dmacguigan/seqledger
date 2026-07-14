@@ -16,7 +16,7 @@ def launch(db_path, port=8501, login_host="hydra-login01.si.edu"):
     print(f"  ssh -N -L {port}:{node}:{port} {user}@{login_host}\n")
     print(f"Then open http://localhost:{port} in your browser.\n")
 
-    env = dict(os.environ, ODNA_DB=os.path.abspath(db_path))
+    env = dict(os.environ, SEQLEDGER_DB=os.path.abspath(db_path))
     cmd = [
         sys.executable, "-m", "streamlit", "run", APP_PATH,
         "--server.address", "0.0.0.0",

@@ -46,8 +46,8 @@ kept for pip users).
 
 ```
 schema.sql            SQLite DDL (source of truth for tables)
-odna.py               CLI entry point
-odna/                 package: db, ingest, checksums, validate, integrity, taxonomy,
+seqledger.py               CLI entry point
+seqledger/                 package: db, ingest, checksums, validate, integrity, taxonomy,
                       query, gui, rclone (copy-job builder), mitopilot (map-file export)
 app/streamlit_app.py  read-only browse GUI
 tests/                pytest suite + fixture builders
@@ -57,7 +57,7 @@ tests/                pytest suite + fixture builders
 
 ```bash
 # 1. create the catalog
-python odna.py --db oceandna_catalog.db init-db
+python seqledger.py --db oceandna_catalog.db init-db
 
 # 2. ingest metadata -- AUTO-DISCOVERY (recommended): point at the sequence-data
 #    root and the metadata root; no map file needed. Every top-level folder in
@@ -83,7 +83,7 @@ python odna.py --db oceandna_catalog.db init-db
 #    leaves its old samples in place.) Use --skip-taxonomy to load metadata only.
 #    NOTE: the integrity byte-scan (4b) is NOT run by ingest -- it is slow, so run
 #    it separately when ready.
-python odna.py --db oceandna_catalog.db ingest \
+python seqledger.py --db oceandna_catalog.db ingest \
     --metadata-root ../raw_sequence_metadata \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 
@@ -91,21 +91,21 @@ python odna.py --db oceandna_catalog.db ingest \
 #    two-column map file (metadata csv, data dir), same format as
 #    scripts/.../example_map_file.txt. Per-project CSVs are looked up in
 #    --metadata-root (default: the map file's own dir).
-python odna.py --db oceandna_catalog.db ingest map_file.txt \
+python seqledger.py --db oceandna_catalog.db ingest map_file.txt \
     --metadata-root ../raw_sequence_metadata \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 
 # 3. checksums: run rclone md5sum on BOTH sides, then load + compare
 rclone md5sum SI-Hydra:/store/nmnh_ocean_dna/public/raw_sequence_data > store.md5
 rclone md5sum /Volumes/nmnh-ocean-dna/Hydra_backup/store/raw_sequence_data > pdrive.md5
-python odna.py --db oceandna_catalog.db checksums --store store.md5 --pdrive pdrive.md5
+python seqledger.py --db oceandna_catalog.db checksums --store store.md5 --pdrive pdrive.md5
 #   add --source ingest for new data, --project X to scope to one project
 
 # 4. re-check the whole catalog: two per-project results
 #    - data-files: reciprocal mapfile <-> disk (missing files + orphans);
 #      needs --seqdata-root to scan disk, and is persisted to `projects`.
 #    - checksum: Store vs P-drive md5 (from the `checksums` step above).
-python odna.py --db oceandna_catalog.db validate \
+python seqledger.py --db oceandna_catalog.db validate \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 
 # 4b. integrity: gzip + FASTQ structural check of cataloged files.
@@ -115,7 +115,7 @@ python odna.py --db oceandna_catalog.db validate \
 #    (integrity_status, gz_ok, n_reads); a per-project run status is logged to
 #    `validation_log`. Reads every byte, so it is a separate opt-in step; files
 #    are checked concurrently (--jobs, default min(8, CPU count)).
-python odna.py --db oceandna_catalog.db integrity \
+python seqledger.py --db oceandna_catalog.db integrity \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 #    (--seqdata-root is optional; each project's ingest-time root is used by default)
 
@@ -125,17 +125,17 @@ python odna.py --db oceandna_catalog.db integrity \
 #    (respects --project to limit to one). Each remote job checks its project and
 #    writes results to <batch-dir>/results/<project>.json instead of the DB -- no
 #    two Hydra nodes ever write the shared SQLite catalog at once. The env inside
-#    each job is `source ~/.bashrc; conda activate odna`.
+#    each job is `source ~/.bashrc; conda activate seqledger`.
 #    Tunables: --slots (mthread slots + remote --jobs, default 4), --mem (GB/slot,
 #    default 2), --batch-dir (default ./integrity_batch), --no-submit (write the
 #    scripts but don't qsub). Note lTIO caps: 6 slots/user, 2 concurrent jobs,
 #    8G/slot, 72h wall -- with the default 4 slots a 2nd concurrent job queues.
-python odna.py --db oceandna_catalog.db integrity --batch \
+python seqledger.py --db oceandna_catalog.db integrity --batch \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 #    Once the jobs finish, merge their JSON results back into the catalog (this is
 #    the only step that writes the DB; runs locally + serially, then aggregates
 #    per-project summaries + validation_log the same as a live run):
-python odna.py --db oceandna_catalog.db integrity --collect integrity_batch/results
+python seqledger.py --db oceandna_catalog.db integrity --collect integrity_batch/results
 #    Checkpointed + resumable per project: each job flushes its results JSON every
 #    ~200 checked files and, on restart, reloads its own JSON and skips already-done
 #    files -- so a job killed at the lTIO 72h wall / 12h-per-slot CPU cap resumes
@@ -145,7 +145,7 @@ python odna.py --db oceandna_catalog.db integrity --collect integrity_batch/resu
 #    submitting a no-op job for a project that is already fully checked, add
 #    --only-unchecked (skips projects with no never-checked file; ignored under
 #    --force):
-python odna.py --db oceandna_catalog.db integrity --batch --only-unchecked \
+python seqledger.py --db oceandna_catalog.db integrity --batch --only-unchecked \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 
 # 5. taxonomy: resolve free-text Taxon -> NCBI TaxID + lineage
@@ -157,19 +157,19 @@ python odna.py --db oceandna_catalog.db integrity --batch --only-unchecked \
 #    before but not yet confirmed, or --redo to re-resolve everything.
 #    NOTE: if you built a taxdump index before this version, rebuild it once so
 #    the new tax_names(taxid) index (large speed-up) is applied:
-#        python odna.py --db oceandna_catalog.db taxonomy resolve --rebuild-index
-python odna.py --db oceandna_catalog.db taxonomy resolve
+#        python seqledger.py --db oceandna_catalog.db taxonomy resolve --rebuild-index
+python seqledger.py --db oceandna_catalog.db taxonomy resolve
 #    edit confirmed_taxid in taxonomy_review.csv for any wrong fuzzy/unresolved
 #    rows, then fold the overrides back in:
-python odna.py --db oceandna_catalog.db taxonomy apply --review taxonomy_review.csv
+python seqledger.py --db oceandna_catalog.db taxonomy apply --review taxonomy_review.csv
 
 # 6. lookups
-python odna.py --db oceandna_catalog.db query summary
-python odna.py --db oceandna_catalog.db query uniq-id "USNM 477715"
-python odna.py --db oceandna_catalog.db query search Urophycis
-python odna.py --db oceandna_catalog.db query unbacked
-python odna.py --db oceandna_catalog.db query mismatches
-python odna.py --db oceandna_catalog.db query taxa      # fuzzy/unresolved taxa
+python seqledger.py --db oceandna_catalog.db query summary
+python seqledger.py --db oceandna_catalog.db query uniq-id "USNM 477715"
+python seqledger.py --db oceandna_catalog.db query search Urophycis
+python seqledger.py --db oceandna_catalog.db query unbacked
+python seqledger.py --db oceandna_catalog.db query mismatches
+python seqledger.py --db oceandna_catalog.db query taxa      # fuzzy/unresolved taxa
 ```
 
 ### Backfill of existing data
@@ -182,9 +182,9 @@ Same `checksums` command with `--source backfill` (the default). Run it per proj
 On Hydra (login node or `srun --pty` node), pointing at a DB copy on Scratch:
 
 ```bash
-conda env create -f environment.yml     # once; creates the `odna` env
-conda activate odna                      # or: mamba env create -f environment.yml
-python odna.py --db /scratch/nmnh_ocean_dna/oceandna_catalog.db gui --port 8501
+conda env create -f environment.yml     # once; creates the `seqledger` env
+conda activate seqledger                      # or: mamba env create -f environment.yml
+python seqledger.py --db /scratch/nmnh_ocean_dna/oceandna_catalog.db gui --port 8501
 ```
 
 (Existing env? `conda env update -f environment.yml`. Pip users: `pip install -r
@@ -251,7 +251,7 @@ auto-migrates older catalogs by adding the new columns.
 
 - Confirm the fifth map-file column name against a live map file. The guide says
   `UniqID`; the old script checked `UniqueID`. The validator currently accepts
-  either (`odna/db.py: UNIQID_ALIASES`); pin it once confirmed.
+  either (`seqledger/db.py: UNIQID_ALIASES`); pin it once confirmed.
 - Decide the canonical Store/Scratch paths for the master DB and its GUI copy.
 
 ## Tests

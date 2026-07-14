@@ -31,6 +31,53 @@ def _truncate(root, fn, n_trailing):
         f.write(raw[:-n_trailing])
 
 
+# ---- incremental skip / resumability ---------------------------------------
+
+def test_integrity_skips_unchanged_on_rerun(tmp_path):
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
+    assert all(r[0] == "ok" for r in
+               conn.execute("SELECT integrity_status FROM files"))
+
+    # Count real decompress calls: a re-run must re-read nothing (all skipped),
+    # and --force (recheck) must re-read every file.
+    real = oint.check_fastq_gz
+    calls = {"n": 0}
+
+    def counting(path, **kw):
+        calls["n"] += 1
+        return real(path, **kw)
+
+    oint.check_fastq_gz = counting
+    try:
+        oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
+        assert calls["n"] == 0  # unchanged + already-passed -> skipped, no re-read
+
+        calls["n"] = 0
+        oint.check_catalog_integrity(conn, seqdata_root=root, progress=False,
+                                     recheck=True)
+        assert calls["n"] == 2  # --force re-reads both files
+    finally:
+        oint.check_fastq_gz = real
+
+
+def test_integrity_rechecks_when_size_changes(tmp_path):
+    # A size change must bypass the skip (else real corruption would be hidden).
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
+    assert conn.execute(
+        "SELECT integrity_status FROM files WHERE filename='s1_1.fastq.gz'"
+    ).fetchone()[0] == "ok"
+
+    _truncate(root, "s1_1.fastq.gz", 4)  # shrinks size and corrupts the trailer
+    oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)  # no force
+    assert conn.execute(
+        "SELECT integrity_status FROM files WHERE filename='s1_1.fastq.gz'"
+    ).fetchone()[0] == "gzip_error"
+
+
 # ---- check_fastq_gz unit ----------------------------------------------------
 
 def test_check_fastq_gz_ok(tmp_path):

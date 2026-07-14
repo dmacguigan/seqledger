@@ -245,7 +245,8 @@ def cmd_integrity(args):
     conn = odb.connect(args.db)
     odb.init_db(conn)
     results = ointegrity.check_catalog_integrity(
-        conn, seqdata_root=args.seqdata_root, only_project=args.project, jobs=args.jobs)
+        conn, seqdata_root=args.seqdata_root, only_project=args.project, jobs=args.jobs,
+        recheck=args.force)
     conn.close()
     if not results:
         print("no cataloged files to check")
@@ -359,7 +360,11 @@ def build_parser():
                      help="root of raw_sequence_data (default: each project's stored root)")
     pin.add_argument("--project", help="limit to one project_id")
     pin.add_argument("--jobs", type=int, default=None,
-                     help="concurrent workers (default: min(8, CPU count))")
+                     help="concurrent read streams (default: min(8, CPU count); on a "
+                          "network mount try 16-32 to fill the pipe)")
+    pin.add_argument("--force", action="store_true",
+                     help="re-read every file, even ones that already passed and are "
+                          "unchanged (default: skip those for a fast, resumable run)")
     pin.set_defaults(func=cmd_integrity)
 
     pq = sub.add_parser("query", help="lookups")

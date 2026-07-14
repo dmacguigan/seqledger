@@ -7,8 +7,15 @@ reads from a C-level newline tally, and compares R1/R2 read counts per sample
 into `validation_log`. This is deliberately not FastQC: it verifies the data is
 readable and intact without the (slower) per-read analysis, and keeps no reports.
 
-Stdlib only. Decompression releases the GIL, so files are checked concurrently
-with a ThreadPoolExecutor; all DB writes happen on the calling thread.
+Decompression releases the GIL, so files are checked concurrently with a
+ThreadPoolExecutor; all DB writes happen on the calling thread. Stdlib-only by
+default, transparently using python-isal (ISA-L) for faster decode when present.
+
+Incremental + resumable: files that already passed and are unchanged on disk
+(same size) are skipped without re-reading, and results are committed as the run
+proceeds, so re-runs are cheap and an interrupted run resumes where it stopped.
+The dominant cost is reading every byte over the (often network-mounted) storage,
+so skipping unchanged files -- not a faster codec -- is the main speedup.
 """
 
 import gzip
@@ -17,6 +24,22 @@ import zlib
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import date
+
+# Prefer ISA-L (python-isal) for decompression when installed: a drop-in for
+# gzip.open that decodes ~2x faster and raises on the same corruption cases.
+# Falls back to stdlib gzip (which on Python 3.14+ is itself zlib-ng-backed).
+# This only helps when the check is CPU-bound; on a network mount the read
+# dominates and the incremental skip below is what actually saves time.
+_GZIP_ERRORS = (gzip.BadGzipFile, EOFError, zlib.error, OSError)
+try:
+    from isal import igzip as _fastgz, isal_zlib as _isal_zlib
+    _GZIP_ERRORS = _GZIP_ERRORS + (_isal_zlib.error,)
+except ImportError:
+    _fastgz = gzip
+
+# Persist accumulated per-file results (and commit) every this many checks, so a
+# long run is resumable: a kill mid-run keeps everything already checked.
+_COMMIT_EVERY = 200
 
 # Per-file integrity_status values.
 OK = "ok"
@@ -40,14 +63,14 @@ def check_fastq_gz(path, chunk_size=1 << 20):
     n_lines = 0
     ended_nl = True
     try:
-        with gzip.open(path, "rb") as fh:
+        with _fastgz.open(path, "rb") as fh:
             while True:
                 chunk = fh.read(chunk_size)
                 if not chunk:
                     break
                 n_lines += chunk.count(b"\n")
                 ended_nl = chunk.endswith(b"\n")
-    except (gzip.BadGzipFile, EOFError, zlib.error, OSError) as e:
+    except _GZIP_ERRORS as e:
         return {"status": GZIP_ERROR, "n_reads": None, "detail": str(e)}
 
     if not ended_nl:  # final record without a trailing newline still counts
@@ -58,15 +81,31 @@ def check_fastq_gz(path, chunk_size=1 << 20):
     return {"status": OK, "n_reads": n_lines // 4, "detail": None}
 
 
-def _check_path(path):
+def _check_path(path, cached=None, recheck=False):
     """Existence + integrity for one path (runs in a worker thread).
 
-    Missing files are 'unchecked' (a stat/open done here so the network round-trip
-    is parallelized); present files are validated by check_fastq_gz.
+    Does a single os.stat (one network round-trip, parallelized across workers).
+    Missing files are 'unchecked'. When the file previously passed (cached gz_ok=1)
+    and its on-disk size still matches the recorded size_bytes, it is skipped
+    without re-reading -- the expensive full decompress is replaced by one stat.
+    Pass recheck=True to force a full re-read regardless of cached state.
+
+    The returned dict carries "cached": True for a skip (its status/n_reads come
+    straight from the prior run), else the fresh check_fastq_gz result.
     """
-    if not os.path.isfile(path):
-        return {"status": UNCHECKED, "n_reads": None, "detail": "not found on disk"}
-    return check_fastq_gz(path)
+    try:
+        size = os.stat(path).st_size
+    except OSError:
+        return {"status": UNCHECKED, "n_reads": None, "detail": "not found on disk",
+                "cached": False}
+    if (not recheck and cached and cached.get("gz_ok") == 1
+            and cached.get("integrity_date") and cached.get("size_bytes") is not None
+            and size == cached["size_bytes"]):
+        return {"status": OK, "n_reads": cached.get("n_reads"), "detail": None,
+                "cached": True}
+    res = check_fastq_gz(path)
+    res["cached"] = False
+    return res
 
 
 def _resolve_path(seqdata_root, row):
@@ -92,13 +131,20 @@ def _log_run(conn, project_id, status, today):
 
 
 def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=None,
-                            progress=True):
+                            progress=True, recheck=False):
     """Check gzip/FASTQ integrity for cataloged files and persist results.
 
     seqdata_root overrides the per-project stored root (else projects.seqdata_root
     is used). only_project limits to one project_id. jobs sets the worker count
-    (default min(8, cpu count)). With progress=True, prints a live 'checked
-    i/total files' counter (this reads every byte, so it can take a while).
+    (default min(8, cpu count); on a network mount this is a *stream* count, not a
+    CPU count -- raising it can fill a pipe a single stream can't).
+
+    Incremental by default: a file that previously passed (gz_ok=1) and whose
+    on-disk size is unchanged is skipped without re-reading its bytes, so re-runs
+    and resumed runs are cheap. Results are persisted and committed every
+    _COMMIT_EVERY files, so a kill mid-run keeps all completed work (the next run
+    resumes from where it stopped). Pass recheck=True to force a full re-read of
+    every file. With progress=True, prints a live checked/skipped counter.
     Returns {project_id: summary_dict}.
     """
     if jobs is None:
@@ -106,7 +152,8 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
     today = date.today().isoformat()
 
     sql = ("SELECT f.file_pk, f.project_id, f.sample_pk, f.direction, f.filename, "
-           "f.rel_path, p.seqdata_root "
+           "f.rel_path, f.size_bytes, f.gz_ok, f.n_reads, f.integrity_date, "
+           "p.seqdata_root "
            "FROM files f JOIN projects p ON p.project_id = f.project_id")
     params = ()
     if only_project:
@@ -115,10 +162,15 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
     sql += " ORDER BY f.project_id"
     rows = conn.execute(sql, params).fetchall()
 
-    # Resolve paths on the calling thread. The on-disk existence check is done
-    # inside the workers (not a serial os.path.isfile pass here): over thousands
-    # of files on a network mount each stat() is a round-trip, and doing them
-    # serially would hang silently for minutes before the first progress tick.
+    # Prior per-file state, so a worker can skip an unchanged, already-passed file.
+    cached = {r["file_pk"]: {"size_bytes": r["size_bytes"], "gz_ok": r["gz_ok"],
+                             "n_reads": r["n_reads"], "integrity_date": r["integrity_date"]}
+              for r in rows}
+
+    # Resolve paths on the calling thread. The on-disk stat is done inside the
+    # workers (not a serial pass here): over thousands of files on a network mount
+    # each stat() is a round-trip, and doing them serially would hang silently for
+    # minutes before the first progress tick.
     paths = {r["file_pk"]: _resolve_path(seqdata_root, r) for r in rows}
     to_check = {pk: p for pk, p in paths.items() if p}
 
@@ -127,9 +179,12 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
         total = len(to_check)
         if progress:
             print(f"checking {total} cataloged file(s) on disk "
-                  "(reading every byte; large files take a while) ...", flush=True)
+                  "(reading every byte of new/changed files; skipping unchanged "
+                  "ones that already passed) ...", flush=True)
+        checked = skipped = since_commit = 0
         with ThreadPoolExecutor(max_workers=jobs) as ex:
-            futures = {ex.submit(_check_path, p): pk for pk, p in to_check.items()}
+            futures = {ex.submit(_check_path, p, cached.get(pk), recheck): pk
+                       for pk, p in to_check.items()}
             pending = set(futures)
             start = time.monotonic()
             # Poll with a timeout so a heartbeat (with elapsed time) prints every
@@ -138,24 +193,39 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
             while pending:
                 done, pending = wait(pending, timeout=5, return_when=FIRST_COMPLETED)
                 for fut in done:
-                    results[futures[fut]] = fut.result()
+                    pk = futures[fut]
+                    res = fut.result()
+                    results[pk] = res
+                    if res.get("cached"):
+                        skipped += 1
+                    else:
+                        # Persist as we go so a kill mid-run keeps completed work.
+                        _persist(conn, pk, res, today)
+                        checked += 1
+                        since_commit += 1
+                if since_commit >= _COMMIT_EVERY:
+                    conn.commit()
+                    since_commit = 0
                 if progress:
-                    print(f"\r  checked {len(results)}/{total} files "
+                    print(f"\r  checked {checked}, skipped {skipped}, "
+                          f"{checked + skipped}/{total} files "
                           f"({int(time.monotonic() - start)}s)   ", end="", flush=True)
+            conn.commit()
         if progress:
             print()
+
+    # Files with no resolvable path (root unknown) -> unchecked; persist so the
+    # row reflects that. Skipped (cached) files are already correct in the DB.
     for pk in paths:
-        results.setdefault(pk, {"status": UNCHECKED, "n_reads": None, "detail": None})
+        if pk not in results:
+            results[pk] = {"status": UNCHECKED, "n_reads": None, "detail": None,
+                           "cached": False}
+            _persist(conn, pk, results[pk], today)
+    conn.commit()
 
     if progress and all(r["status"] == UNCHECKED for r in results.values()) and results:
         print("  note: all files came back 'unchecked' -- none were found on disk "
               "(is --seqdata-root correct, and are the files mounted?)")
-    for pk in paths:
-        results.setdefault(pk, {"status": UNCHECKED, "n_reads": None, "detail": None})
-
-    # Persist per-file results.
-    for pk, res in results.items():
-        _persist(conn, pk, res, today)
 
     # Aggregate per project + R1/R2 read-count parity per sample.
     summaries = {}

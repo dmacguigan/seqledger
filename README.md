@@ -19,20 +19,40 @@ There are two kinds of user. Most people are the first kind.
 |---|---|---|
 | **What you do** | search/filter the catalog, view sample & file info, export CSV/[MitoPilot](https://github.com/Smithsonian/MitoPilot) map files, build copy jobs in **Grab & Go** | everything Users do, **plus** create the catalog, ingest metadata, run integrity + checksums, resolve taxonomy, keep it current |
 | **How** | log into the cluster, run **one** `seqledger … gui --qsub` command to start the **read-only browse GUI**, open the printed link in a web browser | the full `seqledger` command-line tool |
-| **Install anything?** | **No.** Your data manager sets up a shared environment once; you launch the GUI yourself with one command (no install, no editing files). | Yes — `pip install` on the cluster (see [Install](#install)). |
+| **Install anything?** | **Once**, into your own account — a copy-paste conda + pip setup (no admin, no shared env, no editing files). Steps in [For GUI users](#for-gui-users-browsing-only). | Yes — same install (see [Install](#install)). |
 | **Start here** | [**For GUI users (browsing only)**](#for-gui-users-browsing-only) | [Requirements](#requirements) → [Quick start](#quick-start) → [Usage](#usage) |
 
 ## For GUI users (browsing only)
 
-You start the GUI yourself — no install, no editing files, just one command on the
-cluster. Ask your data manager once for two things: the **environment name** and the
-**catalog path** for your lab (they replace `<ENV>` and `<CATALOG_PATH>` below).
+You install seqledger once into your **own** Hydra account, then launch the GUI
+yourself whenever you want to browse. Ask your data manager once for the **catalog
+path** for your lab (the `.db` file on Store) — that's the only thing you need from
+them.
 
-**On the cluster** — open a terminal and log into the Hydra login node:
+### One-time setup (on Hydra)
+
+Log into the login node and create the `seqledger` conda environment. This installs
+into *your* account — no admin or shared environment needed.
 
 ```bash
 ssh <you>@hydra-login01.si.edu
-conda activate <ENV>
+git clone https://github.com/OWNER/seqledger.git
+cd seqledger
+conda env create -f environment.yml    # creates an env named 'seqledger'
+conda activate seqledger
+pip install -e '.[gui]'
+```
+
+> Keep the environment name **`seqledger`** (the default). The GUI job activates the
+> env by that name; if you must use a different name, see [Install](#install).
+
+### Each time you want to browse
+
+**On the cluster** — log in, activate the env, and start the GUI:
+
+```bash
+ssh <you>@hydra-login01.si.edu
+conda activate seqledger
 seqledger --db <CATALOG_PATH> gui --qsub
 ```
 
@@ -42,14 +62,13 @@ directly) and, once it's running, **prints two things to your screen**: an
 window open.
 
 **On your own computer** — open a *second* terminal and paste the printed tunnel
-command:
+command (it looks like nothing happens — that's correct; leave it open):
 
 ```bash
 ssh -N -L <port>:<node>:<port> <you>@hydra-login01.si.edu
 ```
 
-It looks like nothing happens (no output) — that's correct; leave it open. Then
-open the printed **`http://localhost:<port>`** link in your web browser.
+Then open the printed **`http://localhost:<port>`** link in your web browser.
 
 **When you're done**, back in the first (cluster) terminal run the `qdel <job>`
 command it printed, to stop the GUI. (It also stops on its own after 72 hours.)
@@ -64,10 +83,8 @@ Inside the GUI (pick a view in the left sidebar):
 Everything is **read-only** — you can't change or delete catalog data from the GUI.
 The sections below are for **data managers**.
 
-> **Data managers:** to make the above work for your users, install seqledger once
-> into a shared conda env they can all activate (see [Install](#install)), and tell
-> them the env name + the catalog `.db` path. Optionally set `SEQLEDGER_DB` in the
-> env so users can omit `--db`, or add a shell alias so it's a single word.
+> **Tip:** set `export SEQLEDGER_DB=<CATALOG_PATH>` in your `~/.bashrc` so you can
+> drop `--db` and just run `seqledger gui --qsub`.
 
 ## Requirements
 
@@ -137,12 +154,33 @@ kept for pip users).
 
 ## Install
 
+Everyone installs into their own account (there's no shared environment). On Hydra,
+use the conda env so the GUI deps are present:
+
 ```bash
-pip install -e .            # the `seqledger` command; core is stdlib-only
-pip install -e '.[gui]'     # + the browse GUI deps (streamlit, pandas, plotly)
+git clone https://github.com/OWNER/seqledger.git
+cd seqledger
+conda env create -f environment.yml    # creates an env named 'seqledger'
+conda activate seqledger
+pip install -e '.[gui]'                 # GUI + CLI; use -e . for CLI only
 ```
-Runs without installing too: `python -m seqledger ...` from the repo root. On
-Hydra the GUI deps come from the conda env (`environment.yml`).
+
+Runs without installing too: `python -m seqledger ...` from the repo root. On a Mac
+the stdlib-only CLI needs no install at all.
+
+### Conda environment name
+
+The env name comes from the `name:` field in `environment.yml` (`seqledger`), so
+`conda env create -f environment.yml` makes an env called **`seqledger`**. Override
+it with `conda env create -n <name> -f environment.yml`.
+
+**Keep the default `seqledger` unless you have a reason not to.** The `gui --qsub`
+and `integrity --batch` job scripts run `conda activate <conda_env>` on the compute
+node, where `<conda_env>` is the catalog's `conda_env` [config](#configuration)
+value (default `seqledger`). Your env name must match it. If a deployment uses a
+different name, either create your env with that name, or pass `--conda-env <name>`
+(and, for the whole catalog, set it once with
+`seqledger --db … init-db --conda-env <name>`).
 
 ## Layout
 

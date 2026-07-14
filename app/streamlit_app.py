@@ -4,17 +4,23 @@ Launch via `python odna.py gui --db PATH` (which sets ODNA_DB and prints the SSH
 tunnel command). No SQL knowledge required: pick a view, search, filter, download CSV.
 
 Views:
-  Samples   one row per sample (CSV export carries full R1/R2 paths + owner)
-  Projects  one row per sequencing project, with summary stats + owner
-  Files     one row per FASTQ, full absolute path, size, owner, backup status
-  Taxonomy  interactive breadth of NCBI-resolved sample taxonomy
+  Samples      one row per sample (CSV export carries full R1/R2 paths + owner)
+  Projects     one row per sequencing project, with summary stats + owner
+  Files        one row per FASTQ, full absolute path, size, owner, backup status
+  Taxonomy     interactive breadth of NCBI-resolved sample taxonomy
+  Custom table search + collect samples; export CSV + an rclone copy job for them
 """
 
 import os
 import sqlite3
+import sys
 
 import pandas as pd
 import streamlit as st
+
+# Reach the odna package (this app lives in data_management_db/app/).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from odna import rclone as orclone  # noqa: E402
 
 NCBI_TAX_URL = "https://www.ncbi.nlm.nih.gov/datasets/taxonomy/"
 RANK_COLS = ["tax_domain", "tax_kingdom", "tax_phylum", "tax_class",
@@ -206,6 +212,18 @@ def load_files(db_path, mtime):
                     ELSE 'uncompared' END AS backup,
                COALESCE(f.integrity_status, 'unchecked') AS integrity,
                f.n_reads, f.integrity_date
+        FROM files f
+        JOIN projects p ON p.project_id = f.project_id
+        LEFT JOIN samples s ON s.sample_pk = f.sample_pk
+        ORDER BY f.project_id, s.sample_id, f.direction""")
+
+
+@st.cache_data(ttl=60)
+def load_file_paths(db_path, mtime):
+    """One row per file with its source root + rel_path, for cart export/rclone."""
+    return _sql(db_path, f"""
+        SELECT f.project_id, s.sample_id, f.direction, f.filename,
+               p.seqdata_root, f.rel_path, {_FULL_PATH} AS full_path, f.size_bytes
         FROM files f
         JOIN projects p ON p.project_id = f.project_id
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
@@ -512,6 +530,144 @@ def _selected_lineage(event, counts, cols):
     return lineage[:len(cols)]
 
 
+def _match(series, query, use_regex):
+    """Case-insensitive filter mask for a query over a string column.
+
+    Substring match by default; full regex when use_regex. Invalid regex raises
+    re.error, which the caller surfaces to the user.
+    """
+    return series.fillna("").str.contains(query, case=False, regex=use_regex, na=False)
+
+
+def _cart_key(project_id, sample_id):
+    return f"{project_id}\t{sample_id}"
+
+
+def custom_table_view(samples_df, paths_df):
+    """Build a custom sample table by searching + selecting, then export / copy.
+
+    Selections persist in st.session_state['cart'] across views and reruns. From
+    the collected samples the user can download a CSV and generate an rclone copy
+    job (lTIO.sq submission script) with a disk-space estimate.
+    """
+    import re
+
+    cart = st.session_state.setdefault("cart", {})  # cart_key -> {project_id, sample_id}
+
+    with st.sidebar:
+        st.header("Search")
+        use_regex = st.toggle("Regex search", value=False,
+                              help="Match the text fields as regular expressions.")
+        projects = sorted(samples_df["project_id"].unique())
+        f_projects = st.multiselect("Project", projects)
+        f_taxon = st.text_input("Taxonomy (taxon / NCBI name / lineage)")
+        f_sample = st.text_input("Sample ID")
+        f_uniq = st.text_input("UniqID")
+
+    view = samples_df
+    if f_projects:
+        view = view[view["project_id"].isin(f_projects)]
+    try:
+        if f_taxon:
+            view = view[_match(view["taxon"], f_taxon, use_regex)
+                        | _match(view["tax_name"], f_taxon, use_regex)
+                        | _match(view["lineage"], f_taxon, use_regex)]
+        if f_sample:
+            view = view[_match(view["sample_id"], f_sample, use_regex)]
+        if f_uniq:
+            view = view[_match(view["uniq_id"], f_uniq, use_regex)]
+    except re.error as e:
+        st.error(f"Invalid regex: {e}")
+        return
+
+    st.subheader("Search results")
+    st.caption(f"{len(view)} match(es). Select rows and click **Add to custom table**. "
+               f"Custom table currently holds {len(cart)} sample(s).")
+    cols = ["project_id", "sample_id", "taxon", "tax_name", "uniq_id"]
+    event = st.dataframe(
+        view[cols], width="stretch", hide_index=True,
+        on_select="rerun", selection_mode="multi-row", key="cart_search",
+        column_config={"tax_name": "NCBI name"})
+
+    sel = event.selection.rows if event and event.selection else []
+    c1, c2, c3 = st.columns(3)
+    if c1.button(f"➕ Add selected ({len(sel)})", disabled=not sel):
+        for i in sel:
+            r = view.iloc[i]
+            cart[_cart_key(r["project_id"], r["sample_id"])] = {
+                "project_id": r["project_id"], "sample_id": r["sample_id"]}
+        st.rerun()
+    if c2.button(f"➕ Add all matches ({len(view)})", disabled=not len(view)):
+        for _, r in view.iterrows():
+            cart[_cart_key(r["project_id"], r["sample_id"])] = {
+                "project_id": r["project_id"], "sample_id": r["sample_id"]}
+        st.rerun()
+    if c3.button("🗑 Clear table", disabled=not cart):
+        cart.clear()
+        st.rerun()
+
+    st.divider()
+    st.subheader(f"Custom table ({len(cart)} sample(s))")
+    if not cart:
+        st.info("No samples yet. Search above and add some.")
+        return
+
+    keyset = {(v["project_id"], v["sample_id"]) for v in cart.values()}
+    idx = samples_df.set_index(["project_id", "sample_id"]).index
+    table = samples_df[idx.isin(keyset)].copy()
+
+    tcols = ["project_id", "sample_id", "taxon", "tax_name", "taxid", "uniq_id",
+             "lineage", "r1_path", "r2_path"]
+    tcols = [c for c in tcols if c in table.columns]
+    tevent = st.dataframe(
+        table[tcols], width="stretch", hide_index=True,
+        on_select="rerun", selection_mode="multi-row", key="cart_table")
+    tsel = tevent.selection.rows if tevent and tevent.selection else []
+    if st.button(f"➖ Remove selected ({len(tsel)})", disabled=not tsel):
+        for i in tsel:
+            r = table.iloc[i]
+            cart.pop(_cart_key(r["project_id"], r["sample_id"]), None)
+        st.rerun()
+    st.download_button("Download custom table CSV",
+                       table[tcols].to_csv(index=False).encode(),
+                       "oceandna_custom_table.csv", "text/csv")
+
+    # Files backing the selected samples: paths, sizes, source roots for rclone.
+    fpaths = paths_df[paths_df.set_index(["project_id", "sample_id"]).index.isin(keyset)]
+    rows = fpaths.to_dict("records")
+    total, n_files, n_unknown = orclone.estimate_size(rows)
+
+    st.divider()
+    st.subheader("Copy sequence data (Hydra I/O queue)")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Files", n_files)
+    m2.metric("Estimated size", orclone.human_size(total))
+    m3.metric("Unknown-size files", n_unknown)
+    if n_unknown:
+        st.caption(f"{n_unknown} file(s) have no recorded size (never stat'd on disk); "
+                   "the estimate excludes them, so the real total is larger.")
+
+    dest = st.text_input("Destination (directory or rclone remote:path)",
+                         placeholder="/pool/public/genomics/<user>/selected_data")
+    a1, a2 = st.columns(2)
+    transfers = a1.slider("Parallel transfers", 1, 8, 4,
+                          help="rclone --transfers; also the mthread slots requested.")
+    mem = a2.slider("Memory per slot (GB)", 1, 8, 4, help="lTIO caps 8 GB/slot.")
+
+    groups, n_unres = orclone.group_by_root(rows)
+    if n_unres:
+        st.caption(f"{n_unres} file(s) can't be copied (no known source root/path) "
+                   "and are omitted from the script.")
+    script = orclone.build_copy_script(
+        groups, dest, transfers=transfers, slots=transfers, mem=mem,
+        est_bytes=total, n_files=n_files)
+    st.caption("Copy this into a `.job` file on Hydra and submit with "
+               "`qsub <file>.job` from the login node (lTIO: 6 slots/user, 2 concurrent).")
+    st.code(script, language="bash")
+    st.download_button("Download submission script", script.encode(),
+                       "odna_rclone_copy.job", "text/x-shellscript")
+
+
 def main():
     st.set_page_config(page_title="Ocean DNA catalog", layout="wide")
     st.title("Ocean DNA raw sequence catalog")
@@ -520,7 +676,8 @@ def main():
         st.error(f"Catalog database not found: {DB_PATH}")
         return
 
-    view_name = st.sidebar.radio("View", ["Samples", "Projects", "Files", "Taxonomy"])
+    view_name = st.sidebar.radio(
+        "View", ["Samples", "Projects", "Files", "Taxonomy", "Custom table"])
     mtime = os.path.getmtime(DB_PATH)
     if view_name == "Samples":
         samples_view(load_samples(DB_PATH, mtime), load_files(DB_PATH, mtime))
@@ -529,8 +686,10 @@ def main():
                       load_data_issues(DB_PATH, mtime))
     elif view_name == "Files":
         files_view(load_files(DB_PATH, mtime), load_samples(DB_PATH, mtime))
-    else:
+    elif view_name == "Taxonomy":
         taxonomy_view(DB_PATH, mtime)
+    else:
+        custom_table_view(load_samples(DB_PATH, mtime), load_file_paths(DB_PATH, mtime))
 
 
 if __name__ == "__main__":

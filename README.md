@@ -177,7 +177,8 @@ python odna.py --db /scratch/nmnh_ocean_dna/oceandna_catalog.db gui --port 8501
 requirements.txt`.)
 
 It prints the exact `ssh -N -L 8501:NODE:8501 you@hydra-login01.si.edu` command;
-run that locally, then open `http://localhost:8501`. Read-only, three views (sidebar):
+run that locally, then open `http://localhost:8501`. Read-only browsing plus a
+build-your-own selection view (sidebar):
 
 - **Samples** - one row per sample; the on-screen table stays lean, but the CSV
   export carries the full absolute R1/R2 paths + owner.
@@ -190,6 +191,15 @@ run that locally, then open `http://localhost:8501`. Read-only, three views (sid
 - **Taxonomy** - interactive Plotly sunburst of the catalog's taxonomic breadth
   (filter by project, pick the deepest rank, toggle the `unknown` bucket) plus a
   per-rank sample-count bar chart. Populated by `taxonomy resolve`.
+- **Custom table** - build a hand-picked set of samples. Search by project,
+  taxonomy (taxon / NCBI name / lineage), sample ID, and UniqID, with a **regex
+  toggle**; add matches (selected rows or all) to a running table that persists as
+  you refine the search. Export the table to CSV, and generate an **rclone copy
+  job** for the selected samples' sequence data: a self-contained `lTIO.sq`
+  submission script (`module load tools/rclone/1.66.0`, one `rclone copy
+  --files-from` per source root, preserving the directory layout) with a
+  disk-space estimate. Copy it from the screen or download the `.job`, then
+  `qsub` it on the login node.
 
 The Samples view also links each row to its NCBI datasets taxonomy browser page.
 Each view filters/searches and downloads CSV.

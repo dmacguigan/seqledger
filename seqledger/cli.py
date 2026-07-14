@@ -45,6 +45,22 @@ def _require_db(db_path):
                  f"  seqledger --db {db_path} init-db\nthen ingest your data.")
 
 
+def _resolve_root(conn, value, key, label):
+    """A directory root: the CLI flag if given, else the catalog's configured value.
+
+    seqdata_root / metadata_root are stored at init-db, so ingest/validate/integrity
+    can be run without repeating them. Prints a note when the configured value is
+    used so it's clear where the path came from. Returns None if neither is set.
+    """
+    if value:
+        return value
+    cfg = odb.get_config(conn, key)
+    if cfg:
+        print(f"(using configured {label}: {cfg})")
+        return cfg
+    return None
+
+
 # init-db flag name -> config key. Flags let a lab retarget the tool without
 # editing source; unset keys keep today's defaults (odb.CONFIG_DEFAULTS).
 _INIT_CONFIG_FLAGS = {
@@ -130,6 +146,10 @@ def cmd_ingest(args):
     icons = {"pass": "OK", "warn": "WARN", "fail": "FAIL"}
     conn = odb.connect(args.db)
     odb.init_db(conn)
+
+    # Fall back to the roots configured at init-db when the flags aren't given.
+    args.seqdata_root = _resolve_root(conn, args.seqdata_root, "seqdata_root", "seqdata-root")
+    args.metadata_root = _resolve_root(conn, args.metadata_root, "metadata_root", "metadata-root")
 
     # Destructive: confirm before deleting rows a (possibly truncated) source no
     # longer lists. Bypass with --yes for scripts / non-interactive runs.
@@ -322,6 +342,7 @@ def _checksum_label(cs):
 def cmd_validate(args):
     _require_db(args.db)
     conn = odb.connect(args.db)
+    args.seqdata_root = _resolve_root(conn, args.seqdata_root, "seqdata_root", "seqdata-root")
     results = ovalidate.validate_catalog(conn, seqdata_root=args.seqdata_root)
     conn.close()
     if not results:
@@ -482,6 +503,10 @@ def cmd_integrity(args):
 
     conn = odb.connect(args.db)
     odb.init_db(conn)
+
+    # Fall back to the seqdata root configured at init-db (used by the local run and
+    # baked into batch job scripts). --collect doesn't touch disk, so it's harmless.
+    args.seqdata_root = _resolve_root(conn, args.seqdata_root, "seqdata_root", "seqdata-root")
 
     if args.collect:
         summaries = ointegrity.collect_json(conn, args.collect)

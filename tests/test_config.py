@@ -45,3 +45,25 @@ def test_fastq_globs():
     assert odb.fastq_globs("fastq.gz,fq.gz") == ["*.fastq.gz", "*.fq.gz"]
     assert odb.fastq_globs(".fastq.gz") == ["*.fastq.gz"]
     assert odb.fastq_globs("") == []
+
+
+def test_ingest_uses_configured_roots(tmp_path, capsys):
+    import gzip
+    from seqledger import cli
+    seq = str(tmp_path / "seq"); meta = str(tmp_path / "meta")
+    os.makedirs(os.path.join(seq, "genohub-1_X")); os.makedirs(meta)
+    for fn in ("s1_1.fastq.gz", "s1_2.fastq.gz"):
+        with gzip.open(os.path.join(seq, "genohub-1_X", fn), "wb") as f:
+            f.write(b"@r\nACGT\n+\nIIII\n")
+    with open(os.path.join(meta, "genohub-1_X_mapfile.csv"), "w") as f:
+        f.write("ID,R1,R2,Taxon,UniqID\ns1,s1_1.fastq.gz,s1_2.fastq.gz,Gadus,U1\n")
+    db = str(tmp_path / "cat.db")
+    # roots set only at init-db
+    cli.main(["--db", db, "init-db", "--seqdata-root", seq, "--metadata-root", meta])
+    # ingest with NO root flags -> must use the configured roots
+    cli.main(["--db", db, "ingest", "--skip-taxonomy"])
+    out = capsys.readouterr().out
+    assert "using configured seqdata-root" in out
+    assert "using configured metadata-root" in out
+    conn = odb.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1

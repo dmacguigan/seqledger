@@ -108,9 +108,10 @@ seqledger --db <YOUR_CATALOG>.db init-db \
     --seqdata-root <SEQDATA_ROOT> --metadata-root <METADATA_ROOT> \
     --conda-env <ENV> --login-host <LOGIN_HOST>
 
-# 2. ingest: auto-discover project folders + their <project>_mapfile.csv
-seqledger --db <YOUR_CATALOG>.db ingest \
-    --seqdata-root <SEQDATA_ROOT> --metadata-root <METADATA_ROOT>
+# 2. ingest: auto-discover project folders + their <project>_mapfile.csv.
+#    The roots come from the config set in step 1, so no need to repeat them
+#    (pass --seqdata-root/--metadata-root to override for a one-off run).
+seqledger --db <YOUR_CATALOG>.db ingest
 
 # 3. browse it (serve on the I/O queue so it reads the master on Store directly)
 seqledger --db <YOUR_CATALOG>.db gui --qsub
@@ -398,7 +399,7 @@ seqledger --db catalog.db init-db --set io_queue=sThM.q   # any key
 | key | what it controls | default |
 |---|---|---|
 | `catalog_name` / `catalog_slug` | GUI title + CLI banner / export-file prefix | Ocean DNA … / `oceandna` |
-| `seqdata_root` / `metadata_root` | default `ingest`/`validate` roots | (unset) |
+| `seqdata_root` / `metadata_root` | default roots for `ingest` / `validate` / `integrity` — set these once and you can omit `--seqdata-root` / `--metadata-root` on every run (an explicit flag still overrides) | (unset) |
 | `conda_env` | env activated inside generated qsub jobs | `seqledger` |
 | `login_host` | Hydra login host in GUI tunnel commands | `hydra-login01.si.edu` |
 | `io_queue` | queue for `integrity --batch`, `gui --qsub`, rclone jobs | `lTIO.sq` |

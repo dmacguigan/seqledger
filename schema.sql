@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS samples (
     UNIQUE (project_id, sample_id)
 );
 CREATE INDEX IF NOT EXISTS idx_samples_uniq_id ON samples(uniq_id);
+-- Speeds the DISTINCT taxon scans in taxonomy resolve + `query taxa`.
+CREATE INDEX IF NOT EXISTS idx_samples_taxon ON samples(taxon);
 
 -- One row per FASTQ file (R1/R2 for each sample).
 CREATE TABLE IF NOT EXISTS files (

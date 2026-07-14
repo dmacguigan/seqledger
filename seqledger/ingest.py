@@ -309,6 +309,7 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
     csv_files = set()
 
     core = set(["ID", "R1", "R2", "Taxon", uniqid_col])
+    seen_files = {}  # filename -> "sample_id/direction" it was first claimed by
     for row in rows:
         sample_id = row["ID"].strip()
         taxon = row["Taxon"].strip()
@@ -329,6 +330,14 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
         for direction in ("R1", "R2"):
             filename = row[direction].strip()
             csv_files.add(filename)
+            # A filename can only be one physical file; if the mapfile lists it under
+            # two samples/directions the last upsert silently wins, so flag it.
+            claim = f"{sample_id}/{direction}"
+            if filename in seen_files and seen_files[filename] != claim:
+                findings.append(Finding(WARN, f"file '{filename}' is listed twice "
+                                        f"({seen_files[filename]} and {claim}); "
+                                        "only the last row's sample/direction is kept"))
+            seen_files[filename] = claim
             info = disk.get(filename) if disk else None
             rel_path = info["rel_path"] if info else os.path.join(seq_data_relpath, filename)
             size = info["size"] if info else None

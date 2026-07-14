@@ -134,6 +134,13 @@ def _migrate(conn):
             # (which all reference files.direction) never hit 'no such column'.
             conn.execute("ALTER TABLE files ADD COLUMN direction TEXT")
 
+    # Partial index for `query mismatches`; created here (not in schema.sql) and
+    # guarded, because it references md5_match, which a partial/older `files` table
+    # may not have (schema.sql's executescript would fail on it).
+    if "md5_match" in {r["name"] for r in conn.execute("PRAGMA table_info(files)")}:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_files_mismatch "
+                     "ON files(md5_match) WHERE md5_match = 0")
+
 
 def init_db(conn, schema_path=SCHEMA_PATH):
     """Create tables from schema.sql, then apply migrations (idempotent)."""

@@ -109,3 +109,19 @@ def test_ingest_rejects_bad_project(tmp_path):
     results = oingest.ingest_map_file(conn, map_file, seqdata_root=root)
     assert results[0][2] == "fail"
     assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+
+
+def test_ingest_flags_filename_listed_twice(tmp_path):
+    root = str(tmp_path / "raw_sequence_data")
+    os.makedirs(root, exist_ok=True)
+    # same filename 'dup.fastq.gz' used as R2 of s1 and R1 of s2 -> WARN
+    rows = [
+        ("s1", "s1_1.fastq.gz", "dup.fastq.gz", "Gadus", "U1"),
+        ("s2", "dup.fastq.gz", "s2_2.fastq.gz", "Gadus", "U2"),
+    ]
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
+    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
+    conn = _fresh_db(tmp_path)
+    results = oingest.ingest_map_file(conn, map_file, seqdata_root=root)
+    findings = results[0][1]
+    assert any("listed twice" in f.message for f in findings), [str(f) for f in findings]

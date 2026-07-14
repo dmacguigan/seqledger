@@ -1,13 +1,46 @@
-# Ocean DNA sequence data catalog
+# seqledger
 
-A SQLite-backed catalog + Python tooling that replaces the per-project CSV "map
-files" as the source of truth for Ocean DNA raw sequence (FASTQ) data management.
-Users keep submitting the same CSV map files; the catalog adds schema validation,
-per-file checksums, backup verification, and a queryable central index with a
-lightweight browse GUI.
+A SQLite-backed catalog + Python tooling that becomes the source of truth for a
+lab's raw sequence (FASTQ) data on an HPC cluster. It adds schema validation,
+per-file gzip/FASTQ integrity checks, `rclone` checksum + backup verification, and
+a queryable central index with a lightweight read-only browse GUI. Built for the
+NMNH "Ocean DNA" project on Hydra, and configurable (`init-db` config) to retarget
+another lab's paths, cluster settings, and catalog name.
 
-> Prototype. Lives in a git-ignored directory. Does not yet replace the published
-> data management guide (`qmd/datamanagement.qmd`).
+> Prototype, in active development. Per-deployment settings (catalog display name,
+> seqdata/metadata roots, conda env, login host, I/O queue, rclone module, FASTQ
+> extensions) are set once at `init-db` — see the [Configuration](#configuration) section.
+
+## Requirements
+
+- **Python 3.10+** for the core CLI (standard library only — runs on a Hydra login
+  node or a Mac with no install step).
+- **`rclone`** on `PATH` (or `module load`) for the `checksums` step.
+- **conda** with a `seqledger` env (`environment.yml`) only for the **GUI**
+  (`streamlit` + `pandas` + `plotly`).
+- Back up the catalog `.db` before running `init-db` on an existing catalog —
+  migrations add columns in place and are not reversible.
+
+## Quick start
+
+Placeholders in `<ANGLE_BRACKETS>` are yours to fill in (the Ocean-DNA values in
+the examples further down are just one lab's settings).
+
+```bash
+# 1. create a catalog + set this deployment's config (all flags optional)
+python seqledger.py --db <YOUR_CATALOG>.db init-db \
+    --name "<Your Lab> sequence catalog" --slug <yourlab> \
+    --seqdata-root <SEQDATA_ROOT> --metadata-root <METADATA_ROOT> \
+    --conda-env <ENV> --login-host <LOGIN_HOST>
+
+# 2. ingest: auto-discover project folders + their <project>_mapfile.csv
+python seqledger.py --db <YOUR_CATALOG>.db ingest \
+    --seqdata-root <SEQDATA_ROOT> --metadata-root <METADATA_ROOT>
+
+# 3. browse it (serve on the I/O queue so it reads the master on Store directly)
+python seqledger.py --db <YOUR_CATALOG>.db gui --qsub
+```
+Integrity, checksums, taxonomy, and query are separate steps — see Usage below.
 
 ## Why
 
@@ -239,6 +272,42 @@ build-your-own selection view (sidebar):
 
 The Samples view also links each row to its NCBI datasets taxonomy browser page.
 Each view filters/searches and downloads CSV.
+
+## Configuration
+
+Per-deployment settings live in a `config` table in the catalog DB, set at
+`init-db` (re-run it any time to change them; unset keys keep sensible defaults, so
+an existing catalog is unchanged). Because the GUI reads a copy of the DB, config
+travels with it; generated qsub/rclone scripts bake the values in.
+
+```bash
+python seqledger.py --db catalog.db init-db --show          # print resolved config
+python seqledger.py --db catalog.db init-db --name "..." --conda-env myenv
+python seqledger.py --db catalog.db init-db --set io_queue=sThM.q   # any key
+```
+
+| key | what it controls | default |
+|---|---|---|
+| `catalog_name` / `catalog_slug` | GUI title + CLI banner / export-file prefix | Ocean DNA … / `oceandna` |
+| `seqdata_root` / `metadata_root` | default `ingest`/`validate` roots | (unset) |
+| `conda_env` | env activated inside generated qsub jobs | `seqledger` |
+| `login_host` | Hydra login host in GUI tunnel commands | `hydra-login01.si.edu` |
+| `io_queue` | queue for `integrity --batch`, `gui --qsub`, rclone jobs | `lTIO.sq` |
+| `rclone_module` | `module load`ed in rclone copy jobs | `tools/rclone/1.66.0` |
+| `backup_location` | "verified backup" location label | `pdrive` |
+| `fastq_extensions` | FASTQ suffixes discovered on disk | `fastq.gz,fq.gz` |
+
+## Troubleshooting
+
+| you see | it means / what to do |
+|---|---|
+| `ingest` prints `WARNING: discovered 0 projects` | the roots are empty/unmounted/mistyped, or no `<project>_mapfile.csv` files — check the paths and that Store/NAS is mounted. |
+| Projects view `mapfile` = `no mapfile` / `broken mapfile` / `no data folder` | a project folder has no (or a malformed) mapfile, or a mapfile has no folder. Select the row for the full explanation; the files are still cataloged. |
+| `data_files` = "N missing / M orphan" | files listed in the mapfile aren't on disk (missing), or on-disk FASTQ aren't in the mapfile (orphan). |
+| a batch integrity/copy job "fails" near 72h | it hit the lTIO wall/CPU cap; the per-project checkpoint is saved — just **re-`qsub`** (integrity resumes; rclone `--checksum` skips copied files). |
+| `integrity --collect` skips a file "no .done marker" | that project's job is still running or was killed — let it finish (or resubmit), then re-collect. |
+| GUI: tunnel connects but browser shows "connection refused" | the Streamlit server didn't start — usually the conda env wasn't activated, or (with `--qsub`) the job is still starting; check the printed job log. |
+| a CLI command prints a one-line `error:` | re-run with `--debug` to see the full traceback. |
 
 ## Schema
 

@@ -18,7 +18,9 @@ The dominant cost is reading every byte over the (often network-mounted) storage
 so skipping unchanged files -- not a faster codec -- is the main speedup.
 """
 
+import glob
 import gzip
+import json
 import os
 import zlib
 import time
@@ -130,6 +132,143 @@ def _log_run(conn, project_id, status, today):
         (project_id, today, status))
 
 
+def _select_rows(conn, only_project=None):
+    """Files joined to their project root, optionally limited to one project_id."""
+    sql = ("SELECT f.file_pk, f.project_id, f.sample_pk, f.direction, f.filename, "
+           "f.rel_path, f.size_bytes, f.gz_ok, f.n_reads, f.integrity_date, "
+           "p.seqdata_root "
+           "FROM files f JOIN projects p ON p.project_id = f.project_id")
+    params = ()
+    if only_project:
+        sql += " WHERE f.project_id = ?"
+        params = (only_project,)
+    sql += " ORDER BY f.project_id"
+    return conn.execute(sql, params).fetchall()
+
+
+def _cached_state(rows):
+    """Prior per-file state, so a worker can skip an unchanged, already-passed file."""
+    return {r["file_pk"]: {"size_bytes": r["size_bytes"], "gz_ok": r["gz_ok"],
+                           "n_reads": r["n_reads"], "integrity_date": r["integrity_date"]}
+            for r in rows}
+
+
+def _run_checks(to_check, cached, jobs, progress, recheck, on_checked=None):
+    """Concurrently check a {file_pk: path} map; return {file_pk: result}.
+
+    on_checked(pk, res), if given, is called on the calling thread for each freshly
+    checked (non-skipped) file -- used to persist + commit incrementally so a kill
+    mid-run keeps completed work.
+    """
+    results = {}
+    total = len(to_check)
+    if not total:
+        return results
+    if progress:
+        print(f"checking {total} cataloged file(s) on disk "
+              "(reading every byte of new/changed files; skipping unchanged "
+              "ones that already passed) ...", flush=True)
+    checked = skipped = 0
+    with ThreadPoolExecutor(max_workers=jobs) as ex:
+        futures = {ex.submit(_check_path, p, cached.get(pk), recheck): pk
+                   for pk, p in to_check.items()}
+        pending = set(futures)
+        start = time.monotonic()
+        # Poll with a timeout so a heartbeat (with elapsed time) prints every few
+        # seconds even while the first large file is still being read -- otherwise
+        # there is no output until the first whole file completes.
+        while pending:
+            done, pending = wait(pending, timeout=5, return_when=FIRST_COMPLETED)
+            for fut in done:
+                pk = futures[fut]
+                res = fut.result()
+                results[pk] = res
+                if res.get("cached"):
+                    skipped += 1
+                else:
+                    checked += 1
+                    if on_checked:
+                        on_checked(pk, res)
+            if progress:
+                print(f"\r  checked {checked}, skipped {skipped}, "
+                      f"{checked + skipped}/{total} files "
+                      f"({int(time.monotonic() - start)}s)   ", end="", flush=True)
+    if progress:
+        print()
+    return results
+
+
+def _compute_results(rows, seqdata_root, jobs, progress, recheck, on_checked=None):
+    """Resolve paths and check rows; unresolved (no root) paths become UNCHECKED.
+
+    Returns {file_pk: result}. Does no DB writes itself; pass on_checked to persist.
+    """
+    cached = _cached_state(rows)
+    # Resolve paths on the calling thread. The on-disk stat is done inside the
+    # workers (not a serial pass here): over thousands of files on a network mount
+    # each stat() is a round-trip, and doing them serially would hang silently for
+    # minutes before the first progress tick.
+    paths = {r["file_pk"]: _resolve_path(seqdata_root, r) for r in rows}
+    to_check = {pk: p for pk, p in paths.items() if p}
+    results = _run_checks(to_check, cached, jobs, progress, recheck, on_checked)
+    # Files with no resolvable path (root unknown) -> unchecked.
+    for pk in paths:
+        if pk not in results:
+            results[pk] = {"status": UNCHECKED, "n_reads": None, "detail": None,
+                           "cached": False}
+    if progress and results and all(r["status"] == UNCHECKED for r in results.values()):
+        print("  note: all files came back 'unchecked' -- none were found on disk "
+              "(is --seqdata-root correct, and are the files mounted?)")
+    return results
+
+
+def aggregate_from_db(conn, project_ids, log=True):
+    """Summarize per-project integrity + R1/R2 parity by reading the files table.
+
+    Reads persisted integrity_status/n_reads straight from the DB, so it works the
+    same whether results were written by a live run or merged from batch JSON.
+    Writes a per-project validation_log row when log=True. Returns
+    {project_id: summary_dict}.
+    """
+    today = date.today().isoformat()
+    summaries = {}
+    for pid in project_ids:
+        rows = conn.execute(
+            "SELECT integrity_status, n_reads, direction, sample_pk "
+            "FROM files WHERE project_id=?", (pid,)).fetchall()
+        s = {"n_files": 0, "n_ok": 0, "n_gzip_error": 0, "n_format_error": 0,
+             "n_unchecked": 0, "parity_warnings": []}
+        mates = {}  # sample_pk -> {direction: n_reads}
+        for r in rows:
+            status = r["integrity_status"] or UNCHECKED
+            s["n_files"] += 1
+            s[{OK: "n_ok", GZIP_ERROR: "n_gzip_error", FORMAT_ERROR: "n_format_error",
+               UNCHECKED: "n_unchecked"}.get(status, "n_unchecked")] += 1
+            if r["sample_pk"] is not None and status == OK:
+                mates.setdefault(r["sample_pk"], {})[r["direction"]] = r["n_reads"]
+        for sample_pk, rc in mates.items():
+            if (rc.get("R1") is not None and rc.get("R2") is not None
+                    and rc["R1"] != rc["R2"]):
+                s["parity_warnings"].append(
+                    f"sample_pk={sample_pk}: R1 has {rc['R1']} reads, R2 has {rc['R2']}")
+        if s["n_gzip_error"] or s["n_format_error"]:
+            s["status"] = "fail"
+        elif s["parity_warnings"] or s["n_unchecked"]:
+            s["status"] = "warn"
+        else:
+            s["status"] = "pass"
+        if log:
+            _log_run(conn, pid, s["status"], today)
+        summaries[pid] = s
+    conn.commit()
+    return summaries
+
+
+def list_projects(conn, only_project=None):
+    """Project_ids that have cataloged files (optionally just the one requested)."""
+    return sorted({r["project_id"] for r in _select_rows(conn, only_project)})
+
+
 def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=None,
                             progress=True, recheck=False):
     """Check gzip/FASTQ integrity for cataloged files and persist results.
@@ -150,113 +289,88 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
     if jobs is None:
         jobs = min(8, os.cpu_count() or 1)
     today = date.today().isoformat()
+    rows = _select_rows(conn, only_project)
 
-    sql = ("SELECT f.file_pk, f.project_id, f.sample_pk, f.direction, f.filename, "
-           "f.rel_path, f.size_bytes, f.gz_ok, f.n_reads, f.integrity_date, "
-           "p.seqdata_root "
-           "FROM files f JOIN projects p ON p.project_id = f.project_id")
-    params = ()
-    if only_project:
-        sql += " WHERE f.project_id = ?"
-        params = (only_project,)
-    sql += " ORDER BY f.project_id"
-    rows = conn.execute(sql, params).fetchall()
+    since_commit = [0]
 
-    # Prior per-file state, so a worker can skip an unchanged, already-passed file.
-    cached = {r["file_pk"]: {"size_bytes": r["size_bytes"], "gz_ok": r["gz_ok"],
-                             "n_reads": r["n_reads"], "integrity_date": r["integrity_date"]}
-              for r in rows}
-
-    # Resolve paths on the calling thread. The on-disk stat is done inside the
-    # workers (not a serial pass here): over thousands of files on a network mount
-    # each stat() is a round-trip, and doing them serially would hang silently for
-    # minutes before the first progress tick.
-    paths = {r["file_pk"]: _resolve_path(seqdata_root, r) for r in rows}
-    to_check = {pk: p for pk, p in paths.items() if p}
-
-    results = {}  # file_pk -> result dict
-    if to_check:
-        total = len(to_check)
-        if progress:
-            print(f"checking {total} cataloged file(s) on disk "
-                  "(reading every byte of new/changed files; skipping unchanged "
-                  "ones that already passed) ...", flush=True)
-        checked = skipped = since_commit = 0
-        with ThreadPoolExecutor(max_workers=jobs) as ex:
-            futures = {ex.submit(_check_path, p, cached.get(pk), recheck): pk
-                       for pk, p in to_check.items()}
-            pending = set(futures)
-            start = time.monotonic()
-            # Poll with a timeout so a heartbeat (with elapsed time) prints every
-            # few seconds even while the first large file is still being read --
-            # otherwise there is no output until the first whole file completes.
-            while pending:
-                done, pending = wait(pending, timeout=5, return_when=FIRST_COMPLETED)
-                for fut in done:
-                    pk = futures[fut]
-                    res = fut.result()
-                    results[pk] = res
-                    if res.get("cached"):
-                        skipped += 1
-                    else:
-                        # Persist as we go so a kill mid-run keeps completed work.
-                        _persist(conn, pk, res, today)
-                        checked += 1
-                        since_commit += 1
-                if since_commit >= _COMMIT_EVERY:
-                    conn.commit()
-                    since_commit = 0
-                if progress:
-                    print(f"\r  checked {checked}, skipped {skipped}, "
-                          f"{checked + skipped}/{total} files "
-                          f"({int(time.monotonic() - start)}s)   ", end="", flush=True)
+    def on_checked(pk, res):
+        # Persist as we go so a kill mid-run keeps completed work.
+        _persist(conn, pk, res, today)
+        since_commit[0] += 1
+        if since_commit[0] >= _COMMIT_EVERY:
             conn.commit()
+            since_commit[0] = 0
+
+    results = _compute_results(rows, seqdata_root, jobs, progress, recheck, on_checked)
+    # Persist no-path UNCHECKED files (never entered the worker pool). Cached rows
+    # are already correct in the DB; re-persisting an UNCHECKED row is idempotent.
+    for pk, res in results.items():
+        if res["status"] == UNCHECKED and not res.get("cached"):
+            _persist(conn, pk, res, today)
+    conn.commit()
+
+    return aggregate_from_db(conn, sorted({r["project_id"] for r in rows}))
+
+
+def emit_project_json(conn, project_id, out_path, seqdata_root=None, jobs=None,
+                      progress=True, recheck=False):
+    """Check one project and write per-file results to JSON -- no DB writes.
+
+    Intended for a remote (qsub) worker that must not write the shared catalog DB
+    concurrently: it reads the project's file list from the DB, checks the files on
+    the storage it can reach, and emits
+    {project_id, run_date, results: {file_pk: {status, n_reads}}}.
+    Merge the JSON back into the catalog later with collect_json (integrity
+    --collect). The incremental skip still applies -- a re-submitted job reads the
+    prior gz_ok/size from the DB rows and skips unchanged files that already passed.
+    """
+    if jobs is None:
+        jobs = min(8, os.cpu_count() or 1)
+    rows = _select_rows(conn, project_id)
+    results = _compute_results(rows, seqdata_root, jobs, progress, recheck)
+    payload = {"project_id": project_id, "run_date": date.today().isoformat(),
+               "results": {str(pk): {"status": r["status"], "n_reads": r["n_reads"]}
+                           for pk, r in results.items()}}
+    tmp = out_path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(payload, fh)
+    os.replace(tmp, out_path)  # atomic: a reader never sees a half-written file
+    if progress:
+        print(f"wrote {len(results)} file result(s) for {project_id} -> {out_path}")
+    return payload
+
+
+def collect_json(conn, results_dir, progress=True):
+    """Merge batch integrity JSON files from results_dir into the catalog DB.
+
+    Persists each file's status/n_reads (using the emitting job's run_date), then
+    re-aggregates per-project summaries and writes validation_log. This is the only
+    step that writes the shared DB, so it runs locally and serially -- the remote
+    jobs never touch it. Returns {project_id: summary_dict}.
+    """
+    paths = sorted(glob.glob(os.path.join(results_dir, "*.json")))
+    if not paths:
         if progress:
-            print()
-
-    # Files with no resolvable path (root unknown) -> unchecked; persist so the
-    # row reflects that. Skipped (cached) files are already correct in the DB.
-    for pk in paths:
-        if pk not in results:
-            results[pk] = {"status": UNCHECKED, "n_reads": None, "detail": None,
-                           "cached": False}
-            _persist(conn, pk, results[pk], today)
+            print(f"no *.json result files in {results_dir}")
+        return {}
+    today = date.today().isoformat()
+    project_ids = set()
+    n_files = 0
+    for path in paths:
+        with open(path) as fh:
+            payload = json.load(fh)
+        pid = payload.get("project_id")
+        run_date = payload.get("run_date") or today
+        pfiles = payload.get("results", {})
+        for pk_str, r in pfiles.items():
+            _persist(conn, int(pk_str),
+                     {"status": r["status"], "n_reads": r.get("n_reads")}, run_date)
+            n_files += 1
+        if pid:
+            project_ids.add(pid)
+        if progress:
+            print(f"merged {path} ({pid}, {len(pfiles)} files)")
     conn.commit()
-
-    if progress and all(r["status"] == UNCHECKED for r in results.values()) and results:
-        print("  note: all files came back 'unchecked' -- none were found on disk "
-              "(is --seqdata-root correct, and are the files mounted?)")
-
-    # Aggregate per project + R1/R2 read-count parity per sample.
-    summaries = {}
-    mates = {}  # (project_id, sample_pk) -> {direction: n_reads}
-    for r in rows:
-        pid = r["project_id"]
-        res = results[r["file_pk"]]
-        s = summaries.setdefault(pid, {
-            "n_files": 0, "n_ok": 0, "n_gzip_error": 0, "n_format_error": 0,
-            "n_unchecked": 0, "parity_warnings": []})
-        s["n_files"] += 1
-        s[{OK: "n_ok", GZIP_ERROR: "n_gzip_error", FORMAT_ERROR: "n_format_error",
-           UNCHECKED: "n_unchecked"}[res["status"]]] += 1
-        if r["sample_pk"] is not None and res["status"] == OK:
-            mates.setdefault((pid, r["sample_pk"]), {})[r["direction"]] = res["n_reads"]
-
-    for (pid, _sample_pk), rc in mates.items():
-        if rc.get("R1") is not None and rc.get("R2") is not None and rc["R1"] != rc["R2"]:
-            summaries[pid]["parity_warnings"].append(
-                f"sample_pk={_sample_pk}: R1 has {rc['R1']} reads, R2 has {rc['R2']}")
-
-    # Log a per-project run status.
-    for pid, s in summaries.items():
-        if s["n_gzip_error"] or s["n_format_error"]:
-            status = "fail"
-        elif s["parity_warnings"] or s["n_unchecked"]:
-            status = "warn"
-        else:
-            status = "pass"
-        s["status"] = status
-        _log_run(conn, pid, status, today)
-
-    conn.commit()
-    return summaries
+    if progress:
+        print(f"persisted {n_files} file result(s) from {len(paths)} project file(s)")
+    return aggregate_from_db(conn, sorted(project_ids))

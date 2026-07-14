@@ -14,6 +14,9 @@ Subcommands:
 
 import argparse
 import os
+import re
+import shlex
+import subprocess
 import sys
 
 from odna import db as odb
@@ -240,14 +243,7 @@ def cmd_validate(args):
             print(f"    {f.level}: {f.message}")
 
 
-def cmd_integrity(args):
-    from odna import integrity as ointegrity
-    conn = odb.connect(args.db)
-    odb.init_db(conn)
-    results = ointegrity.check_catalog_integrity(
-        conn, seqdata_root=args.seqdata_root, only_project=args.project, jobs=args.jobs,
-        recheck=args.force)
-    conn.close()
+def _print_integrity(results):
     if not results:
         print("no cataloged files to check")
         return
@@ -259,6 +255,142 @@ def cmd_integrity(args):
               f"{s['n_format_error']} format-error, {s['n_unchecked']} unchecked")
         for w in s["parity_warnings"]:
             print(f"    WARN: read-count parity: {w}")
+
+
+def _safe_name(s):
+    """A filename/job-name-safe slug for a project_id."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", s)
+
+
+def _batch_script(name, log_path, slots, mem, mres, run_cmd):
+    """A Hydra qsub script that checks one project on the I/O queue (lTIO.sq).
+
+    The I/O queue is the only way to reach the NAS/Store partition from a compute
+    node (see the SI HPC "NAS Storage and the I/O Queue" wiki). Integrity is a
+    read-every-byte scan, so it fits the queue's data-movement intent. lTIO caps:
+    72h wall, 12h CPU/slot, 8G/slot, 6 slots and 2 concurrent jobs per user.
+    """
+    return f"""#!/bin/bash
+#$ -N odna_int_{name}
+#$ -o {log_path}
+#$ -j y
+#$ -terse
+#$ -notify
+#$ -pe mthread {slots}
+#$ -q lTIO.sq -l ioq
+#$ -l mres={mres}G,h_data={mem}G,h_vmem={mem}G
+#$ -S /bin/bash
+#$ -cwd
+
+echo + `date` $JOB_NAME running on $HOSTNAME in $QUEUE with jobID=$JOB_ID
+source ~/.bashrc
+conda activate odna
+{run_cmd}
+status=$?
+echo = `date` $JOB_NAME done exit=$status
+exit $status
+"""
+
+
+def _submit_batch(args, projects):
+    """Write a per-project qsub script and (unless --no-submit) submit it.
+
+    Each remote job checks one project and writes its results to
+    <batch-dir>/results/<project>.json instead of the DB, so no two Hydra nodes
+    ever write the shared SQLite catalog at once. Merge them afterwards with
+    `integrity --collect <batch-dir>/results`.
+    """
+    if not projects:
+        print("no projects with cataloged files to submit")
+        return
+
+    batch_dir = os.path.abspath(args.batch_dir)
+    scripts_dir = os.path.join(batch_dir, "scripts")
+    logs_dir = os.path.join(batch_dir, "logs")
+    results_dir = os.path.join(batch_dir, "results")
+    for d in (scripts_dir, logs_dir, results_dir):
+        os.makedirs(d, exist_ok=True)
+
+    odna_py = os.path.abspath(__file__)
+    db_path = os.path.abspath(args.db)
+    slots, mem = args.slots, args.mem
+    mres = slots * mem
+
+    job_ids = []
+    for pid in projects:
+        safe = _safe_name(pid)
+        script_path = os.path.join(scripts_dir, f"integrity_{safe}.job")
+        out_json = os.path.join(results_dir, f"{safe}.json")
+        log_path = os.path.join(logs_dir, f"integrity_{safe}.log")
+        cmd = ["python", shlex.quote(odna_py), "--db", shlex.quote(db_path),
+               "integrity", "--project", shlex.quote(pid),
+               "--emit-json", shlex.quote(out_json), "--jobs", str(slots)]
+        if args.seqdata_root:
+            cmd += ["--seqdata-root", shlex.quote(os.path.abspath(args.seqdata_root))]
+        if args.force:
+            cmd.append("--force")
+        with open(script_path, "w") as fh:
+            fh.write(_batch_script(safe, log_path, slots, mem, mres, " ".join(cmd)))
+        os.chmod(script_path, 0o755)
+
+        if args.no_submit:
+            print(f"wrote {script_path}")
+            continue
+        try:
+            out = subprocess.run(["qsub", script_path], capture_output=True, text=True)
+        except FileNotFoundError:
+            print("qsub not found on PATH -- scripts written but not submitted.")
+            print(f"submit them on the Hydra head node, e.g.: qsub {script_path}")
+            args.no_submit = True
+            break
+        if out.returncode != 0:
+            print(f"qsub failed for {pid}: {out.stderr.strip()}")
+            continue
+        jid = out.stdout.strip()
+        job_ids.append(jid)
+        print(f"submitted {pid}: job {jid}  ({script_path})")
+
+    print()
+    if args.no_submit:
+        print(f"generated {len(projects)} script(s) in {scripts_dir}")
+    else:
+        print(f"submitted {len(job_ids)} job(s) to lTIO.sq")
+    print("when the jobs finish, merge their results into the catalog:")
+    print(f"  python {odna_py} --db {db_path} integrity --collect {results_dir}")
+
+
+def cmd_integrity(args):
+    from odna import integrity as ointegrity
+    conn = odb.connect(args.db)
+    odb.init_db(conn)
+
+    if args.collect:
+        summaries = ointegrity.collect_json(conn, args.collect)
+        conn.close()
+        _print_integrity(summaries)
+        return
+
+    if args.emit_json:
+        if not args.project:
+            conn.close()
+            sys.exit("integrity --emit-json requires --project")
+        ointegrity.emit_project_json(
+            conn, args.project, args.emit_json, seqdata_root=args.seqdata_root,
+            jobs=args.jobs, recheck=args.force)
+        conn.close()
+        return
+
+    if args.batch:
+        projects = ointegrity.list_projects(conn, args.project)
+        conn.close()
+        _submit_batch(args, projects)
+        return
+
+    results = ointegrity.check_catalog_integrity(
+        conn, seqdata_root=args.seqdata_root, only_project=args.project, jobs=args.jobs,
+        recheck=args.force)
+    conn.close()
+    _print_integrity(results)
 
 
 def cmd_query(args):
@@ -365,6 +497,28 @@ def build_parser():
     pin.add_argument("--force", action="store_true",
                      help="re-read every file, even ones that already passed and are "
                           "unchanged (default: skip those for a fast, resumable run)")
+    pin.add_argument("--batch", action="store_true",
+                     help="generate a per-project qsub script and submit it to Hydra's "
+                          "I/O queue (lTIO.sq) for remote checking (the only way to reach "
+                          "the NAS/Store partition from a compute node); each job writes "
+                          "JSON results to merge later with --collect. Respects --project.")
+    pin.add_argument("--batch-dir", default="integrity_batch",
+                     help="dir for generated batch scripts/logs/results "
+                          "(default: ./integrity_batch)")
+    pin.add_argument("--slots", type=int, default=4,
+                     help="mthread slots per batch job, also the remote --jobs "
+                          "(default 4; lTIO caps 6 slots/user and 2 concurrent jobs)")
+    pin.add_argument("--mem", type=int, default=2,
+                     help="memory (GB) requested per slot for batch jobs "
+                          "(default 2; lTIO caps 8G/slot)")
+    pin.add_argument("--no-submit", action="store_true",
+                     help="with --batch, write the qsub scripts but do not run qsub")
+    pin.add_argument("--emit-json", metavar="PATH",
+                     help="(used by batch jobs) check one --project and write results to "
+                          "PATH as JSON instead of writing the DB")
+    pin.add_argument("--collect", metavar="DIR",
+                     help="merge batch result JSON files from DIR into the catalog and "
+                          "print the per-project summary")
     pin.set_defaults(func=cmd_integrity)
 
     pq = sub.add_parser("query", help="lookups")

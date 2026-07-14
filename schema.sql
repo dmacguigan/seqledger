@@ -3,6 +3,14 @@
 
 PRAGMA foreign_keys = ON;
 
+-- Per-catalog configuration (key/value). Written at init-db; unset keys fall back
+-- to seqledger.db.CONFIG_DEFAULTS, so an existing catalog with no rows is unchanged.
+CREATE TABLE IF NOT EXISTS config (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at TEXT
+);
+
 -- One row per sequencing project (a directory in raw_sequence_data).
 CREATE TABLE IF NOT EXISTS projects (
     project_id       TEXT PRIMARY KEY,   -- top-level data dir name, e.g. genohub-8459898_Vietnam

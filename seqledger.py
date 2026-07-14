@@ -35,11 +35,47 @@ def _print_rows(rows, cols):
         print("\t".join("" if r[c] is None else str(r[c]) for c in cols))
 
 
+# init-db flag name -> config key. Flags let a lab retarget the tool without
+# editing source; unset keys keep today's defaults (odb.CONFIG_DEFAULTS).
+_INIT_CONFIG_FLAGS = {
+    "name": "catalog_name", "slug": "catalog_slug",
+    "seqdata_root": "seqdata_root", "metadata_root": "metadata_root",
+    "conda_env": "conda_env", "rclone_module": "rclone_module",
+    "login_host": "login_host", "io_queue": "io_queue",
+    "backup_location": "backup_location", "fastq_ext": "fastq_extensions",
+}
+
+
 def cmd_init_db(args):
     conn = odb.connect(args.db)
     odb.init_db(conn)
+
+    # Apply any config the user supplied (flags + repeatable --set KEY=VALUE).
+    updates = {}
+    for flag, key in _INIT_CONFIG_FLAGS.items():
+        val = getattr(args, flag, None)
+        if val is not None:
+            updates[key] = val
+    for pair in (args.set or []):
+        if "=" not in pair:
+            conn.close()
+            sys.exit(f"--set expects KEY=VALUE, got: {pair}")
+        k, v = pair.split("=", 1)
+        updates[k.strip()] = v
+    for k, v in updates.items():
+        odb.set_config(conn, k, v)
+    conn.commit()
+
+    if args.show:
+        cfg = odb.resolve_config(conn)
+        print("config (defaults + stored):")
+        for k in sorted(cfg):
+            print(f"  {k} = {cfg[k]}")
     conn.close()
-    print(f"initialized schema in {args.db}")
+    msg = f"initialized schema in {args.db}"
+    if updates:
+        msg += f"; set {len(updates)} config value(s)"
+    print(msg)
 
 
 def _has_unchecked_files(conn, project_id):
@@ -481,7 +517,29 @@ def build_parser():
     p.add_argument("--db", default="oceandna_catalog.db", help="path to catalog SQLite DB")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init-db").set_defaults(func=cmd_init_db)
+    pdb = sub.add_parser(
+        "init-db",
+        help="create/upgrade the catalog schema; optionally set per-catalog config")
+    pdb.add_argument("--name", help="catalog display name (GUI title / CLI banner)")
+    pdb.add_argument("--slug", help="export-filename prefix (e.g. 'oceandna')")
+    pdb.add_argument("--seqdata-root", dest="seqdata_root",
+                     help="default root of raw_sequence_data for this catalog")
+    pdb.add_argument("--metadata-root", dest="metadata_root",
+                     help="default dir of per-project '<project>_mapfile.csv' files")
+    pdb.add_argument("--conda-env", dest="conda_env",
+                     help="conda env activated inside generated qsub jobs")
+    pdb.add_argument("--rclone-module", dest="rclone_module",
+                     help="module load'ed in generated rclone copy jobs")
+    pdb.add_argument("--login-host", dest="login_host", help="Hydra login host for GUI tunnels")
+    pdb.add_argument("--io-queue", dest="io_queue", help="qsub queue for batch/rclone/gui jobs")
+    pdb.add_argument("--backup-location", dest="backup_location",
+                     help="label of the 'verified backup' location (e.g. 'pdrive')")
+    pdb.add_argument("--fastq-ext", dest="fastq_ext",
+                     help="comma-separated FASTQ suffixes to discover (e.g. 'fastq.gz,fq.gz')")
+    pdb.add_argument("--set", action="append", metavar="KEY=VALUE",
+                     help="set any config key directly (repeatable)")
+    pdb.add_argument("--show", action="store_true", help="print the resolved config and exit")
+    pdb.set_defaults(func=cmd_init_db)
 
     pi = sub.add_parser(
         "ingest",

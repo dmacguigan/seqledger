@@ -121,31 +121,54 @@ def test_tree_broken_mapfile_flags_and_catalogs_disk(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 1
 
 
-def test_tree_valid_header_invalid_rows_flags_invalid_not_ok(tmp_path):
-    # Regression: a VALID header whose ROW content fails validation (a control row
-    # with an empty UniqID) must be flagged 'invalid_mapfile', NOT silently 'ok'.
+def test_tree_valid_header_invalid_rows_flags_not_ok(tmp_path):
+    # A VALID header whose rows have empty fields (a control row with empty UniqID)
+    # must NOT be silently 'ok': the control row loads with UniqID NA-filled, the
+    # sample is flagged, and the project is 'flagged'.
     seq, meta = _roots(tmp_path)
     _gz(os.path.join(seq, "genohub-9_C", "s1_1.fastq.gz"))
     _gz(os.path.join(seq, "genohub-9_C", "s1_2.fastq.gz"))
+    _gz(os.path.join(seq, "genohub-9_C", "c_1.fastq.gz"))
+    _gz(os.path.join(seq, "genohub-9_C", "c_2.fastq.gz"))
     with open(os.path.join(meta, "genohub-9_C_mapfile.csv"), "w") as f:
         f.write("ID,R1,R2,Taxon,UniqID\n")
         f.write("s1,s1_1.fastq.gz,s1_2.fastq.gz,Gadus,U1\n")
-        f.write("Amp_neg_Plate1,c_1.fastq.gz,c_2.fastq.gz,control,\n")  # empty UniqID -> FAIL
+        f.write("Amp_neg_Plate1,c_1.fastq.gz,c_2.fastq.gz,control,\n")  # empty UniqID -> NA
 
     conn = _fresh_db(tmp_path)
-    results = oingest.ingest_tree(conn, seq, meta)
+    oingest.ingest_tree(conn, seq, meta)
 
-    assert results[0][2] == "fail"
     row = conn.execute(
-        "SELECT metadata_status, metadata_detail FROM projects "
-        "WHERE project_id='genohub-9_C'").fetchone()
-    assert row["metadata_status"] == "invalid_mapfile"      # not 'ok'
-    assert "UniqID" in row["metadata_detail"] or "empty" in row["metadata_detail"].lower()
-    # files cataloged from disk, but NO samples loaded (content failed validation)
+        "SELECT metadata_status FROM projects WHERE project_id='genohub-9_C'").fetchone()
+    assert row["metadata_status"] == "flagged"      # not 'ok', not 'invalid_mapfile'
+    # BOTH samples loaded; the control row's UniqID was NA-filled + flagged
     assert conn.execute(
-        "SELECT COUNT(*) FROM files WHERE project_id='genohub-9_C'").fetchone()[0] == 2
+        "SELECT COUNT(*) FROM samples WHERE project_id='genohub-9_C'").fetchone()[0] == 2
+    ctrl = conn.execute(
+        "SELECT uniq_id, flags FROM samples WHERE sample_id='Amp_neg_Plate1'").fetchone()
+    assert ctrl["uniq_id"] == "NA"
+    assert "na_uniqid" in ctrl["flags"]
+    # the clean sample has no flags
+    clean = conn.execute("SELECT flags FROM samples WHERE sample_id='s1'").fetchone()
+    assert clean["flags"] is None
+
+
+def test_tree_all_rows_unusable_is_invalid_mapfile(tmp_path):
+    # If NO row is loadable (all empty IDs), it's 'invalid_mapfile' with files only.
+    seq, meta = _roots(tmp_path)
+    _gz(os.path.join(seq, "genohub-8_D", "x_1.fastq.gz"))
+    with open(os.path.join(meta, "genohub-8_D_mapfile.csv"), "w") as f:
+        f.write("ID,R1,R2,Taxon,UniqID\n")
+        f.write(",x_1.fastq.gz,x_2.fastq.gz,Gadus,U1\n")  # empty ID -> skipped
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, seq, meta)
+    row = conn.execute(
+        "SELECT metadata_status FROM projects WHERE project_id='genohub-8_D'").fetchone()
+    assert row["metadata_status"] == "invalid_mapfile"
     assert conn.execute(
-        "SELECT COUNT(*) FROM samples WHERE project_id='genohub-9_C'").fetchone()[0] == 0
+        "SELECT COUNT(*) FROM samples WHERE project_id='genohub-8_D'").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM files WHERE project_id='genohub-8_D'").fetchone()[0] == 1
 
 
 def test_discover_projects_unions_both_sides(tmp_path):

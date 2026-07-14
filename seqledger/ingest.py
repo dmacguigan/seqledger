@@ -6,13 +6,15 @@ Two ways in:
   ingest_map_file  explicit two-column map file (metadata csv, data dir). Kept for
                    manual/odd layouts and back-compat.
 
-Auto-discovery records a per-project `metadata_status` for pairing problems:
-  ok               mapfile present + parseable, folder present
+Auto-discovery records a per-project `metadata_status`:
+  ok               mapfile present + parseable, folder present, all rows clean
+  flagged          header valid but some rows needed repair: empty Taxon/UniqID were
+                   filled with 'NA', empty-ID / duplicate-ID rows were skipped. The
+                   loadable samples ARE loaded; samples.flags records what was repaired.
   missing_mapfile  project folder on disk, no mapfile -> files cataloged, no samples
   missing_seqdata  mapfile present, no project folder -> samples cataloged, no files
-  broken_mapfile   mapfile present but header is malformed -> files cataloged, no samples
-  invalid_mapfile  header valid but row content fails validation (e.g. empty required
-                   field, duplicate/identical IDs) -> files cataloged, no samples
+  broken_mapfile   mapfile header is malformed -> files cataloged, no samples
+  invalid_mapfile  header valid but NO rows were loadable -> files cataloged, no samples
 In every case the project is still added to the catalog (so nothing is hidden).
 """
 
@@ -34,7 +36,8 @@ from .db import (METADATA_SUFFIX, REQUIRED_COLUMNS, fastq_globs, get_config,
 
 # Fallback FASTQ globs when no config is available (direct callers / tests).
 _DEFAULT_FASTQ_GLOBS = ("*.fastq.gz", "*.fq.gz")
-from .validate import Finding, FAIL, WARN, validate_metadata, overall_status
+from .validate import (Finding, FAIL, WARN, NA_VALUE, FLAG_MESSAGES,
+                       plan_rows, validate_metadata, overall_status)
 
 # Plain-english explanations stored on the project row (also surfaced in the GUI).
 MISSING_MAPFILE_DETAIL = (
@@ -64,12 +67,35 @@ _INVALID_MAPFILE_PREFIX = (
 
 
 def _invalid_mapfile_detail(findings, max_items=5):
-    """One-line summary of the FAIL findings for a content-invalid mapfile."""
-    fails = [f.message for f in findings if f.level == FAIL]
-    shown = "; ".join(fails[:max_items])
-    if len(fails) > max_items:
-        shown += f"; (+{len(fails) - max_items} more)"
-    return _INVALID_MAPFILE_PREFIX + (shown or "row validation failed") + "."
+    """One-line summary of the findings for a mapfile that loaded no samples."""
+    msgs = [f.message for f in findings if f.level in (FAIL, WARN)]
+    shown = "; ".join(msgs[:max_items])
+    if len(msgs) > max_items:
+        shown += f"; (+{len(msgs) - max_items} more)"
+    return _INVALID_MAPFILE_PREFIX + (shown or "no usable rows") + "."
+
+
+def _row_quality_status(passed_status, passed_detail, n_flagged, skipped):
+    """Final metadata_status/detail for a project that loaded >=1 sample.
+
+    'missing_seqdata' (no data folder) is the headline and wins. Otherwise, if any
+    row was NA-filled or skipped, the project is 'flagged' with a count; else it
+    keeps the status it came in with ('ok').
+    """
+    if passed_status == "missing_seqdata":
+        return "missing_seqdata", passed_detail
+    if n_flagged or skipped:
+        parts = []
+        if n_flagged:
+            parts.append(f"{n_flagged} sample(s) had empty fields filled with NA")
+        if skipped:
+            ex = "; ".join(f"row {p['line']}: {p['skip_reason']}" for p in skipped[:3])
+            more = f" (+{len(skipped) - 3} more)" if len(skipped) > 3 else ""
+            parts.append(f"{len(skipped)} row(s) skipped -- {ex}{more}")
+        detail = ("Mapfile loaded with issues: " + "; ".join(parts)
+                  + ". Fix the mapfile and re-ingest to clear the flags.")
+        return "flagged", detail
+    return passed_status, passed_detail
 
 
 def _owner_name(uid, cache):
@@ -219,13 +245,14 @@ def _upsert_project(conn, project_id, source, number, description, metadata_file
          metadata_status, metadata_detail))
 
 
-def _upsert_sample(conn, project_id, sample_id, taxon, uniq_id, extra_json):
+def _upsert_sample(conn, project_id, sample_id, taxon, uniq_id, extra_json, flags=None):
     conn.execute(
-        """INSERT INTO samples (project_id, sample_id, taxon, uniq_id, extra_json)
-           VALUES (?, ?, ?, ?, ?)
+        """INSERT INTO samples (project_id, sample_id, taxon, uniq_id, extra_json, flags)
+           VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, sample_id) DO UPDATE SET
-             taxon=excluded.taxon, uniq_id=excluded.uniq_id, extra_json=excluded.extra_json""",
-        (project_id, sample_id, taxon, uniq_id, extra_json))
+             taxon=excluded.taxon, uniq_id=excluded.uniq_id,
+             extra_json=excluded.extra_json, flags=excluded.flags""",
+        (project_id, sample_id, taxon, uniq_id, extra_json, flags))
     cur = conn.execute(
         "SELECT sample_pk FROM samples WHERE project_id=? AND sample_id=?",
         (project_id, sample_id))
@@ -257,7 +284,8 @@ def _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
 def _empty_stats():
     return {"new_samples": 0, "changed_samples": 0, "new_files": 0,
             "changed_taxa": set(), "orphan_samples": [], "pruned_samples": [],
-            "pruned_files": 0, "metadata_status": "ok", "metadata_detail": None}
+            "pruned_files": 0, "metadata_status": "ok", "metadata_detail": None,
+            "n_flagged": 0, "n_skipped": 0}
 
 
 def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, prune=False,
@@ -313,12 +341,31 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
     if has_fail:
         return project_id, findings, status, stats
 
-    uniqid_col = header_uniqid_column(header)
+    uniqid_col, plans = plan_rows(header, rows)
+    usable = [p for p in plans if p["load"]]
+    skipped = [p for p in plans if not p["load"]]
+
+    # Nothing loadable (every row skipped / no rows): don't write a project row here.
+    # ingest_tree falls back to _ingest_diskonly (invalid_mapfile); the manual path
+    # just reports the failure. Preserves the "FAIL writes nothing" contract.
+    if not usable:
+        stats["metadata_status"] = "invalid_mapfile"
+        stats["metadata_detail"] = _invalid_mapfile_detail(findings)
+        return project_id, findings, "fail", stats
+
+    n_flagged = sum(1 for p in usable if p["flags"])
+    final_status, final_detail = _row_quality_status(
+        metadata_status, metadata_detail, n_flagged, skipped)
+    stats["metadata_status"] = final_status
+    stats["metadata_detail"] = final_detail
+    stats["n_flagged"] = n_flagged
+    stats["n_skipped"] = len(skipped)
+
     abs_root = os.path.abspath(seqdata_root) if seqdata_root else None
     _upsert_project(conn, project_id, source, number, description,
                     metadata_filename, seq_data_relpath, seqdata_root=abs_root,
                     owner_uid=proj_owner_uid, owner_name=proj_owner_name,
-                    metadata_status=metadata_status, metadata_detail=metadata_detail)
+                    metadata_status=final_status, metadata_detail=final_detail)
 
     # Snapshot existing samples so we can tell new vs changed vs (dropped) orphans.
     existing = {r["sample_id"]: r["taxon"] for r in conn.execute(
@@ -328,25 +375,31 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
 
     core = set(["ID", "R1", "R2", "Taxon", uniqid_col])
     seen_files = {}  # filename -> "sample_id/direction" it was first claimed by
-    for row in rows:
-        sample_id = row["ID"].strip()
-        taxon = row["Taxon"].strip()
-        uniq_id = row[uniqid_col].strip()
+    for p in usable:
+        sample_id = p["sample_id"]
+        taxon = p["taxon"]
+        uniq_id = p["uniq_id"]
         csv_ids.add(sample_id)
+        real_taxon = taxon if taxon != NA_VALUE else ""  # 'NA' is a placeholder, not a taxon
         if sample_id not in existing:
             stats["new_samples"] += 1
-            if taxon:
-                stats["changed_taxa"].add(taxon)
+            if real_taxon:
+                stats["changed_taxa"].add(real_taxon)
         elif existing[sample_id] != taxon:
             stats["changed_samples"] += 1
-            if taxon:
-                stats["changed_taxa"].add(taxon)
-        extra = {k: v for k, v in row.items() if k not in core}
+            if real_taxon:
+                stats["changed_taxa"].add(real_taxon)
+        extra = {k: v for k, v in p["extra"].items() if k not in core}
         extra_json = json.dumps(extra) if extra else None
-        sample_pk = _upsert_sample(conn, project_id, sample_id, taxon, uniq_id, extra_json)
+        flags_str = ";".join(p["flags"]) or None
+        sample_pk = _upsert_sample(conn, project_id, sample_id, taxon, uniq_id,
+                                   extra_json, flags_str)
 
-        for direction in ("R1", "R2"):
-            filename = row[direction].strip()
+        for direction, filename in (("R1", p["r1"]), ("R2", p["r2"])):
+            if not filename:
+                continue  # empty read filename (missing_r1/r2) -> no file cataloged
+            if direction == "R2" and "r1_eq_r2" in p["flags"]:
+                continue  # R1 and R2 name the same file -> catalog it once (as R1)
             csv_files.add(filename)
             # A filename can only be one physical file; if the mapfile lists it under
             # two samples/directions the last upsert silently wins, so flag it.
@@ -366,6 +419,7 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
                 stats["new_files"] += 1
 
     stats["orphan_samples"] = sorted(set(existing) - csv_ids)
+    status = "warn" if (n_flagged or skipped or overall_status(findings) != "pass") else "pass"
 
     if prune:
         # Drop samples the corrected CSV no longer lists (files cascade), then any
@@ -452,9 +506,11 @@ def ingest_tree(conn, seqdata_root, metadata_root, prune=False):
     Each project folder is paired with its '<project>_mapfile.csv'. Pairing problems
     are flagged on the project row (metadata_status) but never block ingest:
       - folder + valid mapfile      -> samples + files (metadata_status 'ok')
-      - mapfile only (no folder)    -> samples from mapfile (metadata_status 'missing_seqdata')
+      - valid header, bad rows      -> samples loaded with NA-fill/skips ('flagged')
+      - mapfile only (no folder)    -> samples from mapfile ('missing_seqdata')
       - folder only (no mapfile)    -> files from disk, no samples ('missing_mapfile')
-      - folder + broken mapfile     -> files from disk, no samples ('broken_mapfile')
+      - folder + broken header      -> files from disk, no samples ('broken_mapfile')
+      - valid header, no usable rows-> files from disk, no samples ('invalid_mapfile')
     Returns the same list of (project_id, findings, status, stats) as ingest_map_file.
     """
     results = []
@@ -490,20 +546,17 @@ def ingest_tree(conn, seqdata_root, metadata_root, prune=False):
             metadata_status=mstatus, metadata_detail=detail)
 
         if status == "fail":
-            # Valid header but the ROW CONTENT failed validation (empty required
-            # field, duplicate/identical IDs, ...). ingest_project wrote nothing, so
-            # catalog the on-disk files and stamp a non-ok status -- otherwise the
-            # project row would masquerade as 'ok' while holding 0 samples. The
-            # detail summarizes the FAIL findings so the fix (edit the rows) is clear.
-            mstatus = "invalid_mapfile"
-            detail = _invalid_mapfile_detail(findings)
-            stats = _ingest_diskonly(conn, pid, data_dir, seqdata_root, mstatus, detail)
+            # No usable rows loaded (all skipped / empty). Catalog the on-disk files
+            # and stamp invalid_mapfile so the row doesn't masquerade as 'ok' with 0
+            # samples; the detail summarizes why so the fix (edit the rows) is clear.
+            stats = _ingest_diskonly(conn, pid, data_dir, seqdata_root,
+                                     "invalid_mapfile", _invalid_mapfile_detail(findings))
         elif not has_dir:
             findings = [Finding(WARN, "no project folder on disk for this mapfile")] + findings
             if status == "pass":
                 status = "warn"
-        stats["metadata_status"] = mstatus
-        stats["metadata_detail"] = detail
+        # Otherwise trust ingest_project's stats (metadata_status is 'ok', 'flagged',
+        # or 'missing_seqdata', already set with the right detail) -- don't overwrite.
         results.append((pid_, findings, status, stats))
     return results
 

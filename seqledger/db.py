@@ -107,6 +107,7 @@ _MIGRATIONS = [
     ("projects", "data_check_date", "TEXT"),
     ("projects", "metadata_status", "TEXT"),
     ("projects", "metadata_detail", "TEXT"),
+    ("samples", "flags", "TEXT"),
     ("files", "owner_uid", "INTEGER"),
     ("files", "owner_name", "TEXT"),
     ("files", "integrity_status", "TEXT"),
@@ -120,6 +121,8 @@ def _migrate(conn):
     """Add any columns missing from an older DB (idempotent)."""
     for table, column, decl in _MIGRATIONS:
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not cols:
+            continue  # table doesn't exist in this DB -> nothing to migrate
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
     # Settle the R1/R2 column name on 'direction' (was 'role', briefly 'read').

@@ -29,18 +29,20 @@ def test_uniqueid_alias_accepted():
     assert not has_fail
 
 
-def test_empty_field_and_identical_r1r2_and_dup_id_fail():
+def test_content_problems_warn_not_fail():
+    # Row content problems no longer FAIL the project -- they load with NA-fill /
+    # skip and surface as WARN findings (see plan_rows).
     rows = _rows(
         ("s1", "s1_1.fastq.gz", "s1_1.fastq.gz", "Gadus", "U1"),  # R1==R2
-        ("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "", "U2"),        # empty Taxon
-        ("s1", "s3_1.fastq.gz", "s3_2.fastq.gz", "Gadus", "U3"),   # dup ID
+        ("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "", "U2"),        # empty Taxon -> NA
+        ("s1", "s3_1.fastq.gz", "s3_2.fastq.gz", "Gadus", "U3"),   # dup ID -> skipped
     )
     findings, has_fail = validate_metadata("proj_mapfile.csv", HEADER, rows)
-    assert has_fail
+    assert not has_fail
     msgs = " ".join(f.message for f in findings)
-    assert "identical" in msgs
-    assert "empty required" in msgs
-    assert "duplicate sample ID" in msgs
+    assert "same file" in msgs                # R1==R2 flag
+    assert "Taxon was empty" in msgs          # NA-fill
+    assert "skipped (duplicate sample ID" in msgs
 
 
 def test_substring_orphan_detected_exactly():
@@ -60,3 +62,25 @@ def test_cross_project_uniqid_warns():
     findings, _ = validate_metadata(
         "proj_mapfile.csv", HEADER, rows, known_uniq_ids={"SHARED": "other_proj"})
     assert any(f.level == WARN and "already cataloged" in f.message for f in findings)
+
+
+def test_plan_rows_na_fill_skip_and_read_flags():
+    from seqledger.validate import plan_rows
+    rows = _rows(
+        ("clean", "a_1.fastq.gz", "a_2.fastq.gz", "Gadus", "U1"),   # clean
+        ("noTax", "b_1.fastq.gz", "b_2.fastq.gz", "", "U2"),         # na_taxon
+        ("noR2",  "c_1.fastq.gz", "", "Gadus", "U3"),                # missing_r2
+        ("same",  "d.fastq.gz", "d.fastq.gz", "Gadus", "U4"),        # r1_eq_r2
+        ("",      "e_1.fastq.gz", "e_2.fastq.gz", "Gadus", "U5"),    # empty ID -> skip
+        ("clean", "f_1.fastq.gz", "f_2.fastq.gz", "Gadus", "U6"),    # dup ID -> skip
+    )
+    uniqid_col, plans = plan_rows(HEADER, rows)
+    assert uniqid_col == "UniqID"
+    by = {p.get("sample_id"): p for p in plans if p["load"]}
+    assert by["clean"]["flags"] == []
+    assert by["noTax"]["taxon"] == "NA" and by["noTax"]["flags"] == ["na_taxon"]
+    assert "missing_r2" in by["noR2"]["flags"]
+    assert "r1_eq_r2" in by["same"]["flags"]
+    skips = [p["skip_reason"] for p in plans if not p["load"]]
+    assert any("empty ID" in s for s in skips)
+    assert any("duplicate sample ID" in s for s in skips)

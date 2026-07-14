@@ -356,8 +356,8 @@ locally, then open `http://localhost:8501`. Read-only browsing plus a
 build-your-own selection view (sidebar):
 
 - **Projects** - per-project summary stats plus check fields: `mapfile`
-  (folder<->mapfile pairing: OK / no mapfile / no data folder / broken mapfile /
-  invalid rows),
+  (folder<->mapfile pairing + row quality: OK / flagged rows / no mapfile / no data
+  folder / broken mapfile / no usable rows),
   `data_files` (mapfile <-> disk reciprocal: OK / "N missing, M orphan"), and
   `checksum` (Store vs P-drive: verified / "N mismatch" / incomplete). Filter to
   just the flagged ones ("Only mapfile issues" etc). Select a project row to see
@@ -413,7 +413,8 @@ seqledger --db catalog.db init-db --set io_queue=sThM.q   # any key
 | you see | it means / what to do |
 |---|---|
 | `ingest` prints `WARNING: discovered 0 projects` | the roots are empty/unmounted/mistyped, or no `<project>_mapfile.csv` files — check the paths and that Store/NAS is mounted. |
-| Projects view `mapfile` = `no mapfile` / `broken mapfile` / `no data folder` / `invalid rows` | a project folder has no mapfile, a malformed header, no folder, or (`invalid rows`) a valid header whose rows failed validation (empty required field, duplicate IDs) so no samples loaded. Select the row for the specific problem; the files are still cataloged. Fix the mapfile and re-ingest. |
+| Projects view `mapfile` = `flagged rows` | the mapfile loaded, but some rows needed repair: empty Taxon/UniqID were filled with `NA`, and empty-ID / duplicate-ID rows were skipped. The affected samples show tokens in the Samples view `flags` column (`na_uniqid`, `na_taxon`, `missing_r1`/`missing_r2`, `r1_eq_r2`). Fix the mapfile and re-ingest to clear them. |
+| Projects view `mapfile` = `no mapfile` / `broken mapfile` / `no data folder` / `no usable rows` | a project folder has no mapfile, a malformed header, no folder, or (`no usable rows`) a valid header where no row could be loaded (all empty/duplicate IDs). Select the row for details; the files are still cataloged. Fix the mapfile and re-ingest. |
 | `data_files` = "N missing / M orphan" | files listed in the mapfile aren't on disk (missing), or on-disk FASTQ aren't in the mapfile (orphan). |
 | a batch integrity/copy job "fails" near 72h | it hit the lTIO wall/CPU cap; the per-project checkpoint is saved — just **re-`qsub`** (integrity resumes; rclone `--checksum` skips copied files). |
 | `integrity --collect` skips a file "no .done marker" | that project's job is still running or was killed — let it finish (or resubmit), then re-collect. |
@@ -424,7 +425,8 @@ seqledger --db catalog.db init-db --set io_queue=sThM.q   # any key
 
 `projects` (1 per sequencing project; `metadata_status` / `metadata_detail` record
 folder<->mapfile pairing health from auto-discovery ingest) -> `samples` (1 per
-sample, extra map-file columns kept as JSON) -> `files` (R1/R2, with `store_md5` /
+sample, extra map-file columns kept as JSON; `flags` records any NA-fill/skip repairs)
+-> `files` (R1/R2, with `store_md5` /
 `pdrive_md5` / `md5_match`; `rel_path` may be nested when FASTQ live in subdirs).
 `backups` summarizes per-project verification; `validation_log` records
 validation runs. `taxa` holds the NCBI resolution per distinct raw Taxon

@@ -24,19 +24,87 @@ class Finding:
         return f"{self.level}: {self.message}"
 
 
+# The value written when a non-key field (Taxon / UniqID) is empty in the mapfile.
+NA_VALUE = "NA"
+
+# Per-sample quality flags recorded on samples.flags, with a plain-english message.
+FLAG_MESSAGES = {
+    "na_taxon":   "Taxon was empty in the mapfile, set to NA",
+    "na_uniqid":  "UniqID was empty in the mapfile, set to NA",
+    "missing_r1": "R1 filename was empty (no R1 file cataloged)",
+    "missing_r2": "R2 filename was empty (no R2 file cataloged)",
+    "r1_eq_r2":   "R1 and R2 name the same file (only R1 cataloged)",
+}
+
+
+def plan_rows(header, rows):
+    """Decide, per mapfile row, whether to load it and how to repair missing values.
+
+    Instead of failing a whole project on a bad row, we load what we can and flag
+    the rest. For each row returns a plan dict:
+      load        -- True to load the sample, False to skip it
+      skip_reason -- why it was skipped (only when load is False)
+      line        -- 1-based mapfile line (header = line 1)
+      sample_id/r1/r2/taxon/uniq_id -- repaired values (empty Taxon/UniqID -> 'NA';
+                     an empty R1/R2 stays '' meaning "no file for that direction")
+      flags       -- list of flag tokens (see FLAG_MESSAGES) describing what was repaired
+      extra       -- the original row (for the extra-columns JSON)
+
+    Rows are SKIPPED only when they can't be keyed or would violate uniqueness: an
+    empty ID, or a sample ID already used earlier in this mapfile. Returns
+    (uniqid_col, plans); uniqid_col is None if the header is invalid.
+    """
+    uniqid_col = header_uniqid_column(header)
+    if uniqid_col is None:
+        return None, []
+
+    seen = set()
+    plans = []
+    for i, row in enumerate(rows, start=2):  # line 2 = first data row
+        sample_id = (row.get("ID") or "").strip()
+        r1 = (row.get("R1") or "").strip()
+        r2 = (row.get("R2") or "").strip()
+        taxon = (row.get("Taxon") or "").strip()
+        uniq_id = (row.get(uniqid_col) or "").strip()
+
+        if not sample_id:
+            plans.append({"load": False, "line": i, "skip_reason": "empty ID"})
+            continue
+        if sample_id in seen:
+            plans.append({"load": False, "line": i,
+                          "skip_reason": f"duplicate sample ID '{sample_id}'"})
+            continue
+        seen.add(sample_id)
+
+        flags = []
+        if not taxon:
+            taxon = NA_VALUE
+            flags.append("na_taxon")
+        if not uniq_id:
+            uniq_id = NA_VALUE
+            flags.append("na_uniqid")
+        if not r1:
+            flags.append("missing_r1")
+        if not r2:
+            flags.append("missing_r2")
+        if r1 and r2 and r1 == r2:
+            flags.append("r1_eq_r2")
+
+        plans.append({"load": True, "line": i, "sample_id": sample_id,
+                      "r1": r1, "r2": r2, "taxon": taxon, "uniq_id": uniq_id,
+                      "flags": flags, "extra": row})
+    return uniqid_col, plans
+
+
 def validate_metadata(metadata_filename, header, rows, disk_filenames=None,
                       known_uniq_ids=None):
-    """Validate one project's map file.
+    """Validate one project's map file (produces display findings, no hard content fails).
 
-    - metadata_filename: the map file name (checked for _mapfile.csv suffix).
-    - header: list of column names.
-    - rows: list of dict-like rows (keys ID, R1, R2, Taxon, and the UniqID column).
-    - disk_filenames: optional set of *.fastq.gz basenames present on disk. When
-      provided, orphan / missing-file checks run.
-    - known_uniq_ids: optional dict {uniq_id: project_id} of already-cataloged IDs,
-      for cross-project duplicate detection.
-
-    Returns (findings, has_fail). Findings with level FAIL should block ingest.
+    A malformed name/header is still a hard FAIL (has_fail True). Row-content
+    problems no longer fail the project: empty Taxon/UniqID are NA-filled, empty/dup
+    IDs skip just that row -- all surfaced as WARN findings (see plan_rows for the
+    loading policy). Returns (findings, has_fail); has_fail is True only for the
+    structural suffix/header problems.
     """
     findings = []
 
@@ -49,44 +117,27 @@ def validate_metadata(metadata_filename, header, rows, disk_filenames=None,
             FAIL,
             "first five columns must be ID,R1,R2,Taxon,UniqID (or UniqueID); "
             f"got {','.join(header[:5])}"))
-        # Without a valid header we cannot check rows meaningfully.
-        return findings, True
+        return findings, True  # can't check rows without a valid header
 
-    seen_sample_ids = set()
+    _uniqid_col, plans = plan_rows(header, rows)
     metadata_r1r2 = set()
-    for i, row in enumerate(rows, start=2):  # line 2 = first data row
-        sample_id = (row.get("ID") or "").strip()
-        r1 = (row.get("R1") or "").strip()
-        r2 = (row.get("R2") or "").strip()
-        taxon = (row.get("Taxon") or "").strip()
-        uniq_id = (row.get(uniqid_col) or "").strip()
-
-        missing = [c for c, v in (("ID", sample_id), ("R1", r1), ("R2", r2),
-                                  ("Taxon", taxon), ("UniqID", uniq_id)) if not v]
-        if missing:
-            findings.append(Finding(FAIL, f"row {i}: empty required field(s): {', '.join(missing)}"))
+    for p in plans:
+        i = p["line"]
+        if not p["load"]:
+            findings.append(Finding(WARN, f"row {i}: skipped ({p['skip_reason']})"))
             continue
-
-        if r1 == r2:
-            findings.append(Finding(FAIL, f"row {i}: R1 and R2 are identical ({r1})"))
-
-        if sample_id in seen_sample_ids:
-            findings.append(Finding(FAIL, f"row {i}: duplicate sample ID '{sample_id}'"))
-        seen_sample_ids.add(sample_id)
-
-        metadata_r1r2.update([r1, r2])
-
-        if known_uniq_ids and uniq_id in known_uniq_ids:
+        for fl in p["flags"]:
+            findings.append(Finding(WARN, f"row {i}: {FLAG_MESSAGES[fl]}"))
+        for direction, fn in (("R1", p["r1"]), ("R2", p["r2"])):
+            if fn:
+                metadata_r1r2.add(fn)
+                if disk_filenames is not None and fn not in disk_filenames:
+                    findings.append(Finding(WARN, f"row {i}: {direction} '{fn}' not found on disk"))
+        if known_uniq_ids and p["uniq_id"] != NA_VALUE and p["uniq_id"] in known_uniq_ids:
             findings.append(Finding(
                 WARN,
-                f"row {i}: UniqID '{uniq_id}' already cataloged under project "
-                f"'{known_uniq_ids[uniq_id]}' (possible re-sequence)"))
-
-        if disk_filenames is not None:
-            if r1 not in disk_filenames:
-                findings.append(Finding(WARN, f"row {i}: R1 '{r1}' not found on disk"))
-            if r2 not in disk_filenames:
-                findings.append(Finding(WARN, f"row {i}: R2 '{r2}' not found on disk"))
+                f"row {i}: UniqID '{p['uniq_id']}' already cataloged under project "
+                f"'{known_uniq_ids[p['uniq_id']]}' (possible re-sequence)"))
 
     # Orphans: fastq on disk not referenced by any metadata row (exact match).
     if disk_filenames is not None:

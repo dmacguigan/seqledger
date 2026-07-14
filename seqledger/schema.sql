@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS samples (
     taxon        TEXT,
     uniq_id      TEXT,                   -- voucher/tissue identifier (map file 'UniqID')
     extra_json   TEXT,                   -- JSON of any extra map file columns
+    flags        TEXT,                   -- ';'-joined mapfile-quality flags (NA-filled
+                                         -- fields, missing reads); NULL when the row was clean
     UNIQUE (project_id, sample_id)
 );
 CREATE INDEX IF NOT EXISTS idx_samples_uniq_id ON samples(uniq_id);

@@ -94,10 +94,10 @@ def test_ingest_without_seqdata_root_leaves_owner_null(tmp_path):
     assert frow["size_bytes"] is None and frow["owner_name"] is None
 
 
-def test_ingest_rejects_bad_project(tmp_path):
+def test_ingest_skips_duplicate_id_row_loads_the_rest(tmp_path):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
-    # duplicate sample ID -> FAIL, project not loaded
+    # duplicate sample ID -> the 2nd 'dup' row is skipped, the first still loads
     rows = [
         ("dup", "a.fastq.gz", "b.fastq.gz", "Gadus", "U1"),
         ("dup", "c.fastq.gz", "d.fastq.gz", "Gadus", "U2"),
@@ -107,8 +107,11 @@ def test_ingest_rejects_bad_project(tmp_path):
 
     conn = _fresh_db(tmp_path)
     results = oingest.ingest_map_file(conn, map_file, seqdata_root=root)
-    assert results[0][2] == "fail"
-    assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+    # project loaded (not rejected), one sample; the duplicate row skipped + flagged
+    assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
+    assert results[0][3]["n_skipped"] == 1
+    assert results[0][3]["metadata_status"] == "flagged"
 
 
 def test_ingest_flags_filename_listed_twice(tmp_path):

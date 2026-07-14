@@ -60,7 +60,8 @@ _MAPFILE_LABEL = {
     "missing_mapfile": "no mapfile",
     "missing_seqdata": "no data folder",
     "broken_mapfile":  "broken mapfile",
-    "invalid_mapfile": "invalid rows",
+    "invalid_mapfile": "no usable rows",
+    "flagged":         "flagged rows",
 }
 _MAPFILE_DETAIL = {
     "unknown": "This catalog copy predates the mapfile-status check, or the status "
@@ -74,10 +75,13 @@ _MAPFILE_DETAIL = {
     "broken_mapfile":  "The mapfile is present but its header is malformed (expected "
                        "ID,R1,R2,Taxon,UniqID). Files were cataloged from disk; sample "
                        "metadata was skipped until the mapfile is fixed.",
-    "invalid_mapfile": "The mapfile header is valid but some rows failed validation "
-                       "(e.g. empty required fields, duplicate IDs), so no samples were "
-                       "loaded. Files were cataloged from disk. See the project's detail "
-                       "for the specific rows; fix them and re-ingest.",
+    "invalid_mapfile": "The mapfile header is valid but no rows could be loaded (all had "
+                       "empty or duplicate IDs). Files were cataloged from disk. Fix the "
+                       "mapfile and re-ingest.",
+    "flagged":         "The mapfile loaded, but some rows needed repair: empty Taxon/UniqID "
+                       "were filled with 'NA', and empty-ID or duplicate-ID rows were "
+                       "skipped. The affected samples are marked in the 'flags' column. Fix "
+                       "the mapfile and re-ingest to clear them.",
 }
 
 
@@ -117,7 +121,7 @@ def _config(db_path, key):
 @st.cache_data(ttl=60)
 def load_samples(db_path, mtime):
     return _sql(db_path, f"""
-        SELECT s.project_id, s.sample_id, s.taxon, s.uniq_id,
+        SELECT s.project_id, s.sample_id, s.taxon, s.uniq_id, s.flags,
                p.source, p.seq_data_relpath AS data_dir,
                COALESCE(b.verified, 0) AS backup_verified,
                t.sci_name AS tax_name, t.match_type AS tax_match,
@@ -330,7 +334,7 @@ def samples_view(df, files_df):
     st.caption(f"{len(view)} of {len(df)} samples (full R1/R2 paths, taxid + "
                "lineage are in the CSV export). Select a row to list its files below.")
     on_screen = ["project_id", "sample_id", "taxon", "ncbi_url", "tax_match",
-                 "uniq_id", "backup_verified"]
+                 "uniq_id", "flags", "backup_verified"]
     event = st.dataframe(
         view[on_screen], width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row", key="samples_table",

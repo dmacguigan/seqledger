@@ -3,7 +3,7 @@
 
 Subcommands:
   init-db     create the catalog schema
-  ingest      load CSV map file(s); auto-run integrity + taxonomy, refresh data-files check
+  ingest      load metadata (auto-discover or map file); auto-run taxonomy, refresh data-files check
   checksums   load + compare `rclone md5sum` output from Store and P-drive
   validate    re-check the catalog and print findings
   integrity   gzip + FASTQ structural integrity check of cataloged files
@@ -65,19 +65,21 @@ def _has_unresolved_taxa(conn):
 
 
 def cmd_ingest(args):
-    """Ingest a map file, then auto-run integrity + taxonomy and refresh the check.
+    """Ingest metadata, then auto-run taxonomy resolve and refresh the data-files check.
 
-    Re-ingesting a project upserts its rows (Taxon edits included). The pipeline
-    steps are gated so unchanged re-runs are cheap: integrity only touches
-    projects with never-checked files, taxonomy only runs when unresolved taxa
-    exist. Samples dropped from a CSV are reported but left in place unless
-    --prune is given, which deletes samples/files the corrected CSV no longer
-    references. A final data-files check refreshes the stored data_check_issues
-    + checksum/status (with --seqdata-root it re-validates against disk; without,
-    it just clears rows made stale by a --prune) so the report and GUI reflect
-    the ingest without a separate `validate` run.
+    Re-ingesting a project upserts its rows (Taxon edits included). The follow-on
+    steps are gated so unchanged re-runs are cheap: taxonomy only runs when
+    unresolved taxa exist. Samples dropped from a CSV are reported but left in
+    place unless --prune is given, which deletes samples/files the corrected CSV no
+    longer references. A final data-files check refreshes the stored
+    data_check_issues + checksum/status (with --seqdata-root it re-validates against
+    disk; without, it just clears rows made stale by a --prune) so the report and
+    GUI reflect the ingest without a separate `validate` run.
+
+    Integrity (the gzip/FASTQ byte-scan) is deliberately NOT run here -- it reads
+    every byte and is slow, so it is a separate opt-in step: run `odna.py integrity`
+    (or `integrity --batch` on Hydra's I/O queue) when you want it.
     """
-    from odna import integrity as ointegrity
     from odna import taxonomy as otax
     icons = {"pass": "OK", "warn": "WARN", "fail": "FAIL"}
     conn = odb.connect(args.db)
@@ -97,7 +99,6 @@ def cmd_ingest(args):
             conn, args.seqdata_root, args.metadata_root, prune=args.prune)
     n_fail = 0
     ingested = []  # project_ids that did not FAIL
-    all_pids = [pid for pid, _, _, _ in results]
     tot_new = tot_changed = tot_files = 0
     tot_pruned_s = tot_pruned_f = 0
     for project_id, findings, status, stats in results:
@@ -128,29 +129,6 @@ def cmd_ingest(args):
           f"{tot_new} new sample(s), {tot_changed} changed, {tot_files} new file(s)")
     if args.prune and (tot_pruned_s or tot_pruned_f):
         print(f"pruned {tot_pruned_s} sample(s) and {tot_pruned_f} stale file row(s)")
-
-    if not args.skip_integrity:
-        print("\n== integrity ==")
-        if not args.seqdata_root:
-            print("(skipped: pass --seqdata-root to check files on disk)")
-        else:
-            # Includes flagged (missing/broken-mapfile) projects whose files were
-            # cataloged from disk -- they still have checkable FASTQ on disk.
-            pending = [pid for pid in all_pids if _has_unchecked_files(conn, pid)]
-            if not pending:
-                print("(no new/unchecked files)")
-            for pid in pending:
-                res = ointegrity.check_catalog_integrity(
-                    conn, seqdata_root=args.seqdata_root, only_project=pid, jobs=args.jobs)
-                s = res.get(pid)
-                if s is None:
-                    print(f"[--] {pid}: no files")
-                    continue
-                print(f"[{icons[s['status']]}] {pid}: {s['n_files']} file(s), "
-                      f"{s['n_ok']} ok, {s['n_gzip_error']} gzip-error, "
-                      f"{s['n_format_error']} format-error, {s['n_unchecked']} unchecked")
-                for w in s["parity_warnings"]:
-                    print(f"    WARN: read-count parity: {w}")
 
     if not args.skip_taxonomy:
         print("\n== taxonomy resolve ==")
@@ -202,6 +180,10 @@ def cmd_ingest(args):
 
     conn.close()
     print("\ningest complete.")
+    print(f"next: run the integrity check when ready (slow; reads every byte) --\n"
+          f"  odna.py --db {args.db} integrity --seqdata-root <raw_sequence_data>\n"
+          f"  or on Hydra: odna.py --db {args.db} integrity --batch "
+          f"--seqdata-root <raw_sequence_data>")
 
 
 def cmd_checksums(args):
@@ -482,7 +464,7 @@ def build_parser():
     pi = sub.add_parser(
         "ingest",
         help="auto-discover projects from a seqdata + metadata dir (or a map file); "
-             "auto-run integrity + taxonomy, refresh data-files check")
+             "auto-run taxonomy, refresh data-files check (integrity is a separate step)")
     pi.add_argument("map_file", nargs="?",
                     help="optional two-column map file (metadata csv, data dir) for "
                          "manual/odd layouts; omit to auto-discover from the roots")
@@ -492,9 +474,7 @@ def build_parser():
     pi.add_argument("--seqdata-root",
                     help="root of raw_sequence_data; each top-level folder is a project. "
                          "Required for auto-discovery; enables disk checks + integrity")
-    pi.add_argument("--jobs", type=int, default=None, help="integrity worker count")
     pi.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
-    pi.add_argument("--skip-integrity", action="store_true", help="skip the integrity step")
     pi.add_argument("--skip-taxonomy", action="store_true", help="skip the taxonomy step")
     pi.add_argument("--prune", action="store_true",
                     help="delete catalog samples/files the CSV no longer lists "

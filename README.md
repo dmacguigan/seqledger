@@ -70,13 +70,14 @@ python odna.py --db oceandna_catalog.db init-db
 #      broken_mapfile   mapfile header malformed    -> files cataloged, no samples
 #    (an 'ok' project has a parseable mapfile and a matching folder).
 #
-#    ingest is self-driving: after loading rows it auto-runs the integrity and
-#    taxonomy-resolve steps (4b + 5 below) on whatever is new or changed. It
-#    upserts, so re-running picks up added/fixed mapfiles (a missing_mapfile
-#    project flips to ok once its mapfile appears) and re-resolves changed names.
-#    Follow-on steps are gated so unchanged re-runs are cheap. Samples dropped
-#    from a CSV are reported but kept, not pruned (use --prune to remove). Use
-#    --skip-integrity / --skip-taxonomy to load metadata only.
+#    ingest is self-driving: after loading rows it auto-runs the taxonomy-resolve
+#    step (5 below) + a data-files check on whatever is new or changed. It upserts,
+#    so re-running picks up added/fixed mapfiles (a missing_mapfile project flips to
+#    ok once its mapfile appears) and re-resolves changed names. These steps are
+#    gated so unchanged re-runs are cheap. Samples dropped from a CSV are reported
+#    but kept, not pruned (use --prune to remove). Use --skip-taxonomy to load
+#    metadata only. NOTE: the integrity byte-scan (4b) is NOT run by ingest -- it
+#    is slow, so run it separately when ready.
 python odna.py --db oceandna_catalog.db ingest \
     --metadata-root ../raw_sequence_metadata \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data

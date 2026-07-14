@@ -15,7 +15,7 @@ def _load_cli():
     return mod
 
 
-def test_ingest_runs_all_three(tmp_path, capsys):
+def test_ingest_runs_taxonomy_and_datafiles_not_integrity(tmp_path, capsys):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
@@ -30,12 +30,9 @@ def test_ingest_runs_all_three(tmp_path, capsys):
     conn = odb.connect(db)
     # ingest happened
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
-    # integrity ran and persisted (valid gzip fixtures -> ok)
+    # integrity is NOT part of ingest anymore -> not run, nothing persisted
     assert conn.execute(
-        "SELECT integrity_status FROM files WHERE direction='R1'").fetchone()[0] == "ok"
-    assert conn.execute(
-        "SELECT COUNT(*) FROM validation_log WHERE project_id='genohub-1_X'"
-    ).fetchone()[0] == 1
+        "SELECT integrity_status FROM files WHERE direction='R1'").fetchone()[0] is None
     # taxonomy resolved
     assert conn.execute(
         "SELECT taxid FROM taxa WHERE taxon='Gadus morhua'").fetchone()[0] == 8049
@@ -43,12 +40,14 @@ def test_ingest_runs_all_three(tmp_path, capsys):
     assert os.path.exists(os.path.join(os.path.dirname(db), "taxonomy_review.csv"))
 
     out = capsys.readouterr().out
-    assert "== ingest ==" in out and "== integrity ==" in out
+    assert "== ingest ==" in out and "== integrity ==" not in out
     assert "== taxonomy resolve ==" in out and "ingest complete." in out
     assert "1 new sample(s)" in out
+    # points the user at the separate integrity step
+    assert "integrity" in out and "--batch" in out
 
 
-def test_ingest_skip_flags(tmp_path):
+def test_ingest_skip_taxonomy(tmp_path):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
@@ -57,20 +56,19 @@ def test_ingest_skip_flags(tmp_path):
     db = str(tmp_path / "cat.db")
 
     cli = _load_cli()
-    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root,
-              "--skip-integrity", "--skip-taxonomy"])
+    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--skip-taxonomy"])
 
     conn = odb.connect(db)
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
-    # integrity + taxonomy skipped -> nothing persisted for them
+    # taxonomy skipped, integrity never runs in ingest -> neither persisted
     assert conn.execute(
         "SELECT integrity_status FROM files WHERE direction='R1'").fetchone()[0] is None
     assert conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0] == 0
 
 
-def test_ingest_without_seqdata_root_skips_integrity(tmp_path, capsys):
-    # No --seqdata-root: files aren't on disk to check, so integrity is skipped
-    # with a note, but taxonomy still runs.
+def test_ingest_without_seqdata_root_skips_datafiles(tmp_path, capsys):
+    # No --seqdata-root: the data-files check is skipped with a note, but taxonomy
+    # still runs.
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
@@ -92,8 +90,8 @@ def test_ingest_without_seqdata_root_skips_integrity(tmp_path, capsys):
         "SELECT taxid FROM taxa WHERE taxon='Gadus morhua'").fetchone()[0] == 8049
 
 
-def test_reingest_unchanged_gates_both_steps(tmp_path, capsys):
-    # A second, identical ingest should not re-run integrity or taxonomy.
+def test_reingest_unchanged_gates_taxonomy(tmp_path, capsys):
+    # A second, identical ingest should not re-run taxonomy.
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
@@ -109,7 +107,6 @@ def test_reingest_unchanged_gates_both_steps(tmp_path, capsys):
     cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
     out = capsys.readouterr().out
     assert "0 new sample(s), 0 changed, 0 new file(s)" in out
-    assert "(no new/unchecked files)" in out
     assert "(no new taxa to resolve)" in out
 
     conn = odb.connect(db)

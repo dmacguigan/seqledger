@@ -17,7 +17,7 @@ There are two kinds of user. Most people are the first kind.
 
 | | **Users** — browse only | **Data managers** — run the catalog |
 |---|---|---|
-| **What you do** | search/filter the catalog, view sample & file info, export CSV/MitoPilot map files, build copy jobs in **Grab & Go** | everything Users do, **plus** create the catalog, ingest metadata, run integrity + checksums, resolve taxonomy, keep it current |
+| **What you do** | search/filter the catalog, view sample & file info, export CSV/[MitoPilot](https://github.com/Smithsonian/MitoPilot) map files, build copy jobs in **Grab & Go** | everything Users do, **plus** create the catalog, ingest metadata, run integrity + checksums, resolve taxonomy, keep it current |
 | **How** | the **read-only browse GUI** in a web browser | the `seqledger` command-line tool (+ the GUI) |
 | **Install anything?** | **No.** A data manager starts the GUI; you open one link. | Yes — `pip install` on the cluster (see [Install](#install)). |
 | **Start here** | [**For GUI users (browsing only)**](#for-gui-users-browsing-only) | [Requirements](#requirements) → [Quick start](#quick-start) → [Usage](#usage) |
@@ -43,7 +43,7 @@ Inside the GUI (pick a view in the left sidebar):
 
 - **Projects / Samples / Files** — search, filter, and download the table as CSV.
 - **Taxonomy** — an interactive sunburst of the catalog's taxonomic breadth.
-- **Grab & Go** — build a custom set of samples, export a CSV or a **MitoPilot**
+- **Grab & Go** — build a custom set of samples, export a CSV or a [**MitoPilot**](https://github.com/Smithsonian/MitoPilot)
   map file, and generate a ready-to-run copy job for their sequence data.
 
 Everything is **read-only** — you can't change or delete catalog data from the GUI.
@@ -132,7 +132,7 @@ seqledger/               the package
   cli.py                 CLI entry point (subcommands); `python -m seqledger`
   db.py ingest.py checksums.py validate.py integrity.py taxonomy.py query.py
   rclone.py              rclone copy-job builder
-  mitopilot.py           MitoPilot map-file export
+  mitopilot.py           [MitoPilot](https://github.com/Smithsonian/MitoPilot) map-file export
   gui.py                 GUI launcher (local or `--qsub` on the I/O queue)
   schema.sql             SQLite DDL (source of truth for tables)
   app/streamlit_app.py   read-only browse GUI
@@ -312,7 +312,7 @@ build-your-own selection view (sidebar):
 - **Grab & Go** - build a hand-picked set of samples. Search by project,
   taxonomy (taxon / NCBI name / lineage), sample ID, and UniqID, with a **regex
   toggle**; add matches (selected rows or all) to a running table that persists as
-  you refine the search. Export the table to CSV or as a **MitoPilot map file**
+  you refine the search. Export the table to CSV or as a **[MitoPilot](https://github.com/Smithsonian/MitoPilot) map file**
   (ID, R1, R2, Taxon -- R1/R2 are filenames; pick which column fills the `ID`),
   and generate an **rclone copy job** for the selected samples' sequence data: a
   self-contained `lTIO.sq`

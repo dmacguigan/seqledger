@@ -18,26 +18,41 @@ There are two kinds of user. Most people are the first kind.
 | | **Users** — browse only | **Data managers** — run the catalog |
 |---|---|---|
 | **What you do** | search/filter the catalog, view sample & file info, export CSV/[MitoPilot](https://github.com/Smithsonian/MitoPilot) map files, build copy jobs in **Grab & Go** | everything Users do, **plus** create the catalog, ingest metadata, run integrity + checksums, resolve taxonomy, keep it current |
-| **How** | the **read-only browse GUI** in a web browser | the `seqledger` command-line tool (+ the GUI) |
-| **Install anything?** | **No.** A data manager starts the GUI; you open one link. | Yes — `pip install` on the cluster (see [Install](#install)). |
+| **How** | log into the cluster, run **one** `seqledger … gui --qsub` command to start the **read-only browse GUI**, open the printed link in a web browser | the full `seqledger` command-line tool |
+| **Install anything?** | **No.** Your data manager sets up a shared environment once; you launch the GUI yourself with one command (no install, no editing files). | Yes — `pip install` on the cluster (see [Install](#install)). |
 | **Start here** | [**For GUI users (browsing only)**](#for-gui-users-browsing-only) | [Requirements](#requirements) → [Quick start](#quick-start) → [Usage](#usage) |
 
 ## For GUI users (browsing only)
 
-You do **not** install anything or touch the command line. A data manager runs the
-GUI and sends you a one-line `ssh` command; you run it, then browse in your web
-browser.
+You start the GUI yourself — no install, no editing files, just one command on the
+cluster. Ask your data manager once for two things: the **environment name** and the
+**catalog path** for your lab (they replace `<ENV>` and `<CATALOG_PATH>` below).
 
-1. **Get the link.** Ask your data manager to start the browse GUI. They'll send
-   you a command that looks like:
-   ```
-   ssh -N -L 8501:<node>:8501 <you>@<login-host>
-   ```
-2. **Open the tunnel.** Paste that command into a terminal on **your own computer**
-   and press Enter. It looks like nothing happens (no output) — that's correct;
-   leave the window open.
-3. **Browse.** Open **`http://localhost:8501`** in your web browser.
-4. **When done**, close the browser tab and press `Ctrl-C` in the terminal.
+**On the cluster** — open a terminal and log into the Hydra login node:
+
+```bash
+ssh <you>@hydra-login01.si.edu
+conda activate <ENV>
+seqledger --db <CATALOG_PATH> gui --qsub
+```
+
+`--qsub` starts the GUI on the cluster's I/O queue (so it reads the catalog
+directly) and, once it's running, **prints two things to your screen**: an
+`ssh -N -L …` tunnel command and a `http://localhost:<port>` link. Leave this
+window open.
+
+**On your own computer** — open a *second* terminal and paste the printed tunnel
+command:
+
+```bash
+ssh -N -L <port>:<node>:<port> <you>@hydra-login01.si.edu
+```
+
+It looks like nothing happens (no output) — that's correct; leave it open. Then
+open the printed **`http://localhost:<port>`** link in your web browser.
+
+**When you're done**, back in the first (cluster) terminal run the `qdel <job>`
+command it printed, to stop the GUI. (It also stops on its own after 72 hours.)
 
 Inside the GUI (pick a view in the left sidebar):
 
@@ -48,6 +63,11 @@ Inside the GUI (pick a view in the left sidebar):
 
 Everything is **read-only** — you can't change or delete catalog data from the GUI.
 The sections below are for **data managers**.
+
+> **Data managers:** to make the above work for your users, install seqledger once
+> into a shared conda env they can all activate (see [Install](#install)), and tell
+> them the env name + the catalog `.db` path. Optionally set `SEQLEDGER_DB` in the
+> env so users can omit `--db`, or add a shell alias so it's a single word.
 
 ## Requirements
 

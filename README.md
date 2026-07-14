@@ -47,7 +47,8 @@ kept for pip users).
 ```
 schema.sql            SQLite DDL (source of truth for tables)
 odna.py               CLI entry point
-odna/                 package: db, ingest, checksums, validate, integrity, taxonomy, query, gui
+odna/                 package: db, ingest, checksums, validate, integrity, taxonomy,
+                      query, gui, rclone (copy-job builder), mitopilot (map-file export)
 app/streamlit_app.py  read-only browse GUI
 tests/                pytest suite + fixture builders
 ```
@@ -182,11 +183,13 @@ build-your-own selection view (sidebar):
 
 - **Samples** - one row per sample; the on-screen table stays lean, but the CSV
   export carries the full absolute R1/R2 paths + owner.
-- **Projects** - per-project summary stats plus two check fields:
-  `data_files` (mapfile <-> disk reciprocal: OK / "N missing, M orphan") and
-  `checksum` (Store vs P-drive: verified / "N mismatch" / incomplete). Select a
-  project row to drill into its data_files issues (each missing / orphan file,
-  with sample info where known).
+- **Projects** - per-project summary stats plus check fields: `mapfile`
+  (folder<->mapfile pairing: OK / no mapfile / no data folder / broken mapfile),
+  `data_files` (mapfile <-> disk reciprocal: OK / "N missing, M orphan"), and
+  `checksum` (Store vs P-drive: verified / "N mismatch" / incomplete). Filter to
+  just the flagged ones ("Only mapfile issues" etc). Select a project row to see
+  its mapfile explanation + drill into its data_files issues (each missing /
+  orphan file, with sample info where known).
 - **Files** - one row per FASTQ: full absolute path, size, owner, backup status.
 - **Taxonomy** - interactive Plotly sunburst of the catalog's taxonomic breadth
   (filter by project, pick the deepest rank, toggle the `unknown` bucket) plus a
@@ -208,10 +211,12 @@ Each view filters/searches and downloads CSV.
 
 ## Schema
 
-`projects` (1 per sequencing project) -> `samples` (1 per sample, extra map-file
-columns kept as JSON) -> `files` (R1/R2, with `store_md5` / `pdrive_md5` /
-`md5_match`). `backups` summarizes per-project verification; `validation_log`
-records validation runs. `taxa` holds the NCBI resolution per distinct raw Taxon
+`projects` (1 per sequencing project; `metadata_status` / `metadata_detail` record
+folder<->mapfile pairing health from auto-discovery ingest) -> `samples` (1 per
+sample, extra map-file columns kept as JSON) -> `files` (R1/R2, with `store_md5` /
+`pdrive_md5` / `md5_match`; `rel_path` may be nested when FASTQ live in subdirs).
+`backups` summarizes per-project verification; `validation_log` records
+validation runs. `taxa` holds the NCBI resolution per distinct raw Taxon
 string (taxid, ranked lineage columns `tax_domain`..`tax_species`, `match_type`,
 `confirmed`), joined to `samples.taxon`. See `schema.sql`.
 

@@ -116,7 +116,20 @@ rm -f "$LIST"
 module load {RCLONE_MODULE}
 
 DEST={shlex.quote(dest)}
-mkdir -p "$DEST"
+# Fail early (before touching /store) if the destination is unset or unusable.
+if [ -z "$DEST" ] || [ "$DEST" = "REPLACE_WITH_DESTINATION" ]; then
+    echo "ERROR: no destination set -- edit DEST above and resubmit." >&2
+    exit 1
+fi
+case "$DEST" in
+    *:*) : ;;  # looks like an rclone remote:path -- let rclone validate it
+    *)
+        mkdir -p "$DEST" || {{ echo "ERROR: cannot create destination '$DEST'." >&2; exit 1; }}
+        if [ ! -d "$DEST" ] || [ ! -w "$DEST" ]; then
+            echo "ERROR: destination '$DEST' is not a writable directory." >&2
+            exit 1
+        fi ;;
+esac
 
 {body}
 echo = `date` $JOB_NAME done

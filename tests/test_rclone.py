@@ -50,9 +50,20 @@ def test_build_copy_script_has_ltio_directives_and_rclone():
     assert "projA/s1_1.fastq.gz" in script and "projB/x_1.fastq.gz" in script
     assert "DEST=/pool/dest" in script  # shell-quoted destination (no quoting needed)
     assert "estimated transfer: 350 B across 3 file(s)" in script
+    # guard: refuse to run without a usable destination
+    assert 'if [ -z "$DEST" ]' in script
+    assert "no destination set" in script
+    assert "not a writable directory" in script
 
 
 def test_build_copy_script_empty_selection():
     script = orclone.build_copy_script([], "/pool/dest")
     assert "no files selected" in script
-    assert "REPLACE_WITH_DESTINATION" not in script  # dest was provided
+    assert "DEST=/pool/dest" in script  # dest was provided, not the placeholder
+
+
+def test_build_copy_script_no_destination_uses_placeholder():
+    # When no dest is given, DEST is the placeholder and the guard exits.
+    script = orclone.build_copy_script([("/store/x", ["p/a.fastq.gz"])], "")
+    assert "DEST=REPLACE_WITH_DESTINATION" in script
+    assert 'if [ -z "$DEST" ]' in script

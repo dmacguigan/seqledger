@@ -658,8 +658,13 @@ def custom_table_view(samples_df, paths_df):
     if n_unres:
         st.caption(f"{n_unres} file(s) can't be copied (no known source root/path) "
                    "and are omitted from the script.")
+
+    if not dest.strip():
+        st.info("Enter a destination above to generate the copy script.")
+        return
+
     script = orclone.build_copy_script(
-        groups, dest, transfers=transfers, slots=transfers, mem=mem,
+        groups, dest.strip(), transfers=transfers, slots=transfers, mem=mem,
         est_bytes=total, n_files=n_files)
     st.caption("Copy this into a `.job` file on Hydra and submit with "
                "`qsub <file>.job` from the login node (lTIO: 6 slots/user, 2 concurrent).")

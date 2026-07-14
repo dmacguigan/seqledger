@@ -4,8 +4,8 @@ Launch via `python odna.py gui --db PATH` (which sets ODNA_DB and prints the SSH
 tunnel command). No SQL knowledge required: pick a view, search, filter, download CSV.
 
 Views:
-  Samples      one row per sample (CSV export carries full R1/R2 paths + owner)
   Projects     one row per sequencing project, with summary stats + owner
+  Samples      one row per sample (CSV export carries full R1/R2 paths + owner)
   Files        one row per FASTQ, full absolute path, size, owner, backup status
   Taxonomy     interactive breadth of NCBI-resolved sample taxonomy
   Grab & Go    search + collect samples; export CSV + an rclone copy job for them
@@ -728,7 +728,7 @@ def main():
         return
 
     view_name = st.sidebar.radio(
-        "View", ["Samples", "Projects", "Files", "Taxonomy", "Grab & Go"])
+        "View", ["Projects", "Samples", "Files", "Taxonomy", "Grab & Go"])
     mtime = os.path.getmtime(DB_PATH)
     if view_name == "Samples":
         samples_view(load_samples(DB_PATH, mtime), load_files(DB_PATH, mtime))

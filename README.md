@@ -194,8 +194,6 @@ It prints the exact `ssh -N -L 8501:NODE:8501 you@hydra-login01.si.edu` command;
 run that locally, then open `http://localhost:8501`. Read-only browsing plus a
 build-your-own selection view (sidebar):
 
-- **Samples** - one row per sample; the on-screen table stays lean, but the CSV
-  export carries the full absolute R1/R2 paths + owner.
 - **Projects** - per-project summary stats plus check fields: `mapfile`
   (folder<->mapfile pairing: OK / no mapfile / no data folder / broken mapfile),
   `data_files` (mapfile <-> disk reciprocal: OK / "N missing, M orphan"), and
@@ -203,6 +201,8 @@ build-your-own selection view (sidebar):
   just the flagged ones ("Only mapfile issues" etc). Select a project row to see
   its mapfile explanation + drill into its data_files issues (each missing /
   orphan file, with sample info where known).
+- **Samples** - one row per sample; the on-screen table stays lean, but the CSV
+  export carries the full absolute R1/R2 paths + owner.
 - **Files** - one row per FASTQ: full absolute path, size, owner, backup status.
 - **Taxonomy** - interactive Plotly sunburst of the catalog's taxonomic breadth
   (filter by project, pick the deepest rank, toggle the `unknown` bucket) plus a

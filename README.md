@@ -11,6 +11,44 @@ another lab's paths, cluster settings, and catalog name.
 > seqdata/metadata roots, conda env, login host, I/O queue, rclone module, FASTQ
 > extensions) are set once at `init-db` — see the [Configuration](#configuration) section.
 
+## Who this is for
+
+There are two kinds of user. Most people are the first kind.
+
+| | **Users** — browse only | **Data managers** — run the catalog |
+|---|---|---|
+| **What you do** | search/filter the catalog, view sample & file info, export CSV/MitoPilot map files, build copy jobs in **Grab & Go** | everything Users do, **plus** create the catalog, ingest metadata, run integrity + checksums, resolve taxonomy, keep it current |
+| **How** | the **read-only browse GUI** in a web browser | the `seqledger` command-line tool (+ the GUI) |
+| **Install anything?** | **No.** A data manager starts the GUI; you open one link. | Yes — `pip install` on the cluster (see [Install](#install)). |
+| **Start here** | [**For GUI users (browsing only)**](#for-gui-users-browsing-only) | [Requirements](#requirements) → [Quick start](#quick-start) → [Usage](#usage) |
+
+## For GUI users (browsing only)
+
+You do **not** install anything or touch the command line. A data manager runs the
+GUI and sends you a one-line `ssh` command; you run it, then browse in your web
+browser.
+
+1. **Get the link.** Ask your data manager to start the browse GUI. They'll send
+   you a command that looks like:
+   ```
+   ssh -N -L 8501:<node>:8501 <you>@<login-host>
+   ```
+2. **Open the tunnel.** Paste that command into a terminal on **your own computer**
+   and press Enter. It looks like nothing happens (no output) — that's correct;
+   leave the window open.
+3. **Browse.** Open **`http://localhost:8501`** in your web browser.
+4. **When done**, close the browser tab and press `Ctrl-C` in the terminal.
+
+Inside the GUI (pick a view in the left sidebar):
+
+- **Projects / Samples / Files** — search, filter, and download the table as CSV.
+- **Taxonomy** — an interactive sunburst of the catalog's taxonomic breadth.
+- **Grab & Go** — build a custom set of samples, export a CSV or a **MitoPilot**
+  map file, and generate a ready-to-run copy job for their sequence data.
+
+Everything is **read-only** — you can't change or delete catalog data from the GUI.
+The sections below are for **data managers**.
+
 ## Requirements
 
 - **Python 3.10+** for the core CLI (standard library only — runs on a Hydra login

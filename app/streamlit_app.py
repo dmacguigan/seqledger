@@ -21,6 +21,7 @@ import streamlit as st
 # Reach the odna package (this app lives in data_management_db/app/).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from odna import rclone as orclone  # noqa: E402
+from odna import mitopilot as omito  # noqa: E402
 
 NCBI_TAX_URL = "https://www.ncbi.nlm.nih.gov/datasets/taxonomy/"
 RANK_COLS = ["tax_domain", "tax_kingdom", "tax_phylum", "tax_class",
@@ -118,9 +119,24 @@ def load_taxonomy(db_path, mtime):
         ORDER BY s.project_id, s.sample_id""")
 
 
+def _table_columns(db_path, table):
+    con = sqlite3.connect(db_path)
+    try:
+        return {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+    finally:
+        con.close()
+
+
 @st.cache_data(ttl=60)
 def load_projects(db_path, mtime):
-    return _sql(db_path, """
+    # Tolerate catalogs created before the metadata_status/detail migration: the
+    # GUI opens the DB read-only and never migrates, so fall back to defaults when
+    # those columns are absent (older synced copy on Scratch, etc.).
+    cols = _table_columns(db_path, "projects")
+    mstatus = ("COALESCE(p.metadata_status, 'ok')"
+               if "metadata_status" in cols else "'ok'")
+    mdetail = "p.metadata_detail" if "metadata_detail" in cols else "NULL"
+    return _sql(db_path, f"""
         SELECT p.project_id, p.source, p.description,
                (SELECT COUNT(*) FROM samples s WHERE s.project_id = p.project_id) AS n_samples,
                (SELECT COUNT(*) FROM files f WHERE f.project_id = p.project_id) AS n_files,
@@ -138,8 +154,8 @@ def load_projects(db_path, mtime):
                (SELECT MAX(f.integrity_date) FROM files f
                   WHERE f.project_id = p.project_id) AS integrity_date,
                p.owner_name, p.seq_data_relpath AS data_dir,
-               COALESCE(p.metadata_status, 'ok') AS metadata_status,
-               p.metadata_detail,
+               {mstatus} AS metadata_status,
+               {mdetail} AS metadata_detail,
                p.data_check_date, p.date_ingested
         FROM projects p
         ORDER BY p.project_id""")
@@ -628,13 +644,42 @@ def custom_table_view(samples_df, paths_df):
             r = table.iloc[i]
             cart.pop(_cart_key(r["project_id"], r["sample_id"]), None)
         st.rerun()
-    st.download_button("Download table CSV",
-                       table[tcols].to_csv(index=False).encode(),
-                       "oceandna_grab_and_go.csv", "text/csv")
-
-    # Files backing the selected samples: paths, sizes, source roots for rclone.
+    # Files backing the selected samples: paths + sizes for rclone, R1/R2
+    # basenames for the MitoPilot map file.
     fpaths = paths_df[paths_df.set_index(["project_id", "sample_id"]).index.isin(keyset)]
     rows = fpaths.to_dict("records")
+
+    id_choices = {"Sample ID": "sample_id", "UniqID": "uniq_id"}
+    id_label = st.selectbox(
+        "MitoPilot ID column", list(id_choices),
+        help="Which sample field fills MitoPilot's required unique 'ID' column.")
+    mp_rows = omito.build_map_rows(table.to_dict("records"), rows,
+                                   id_field=id_choices[id_label])
+    mp_df = pd.DataFrame(mp_rows, columns=omito.MITOPILOT_COLUMNS)
+
+    d1, d2 = st.columns(2)
+    d1.download_button("Download table CSV",
+                       table[tcols].to_csv(index=False).encode(),
+                       "oceandna_grab_and_go.csv", "text/csv")
+    d2.download_button("Download MitoPilot map file",
+                       mp_df.to_csv(index=False).encode(),
+                       "mitopilot_mapfile.csv", "text/csv",
+                       help="CSV with ID, R1, R2, Taxon (R1/R2 are filenames; give "
+                            "MitoPilot the copied data dir as its data_path).")
+    mp_issues = omito.issues(mp_rows)
+    if mp_issues["n_empty_id"] or mp_issues["duplicate_ids"] or mp_issues["n_missing_reads"]:
+        msgs = []
+        if mp_issues["n_empty_id"]:
+            msgs.append(f"{mp_issues['n_empty_id']} sample(s) have an empty {id_label}")
+        if mp_issues["duplicate_ids"]:
+            shown = ", ".join(mp_issues["duplicate_ids"][:5])
+            more = "…" if len(mp_issues["duplicate_ids"]) > 5 else ""
+            msgs.append(f"duplicate ID(s): {shown}{more}")
+        if mp_issues["n_missing_reads"]:
+            msgs.append(f"{mp_issues['n_missing_reads']} sample(s) missing an R1/R2 filename")
+        st.warning("MitoPilot needs a unique ID and both reads per sample — "
+                   + "; ".join(msgs) + ". Try a different ID column, or fix the catalog.")
+
     total, n_files, n_unknown = orclone.estimate_size(rows)
 
     st.divider()

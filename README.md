@@ -194,8 +194,10 @@ build-your-own selection view (sidebar):
 - **Grab & Go** - build a hand-picked set of samples. Search by project,
   taxonomy (taxon / NCBI name / lineage), sample ID, and UniqID, with a **regex
   toggle**; add matches (selected rows or all) to a running table that persists as
-  you refine the search. Export the table to CSV, and generate an **rclone copy
-  job** for the selected samples' sequence data: a self-contained `lTIO.sq`
+  you refine the search. Export the table to CSV or as a **MitoPilot map file**
+  (ID, R1, R2, Taxon -- R1/R2 are filenames; pick which column fills the `ID`),
+  and generate an **rclone copy job** for the selected samples' sequence data: a
+  self-contained `lTIO.sq`
   submission script (`module load tools/rclone/1.66.0`, one `rclone copy
   --files-from` per source root, preserving the directory layout) with a
   disk-space estimate. Copy it from the screen or download the `.job`, then

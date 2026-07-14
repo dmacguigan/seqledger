@@ -26,10 +26,12 @@ Gaps this addresses:
 
 ## Design at a glance
 
-- **Backend:** one SQLite DB. Master lives on Store (backed up like the data); a
-  synced read-only copy on Scratch feeds the GUI, since **Store is not mounted on
-  compute nodes** but Scratch is. The catalog is only metadata + checksums (a few
-  MB), decoupled from the huge FASTQs.
+- **Backend:** one SQLite DB. Master lives on Store (backed up like the data). The
+  catalog is only metadata + checksums (a few MB), decoupled from the huge FASTQs.
+  **Store is not mounted on compute nodes**, so the GUI reaches the master one of
+  two ways: preferred, run the GUI as a job on the **I/O queue (`gui --qsub`)**,
+  which *can* read Store directly; or serve it from a **read-only copy synced to
+  Scratch** (which compute nodes do mount).
 - **Metadata entry:** unchanged - users submit the CSV map file.
 - **Checksums:** captured from `rclone md5sum` run on **both Store and P-drive**,
   then compared. Piggybacks on the backup the data manager already runs; no hashing
@@ -179,19 +181,35 @@ Same `checksums` command with `--source backfill` (the default). Run it per proj
 
 ### GUI (over SSH tunnel)
 
-On Hydra (login node or `srun --pty` node), pointing at a DB copy on Scratch:
+One-time env setup on Hydra:
 
 ```bash
-conda env create -f environment.yml     # once; creates the `seqledger` env
-conda activate seqledger                      # or: mamba env create -f environment.yml
-python seqledger.py --db /scratch/nmnh_ocean_dna/oceandna_catalog.db gui --port 8501
+conda env create -f environment.yml     # creates the `seqledger` env
+conda activate seqledger                 # or: mamba env create -f environment.yml
 ```
-
 (Existing env? `conda env update -f environment.yml`. Pip users: `pip install -r
 requirements.txt`.)
 
-It prints the exact `ssh -N -L 8501:NODE:8501 you@hydra-login01.si.edu` command;
-run that locally, then open `http://localhost:8501`. Read-only browsing plus a
+**Recommended -- serve it on the I/O queue** (reads the master on Store directly,
+no Scratch copy). From a login node:
+
+```bash
+python seqledger.py --db /store/nmnh_ocean_dna/public/oceandna_catalog.db gui --qsub
+```
+This submits a Streamlit job to `lTIO.sq`, waits for it to start, then prints the
+exact `ssh -N -L <port>:<node>:<port> you@hydra-login01.si.edu` command to the
+screen (no digging through the job log). Run that on your local computer, open
+`http://localhost:<port>`, and `qdel <job>` when done. lTIO caps jobs at 72h wall
+and 2 concurrent jobs/user, so the GUI stops after 72h -- just resubmit.
+
+**Alternative -- run it directly** on an interactive node against a Scratch copy of
+the DB (compute nodes don't mount Store):
+
+```bash
+python seqledger.py --db /scratch/nmnh_ocean_dna/oceandna_catalog.db gui --port 8501
+```
+This prints the `ssh -N -L 8501:NODE:8501 you@hydra-login01.si.edu` command; run it
+locally, then open `http://localhost:8501`. Read-only browsing plus a
 build-your-own selection view (sidebar):
 
 - **Projects** - per-project summary stats plus check fields: `mapfile`

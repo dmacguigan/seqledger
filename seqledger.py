@@ -468,7 +468,12 @@ def cmd_taxonomy(args):
 
 def cmd_gui(args):
     from seqledger import gui as ogui
-    ogui.launch(args.db, port=args.port)
+    if args.qsub:
+        ogui.launch_qsub(args.db, port=args.port, login_host=args.login_host,
+                         queue=args.queue, conda_env=args.conda_env,
+                         mem_gb=args.mem, wait=args.wait)
+    else:
+        ogui.launch(args.db, port=args.port, login_host=args.login_host)
 
 
 def build_parser():
@@ -577,8 +582,21 @@ def build_parser():
     ta.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
     pt.set_defaults(func=cmd_taxonomy)
 
-    pg = sub.add_parser("gui", help="launch Streamlit browse GUI")
-    pg.add_argument("--port", type=int, default=8501)
+    pg = sub.add_parser("gui", help="launch Streamlit browse GUI (locally, or on lTIO via --qsub)")
+    pg.add_argument("--port", type=int, default=8501,
+                    help="server port (a free port is chosen automatically under --qsub)")
+    pg.add_argument("--login-host", default="hydra-login01.si.edu",
+                    help="Hydra login host used in the printed SSH tunnel command")
+    pg.add_argument("--qsub", action="store_true",
+                    help="run the GUI as a job on the I/O queue (lTIO.sq) so it reads the "
+                         "master catalog on Store directly (no Scratch copy); waits for it "
+                         "to start, then prints the tunnel command to screen")
+    pg.add_argument("--queue", default="lTIO.sq", help="queue for --qsub (default lTIO.sq)")
+    pg.add_argument("--conda-env", default="seqledger",
+                    help="conda env activated inside the --qsub job (default: seqledger)")
+    pg.add_argument("--mem", type=int, default=2, help="memory GB for the --qsub job (default 2)")
+    pg.add_argument("--wait", type=int, default=300,
+                    help="seconds to wait for the --qsub GUI to start serving (default 300)")
     pg.set_defaults(func=cmd_gui)
 
     return p

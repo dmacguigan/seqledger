@@ -55,11 +55,14 @@ _ISSUE_DETAIL = {
 # per-project sentence is stored in metadata_detail; this is the at-a-glance label.
 _MAPFILE_LABEL = {
     "ok":              "OK",
+    "unknown":         "unknown",
     "missing_mapfile": "no mapfile",
     "missing_seqdata": "no data folder",
     "broken_mapfile":  "broken mapfile",
 }
 _MAPFILE_DETAIL = {
+    "unknown": "This catalog copy predates the mapfile-status check, or the status "
+               "isn't set. Re-ingest (or re-sync the GUI copy) to populate it.",
     "missing_mapfile": "A project folder is on disk but has no '<project>_mapfile.csv' "
                        "in the metadata directory. Files were cataloged from disk; "
                        "sample metadata (taxon, UniqID) is missing until a mapfile is added.",
@@ -158,9 +161,11 @@ def load_projects(db_path, mtime):
     # Tolerate catalogs created before the metadata_status/detail migration: the
     # GUI opens the DB read-only and never migrates, so fall back to defaults when
     # those columns are absent (older synced copy on Scratch, etc.).
+    # Missing status coalesces to 'unknown', NOT 'ok': turning "we don't know" into
+    # "healthy" would hide real mapfile problems on an old/unmigrated copy.
     cols = _table_columns(db_path, "projects")
-    mstatus = ("COALESCE(p.metadata_status, 'ok')"
-               if "metadata_status" in cols else "'ok'")
+    mstatus = ("COALESCE(p.metadata_status, 'unknown')"
+               if "metadata_status" in cols else "'unknown'")
     mdetail = "p.metadata_detail" if "metadata_detail" in cols else "NULL"
     return _sql(db_path, f"""
         SELECT p.project_id, p.source, p.description,
@@ -282,6 +287,15 @@ def human_size(n):
         n /= 1024
 
 
+def _contains(series, s):
+    """Case-insensitive substring mask, safe on all-null columns.
+
+    A column that is entirely NULL loads as float64, where `.str` raises. fillna +
+    astype(str) normalizes to text first so search never crashes a view.
+    """
+    return series.fillna("").astype(str).str.lower().str.contains(s, na=False)
+
+
 def _download(df, name):
     st.download_button("Download CSV", df.to_csv(index=False).encode(), name, "text/csv")
 
@@ -303,9 +317,8 @@ def samples_view(df, files_df):
         view = view[view["backup_verified"] != 1]
     if search:
         s = search.lower()
-        mask = (view["sample_id"].str.lower().str.contains(s, na=False)
-                | view["taxon"].str.lower().str.contains(s, na=False)
-                | view["uniq_id"].str.lower().str.contains(s, na=False))
+        mask = (_contains(view["sample_id"], s) | _contains(view["taxon"], s)
+                | _contains(view["uniq_id"], s))
         view = view[mask]
 
     st.caption(f"{len(view)} of {len(df)} samples (full R1/R2 paths, taxid + "
@@ -354,8 +367,7 @@ def projects_view(df, issues):
     view = df
     if search:
         s = search.lower()
-        mask = (view["project_id"].str.lower().str.contains(s, na=False)
-                | view["description"].str.lower().str.contains(s, na=False))
+        mask = (_contains(view["project_id"], s) | _contains(view["description"], s))
         view = view[mask]
     if mapfile_only:
         view = view[view["metadata_status"] != "ok"]
@@ -424,8 +436,7 @@ def files_view(df, samples_df):
         view = view[view["integrity"] == integrity]
     if search:
         s = search.lower()
-        mask = (view["sample_id"].str.lower().str.contains(s, na=False)
-                | view["filename"].str.lower().str.contains(s, na=False))
+        mask = (_contains(view["sample_id"], s) | _contains(view["filename"], s))
         view = view[mask]
     st.caption(f"{len(view)} of {len(df)} files. "
                "Select a row to show its sample info below.")

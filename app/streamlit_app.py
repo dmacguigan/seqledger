@@ -22,6 +22,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from seqledger import rclone as orclone  # noqa: E402
 from seqledger import mitopilot as omito  # noqa: E402
+from seqledger import db as odb  # noqa: E402
 
 NCBI_TAX_URL = "https://www.ncbi.nlm.nih.gov/datasets/taxonomy/"
 RANK_COLS = ["tax_domain", "tax_kingdom", "tax_phylum", "tax_class",
@@ -29,7 +30,7 @@ RANK_COLS = ["tax_domain", "tax_kingdom", "tax_phylum", "tax_class",
 RANK_LABELS = ["domain", "kingdom", "phylum", "class",
                "order", "family", "genus", "species"]
 
-DB_PATH = os.environ.get("SEQLEDGER_DB", "oceandna_catalog.db")
+DB_PATH = os.environ.get("SEQLEDGER_DB", "catalog.db")
 
 # Full absolute path when the seqdata_root was captured at ingest, else the relpath.
 _FULL_PATH = "COALESCE(p.seqdata_root || '/' || f.rel_path, f.rel_path)"
@@ -71,12 +72,37 @@ _MAPFILE_DETAIL = {
 }
 
 
+def _ro_connect(db_path):
+    """Open the catalog read-only (the GUI never writes).
+
+    mode=ro (not immutable) so it stays correct whether the DB is a static Scratch
+    replica OR the live master read directly on the I/O queue (`gui --qsub`), where
+    the CLI may be writing concurrently -- ro respects locking; immutable would not.
+    It also prevents a typo'd path from auto-creating an empty DB file.
+    """
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    return con
+
+
 def _sql(db_path, query):
-    con = sqlite3.connect(db_path)
+    con = _ro_connect(db_path)
     try:
         return pd.read_sql_query(query, con)
     finally:
         con.close()
+
+
+def _config(db_path, key):
+    """Per-catalog config value (falls back to seqledger defaults)."""
+    try:
+        con = _ro_connect(db_path)
+        try:
+            return odb.get_config(con, key)
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return odb.CONFIG_DEFAULTS.get(key)
 
 
 @st.cache_data(ttl=60)
@@ -120,7 +146,7 @@ def load_taxonomy(db_path, mtime):
 
 
 def _table_columns(db_path, table):
-    con = sqlite3.connect(db_path)
+    con = _ro_connect(db_path)
     try:
         return {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
     finally:
@@ -295,7 +321,7 @@ def samples_view(df, files_df):
             # linking to its NCBI datasets taxonomy page.
             "ncbi_url": st.column_config.LinkColumn(
                 "NCBI taxon match", display_text=r"#(.+)$")})
-    _download(view, "oceandna_samples.csv")
+    _download(view, f"{_config(DB_PATH, 'catalog_slug')}_samples.csv")
 
     sel = event.selection.rows if event and event.selection else []
     if not sel:
@@ -354,7 +380,7 @@ def projects_view(df, issues):
     event = st.dataframe(show[cols], width="stretch", hide_index=True,
                          on_select="rerun", selection_mode="single-row",
                          key="projects_table")
-    _download(show, "oceandna_projects.csv")
+    _download(show, f"{_config(DB_PATH, 'catalog_slug')}_projects.csv")
 
     sel = event.selection.rows if event and event.selection else []
     if sel:
@@ -412,7 +438,7 @@ def files_view(df, samples_df):
         show[on_screen], width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row", key="files_table",
         column_config={"n_reads": "reads", "integrity_date": "checked"})
-    _download(view, "oceandna_files.csv")
+    _download(view, f"{_config(DB_PATH, 'catalog_slug')}_files.csv")
 
     sel = event.selection.rows if event and event.selection else []
     if not sel:
@@ -511,7 +537,7 @@ def taxonomy_view(db_path, mtime):
         bar = (sub.groupby(cols[-1])["samples"].sum().rename_axis(depth_label)
                .reset_index(name="samples").set_index(depth_label))
         st.bar_chart(bar, width="stretch")
-    _download(counts, "oceandna_taxonomy_counts.csv")
+    _download(counts, f"{_config(DB_PATH, 'catalog_slug')}_taxonomy_counts.csv")
 
 
 def _selected_lineage(event, counts, cols):
@@ -653,7 +679,7 @@ def custom_table_view(samples_df, paths_df):
 
     st.download_button("Download table CSV",
                        table[tcols].to_csv(index=False).encode(),
-                       "oceandna_grab_and_go.csv", "text/csv")
+                       f"{_config(DB_PATH, 'catalog_slug')}_grab_and_go.csv", "text/csv")
 
     c1, c2 = st.columns(2, vertical_alignment="bottom")
     id_label = c1.selectbox(
@@ -696,8 +722,10 @@ def custom_table_view(samples_df, paths_df):
     dest = st.text_input("Destination (directory or rclone remote:path)",
                          placeholder="/pool/public/genomics/<user>/selected_data")
     a1, a2 = st.columns(2)
-    transfers = a1.slider("Parallel transfers", 1, 8, 4,
-                          help="rclone --transfers; also the mthread slots requested.")
+    # lTIO caps a user at 6 slots; the job requests min(transfers, 6) slots so it
+    # always schedules, while rclone still uses `transfers` concurrent transfers.
+    transfers = a1.slider("Parallel transfers", 1, 6, 4,
+                          help="rclone --transfers (also the mthread slots; lTIO caps 6/user).")
     mem = a2.slider("Memory per slot (GB)", 1, 8, 4, help="lTIO caps 8 GB/slot.")
 
     groups, n_unres = orclone.group_by_root(rows)
@@ -711,7 +739,9 @@ def custom_table_view(samples_df, paths_df):
 
     script = orclone.build_copy_script(
         groups, dest.strip(), transfers=transfers, slots=transfers, mem=mem,
-        est_bytes=total, n_files=n_files)
+        est_bytes=total, n_files=n_files,
+        rclone_module=_config(DB_PATH, "rclone_module"),
+        io_queue=_config(DB_PATH, "io_queue"))
     st.caption("Copy this into a `.job` file on Hydra and submit with "
                "`qsub <file>.job` from the login node (lTIO: 6 slots/user, 2 concurrent).")
     st.code(script, language="bash")
@@ -720,8 +750,9 @@ def custom_table_view(samples_df, paths_df):
 
 
 def main():
-    st.set_page_config(page_title="Ocean DNA sequence data catalog", layout="wide")
-    st.title("Ocean DNA sequence data catalog")
+    name = _config(DB_PATH, "catalog_name") if os.path.exists(DB_PATH) else "Sequence data catalog"
+    st.set_page_config(page_title=name, layout="wide")
+    st.title(name)
 
     if not os.path.exists(DB_PATH):
         st.error(f"Catalog database not found: {DB_PATH}")

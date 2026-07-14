@@ -68,17 +68,25 @@ def estimate_size(file_rows):
     return total, n, n_unknown
 
 
+LTIO_MAX_SLOTS = 6  # lTIO caps a user at 6 slots; requesting more never schedules.
+
+
 def build_copy_script(groups, dest, transfers=4, slots=4, mem=4,
-                      job_name="seqledger_rclone_copy", est_bytes=None, n_files=None):
+                      job_name="seqledger_rclone_copy", est_bytes=None, n_files=None,
+                      rclone_module=RCLONE_MODULE, io_queue="lTIO.sq"):
     """Return a Hydra qsub script that rclone-copies the grouped files to dest.
 
     groups: list of (src_root, [rel_path, ...]) from group_by_root.
     dest:   destination directory (or rclone remote:path) to copy into.
     One `rclone copy` runs per source root, using a --files-from list so only the
     selected files are transferred while their tree under the root is preserved.
+    rclone_module + io_queue come from the catalog config so another lab can retarget.
+    SGE slots are clamped to LTIO_MAX_SLOTS so the job always schedules; rclone still
+    uses --transfers concurrent transfers (I/O-bound, decoupled from CPU slots).
     lTIO caps: 72h wall, 8G/slot, 6 slots and 2 concurrent jobs per user.
     """
     dest = dest or "REPLACE_WITH_DESTINATION"
+    slots = max(1, min(slots, LTIO_MAX_SLOTS))
     mres = slots * mem
     header_est = ""
     if est_bytes is not None:
@@ -107,13 +115,13 @@ rm -f "$LIST"
 #$ -terse
 #$ -notify
 #$ -pe mthread {slots}
-#$ -q lTIO.sq -l ioq
+#$ -q {io_queue} -l ioq
 #$ -l mres={mres}G,h_data={mem}G,h_vmem={mem}G
 #$ -S /bin/bash
 #$ -cwd
 
 {header_est}echo + `date` $JOB_NAME running on $HOSTNAME in $QUEUE with jobID=$JOB_ID
-module load {RCLONE_MODULE}
+module load {rclone_module}
 
 DEST={shlex.quote(dest)}
 # Fail early (before touching /store) if the destination is unset or unusable.

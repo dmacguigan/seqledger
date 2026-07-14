@@ -309,13 +309,15 @@ def _safe_name(s):
     return re.sub(r"[^A-Za-z0-9._-]", "_", s)
 
 
-def _batch_script(name, log_path, slots, mem, mres, run_cmd):
-    """A Hydra qsub script that checks one project on the I/O queue (lTIO.sq).
+def _batch_script(name, log_path, slots, mem, mres, run_cmd,
+                  conda_env="seqledger", io_queue="lTIO.sq"):
+    """A Hydra qsub script that checks one project on the I/O queue.
 
     The I/O queue is the only way to reach the NAS/Store partition from a compute
     node (see the SI HPC "NAS Storage and the I/O Queue" wiki). Integrity is a
     read-every-byte scan, so it fits the queue's data-movement intent. lTIO caps:
     72h wall, 12h CPU/slot, 8G/slot, 6 slots and 2 concurrent jobs per user.
+    conda_env and io_queue come from the catalog config so another lab can retarget.
     """
     return f"""#!/bin/bash
 #$ -N seqledger_int_{name}
@@ -324,14 +326,14 @@ def _batch_script(name, log_path, slots, mem, mres, run_cmd):
 #$ -terse
 #$ -notify
 #$ -pe mthread {slots}
-#$ -q lTIO.sq -l ioq
+#$ -q {io_queue} -l ioq
 #$ -l mres={mres}G,h_data={mem}G,h_vmem={mem}G
 #$ -S /bin/bash
 #$ -cwd
 
 echo + `date` $JOB_NAME running on $HOSTNAME in $QUEUE with jobID=$JOB_ID
 source ~/.bashrc
-conda activate seqledger
+conda activate {conda_env}
 {run_cmd}
 status=$?
 echo = `date` $JOB_NAME done exit=$status
@@ -339,7 +341,7 @@ exit $status
 """
 
 
-def _submit_batch(args, projects):
+def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
     """Write a per-project qsub script and (unless --no-submit) submit it.
 
     Each remote job checks one project and writes its results to
@@ -377,7 +379,8 @@ def _submit_batch(args, projects):
         if args.force:
             cmd.append("--force")
         with open(script_path, "w") as fh:
-            fh.write(_batch_script(safe, log_path, slots, mem, mres, " ".join(cmd)))
+            fh.write(_batch_script(safe, log_path, slots, mem, mres, " ".join(cmd),
+                                   conda_env=conda_env, io_queue=io_queue))
         os.chmod(script_path, 0o755)
 
         if args.no_submit:
@@ -436,8 +439,10 @@ def cmd_integrity(args):
         # --force means "re-read everything", so the filter is meaningless there.
         if args.only_unchecked and not args.force:
             projects = [p for p in projects if _has_unchecked_files(conn, p)]
+        conda_env = odb.get_config(conn, "conda_env")
+        io_queue = odb.get_config(conn, "io_queue")
         conn.close()
-        _submit_batch(args, projects)
+        _submit_batch(args, projects, conda_env=conda_env, io_queue=io_queue)
         return
 
     results = ointegrity.check_catalog_integrity(
@@ -504,17 +509,25 @@ def cmd_taxonomy(args):
 
 def cmd_gui(args):
     from seqledger import gui as ogui
+    # CLI flag > catalog config > built-in default.
+    cfg = {}
+    if os.path.exists(args.db):
+        conn = odb.connect(args.db)
+        cfg = {k: odb.get_config(conn, k) for k in ("login_host", "conda_env", "io_queue")}
+        conn.close()
+    login_host = args.login_host or cfg.get("login_host") or ogui.LOGIN_HOST
+    conda_env = args.conda_env or cfg.get("conda_env") or "seqledger"
+    queue = args.queue or cfg.get("io_queue") or "lTIO.sq"
     if args.qsub:
-        ogui.launch_qsub(args.db, port=args.port, login_host=args.login_host,
-                         queue=args.queue, conda_env=args.conda_env,
-                         mem_gb=args.mem, wait=args.wait)
+        ogui.launch_qsub(args.db, port=args.port, login_host=login_host,
+                         queue=queue, conda_env=conda_env, mem_gb=args.mem, wait=args.wait)
     else:
-        ogui.launch(args.db, port=args.port, login_host=args.login_host)
+        ogui.launch(args.db, port=args.port, login_host=login_host)
 
 
 def build_parser():
     p = argparse.ArgumentParser(description="Ocean DNA sequence data catalog CLI")
-    p.add_argument("--db", default="oceandna_catalog.db", help="path to catalog SQLite DB")
+    p.add_argument("--db", default="catalog.db", help="path to catalog SQLite DB")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pdb = sub.add_parser(
@@ -643,15 +656,16 @@ def build_parser():
     pg = sub.add_parser("gui", help="launch Streamlit browse GUI (locally, or on lTIO via --qsub)")
     pg.add_argument("--port", type=int, default=8501,
                     help="server port (a free port is chosen automatically under --qsub)")
-    pg.add_argument("--login-host", default="hydra-login01.si.edu",
-                    help="Hydra login host used in the printed SSH tunnel command")
+    pg.add_argument("--login-host", default=None,
+                    help="Hydra login host for the SSH tunnel (default: catalog config)")
     pg.add_argument("--qsub", action="store_true",
                     help="run the GUI as a job on the I/O queue (lTIO.sq) so it reads the "
                          "master catalog on Store directly (no Scratch copy); waits for it "
                          "to start, then prints the tunnel command to screen")
-    pg.add_argument("--queue", default="lTIO.sq", help="queue for --qsub (default lTIO.sq)")
-    pg.add_argument("--conda-env", default="seqledger",
-                    help="conda env activated inside the --qsub job (default: seqledger)")
+    pg.add_argument("--queue", default=None,
+                    help="queue for --qsub (default: catalog config, else lTIO.sq)")
+    pg.add_argument("--conda-env", default=None,
+                    help="conda env activated inside the --qsub job (default: catalog config)")
     pg.add_argument("--mem", type=int, default=2, help="memory GB for the --qsub job (default 2)")
     pg.add_argument("--wait", type=int, default=300,
                     help="seconds to wait for the --qsub GUI to start serving (default 300)")

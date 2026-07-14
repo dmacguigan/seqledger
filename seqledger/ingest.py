@@ -27,7 +27,11 @@ try:
 except ImportError:  # non-Unix; ownership capture unavailable
     pwd = None
 
-from .db import METADATA_SUFFIX, REQUIRED_COLUMNS, header_uniqid_column, parse_project_id
+from .db import (METADATA_SUFFIX, REQUIRED_COLUMNS, fastq_globs, get_config,
+                 header_uniqid_column, parse_project_id)
+
+# Fallback FASTQ globs when no config is available (direct callers / tests).
+_DEFAULT_FASTQ_GLOBS = ("*.fastq.gz", "*.fq.gz")
 from .validate import Finding, FAIL, WARN, validate_metadata, overall_status
 
 # Plain-english explanations stored on the project row (also surfaced in the GUI).
@@ -82,16 +86,20 @@ def _infer_direction(filename):
     return f"R{m.group(1)}" if m else None
 
 
-def _discover_disk_files(data_dir, seqdata_root, uid_cache):
-    """Find *.fastq.gz under data_dir (recursively; files may be nested in subdirs).
+def _discover_disk_files(data_dir, seqdata_root, uid_cache, globs=_DEFAULT_FASTQ_GLOBS):
+    """Find FASTQ files under data_dir (recursively; files may be nested in subdirs).
 
-    Returns ({basename: {"rel_path", "size", "uid", "name"}}, collisions), where
-    rel_path is relative to seqdata_root and collisions lists basenames that appear
-    in more than one subdirectory (last one wins).
+    globs is the set of shell patterns to match (from the catalog's configured
+    fastq_extensions, e.g. *.fastq.gz + *.fq.gz). Returns
+    ({basename: {"rel_path", "size", "uid", "name"}}, collisions), where rel_path is
+    relative to seqdata_root and collisions lists basenames found in >1 subdir.
     """
+    paths = set()
+    for pat in globs:
+        paths.update(glob.glob(os.path.join(data_dir, "**", pat), recursive=True))
     found = {}
     collisions = []
-    for p in sorted(glob.glob(os.path.join(data_dir, "**", "*.fastq.gz"), recursive=True)):
+    for p in sorted(paths):
         fn = os.path.basename(p)
         if fn in found:
             collisions.append(fn)
@@ -99,6 +107,11 @@ def _discover_disk_files(data_dir, seqdata_root, uid_cache):
         found[fn] = {"rel_path": os.path.relpath(p, seqdata_root),
                      "size": size, "uid": uid, "name": name}
     return found, collisions
+
+
+def _cfg_fastq_globs(conn):
+    """FASTQ globs for this catalog's configured extensions (default fastq.gz+fq.gz)."""
+    return fastq_globs(get_config(conn, "fastq_extensions")) or list(_DEFAULT_FASTQ_GLOBS)
 
 
 def read_map_file(map_file_path):
@@ -260,7 +273,8 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
     if seqdata_root:
         data_dir = os.path.join(seqdata_root, seq_data_relpath)
         proj_owner_uid, proj_owner_name, _ = _stat_owner(data_dir, uid_cache)
-        disk, collisions = _discover_disk_files(data_dir, seqdata_root, uid_cache)
+        disk, collisions = _discover_disk_files(
+            data_dir, seqdata_root, uid_cache, _cfg_fastq_globs(conn))
 
     disk_filenames = set(disk) if disk is not None else None
     findings, has_fail = validate_metadata(
@@ -354,7 +368,8 @@ def _ingest_diskonly(conn, project_id, data_dir, seqdata_root, metadata_status, 
     disk = {}
     if data_dir:
         proj_uid, proj_name, _ = _stat_owner(data_dir, uid_cache)
-        disk, _coll = _discover_disk_files(data_dir, seqdata_root, uid_cache)
+        disk, _coll = _discover_disk_files(
+            data_dir, seqdata_root, uid_cache, _cfg_fastq_globs(conn))
 
     _upsert_project(conn, project_id_, source, number, description, None, project_id,
                     seqdata_root=abs_root, owner_uid=proj_uid, owner_name=proj_name,

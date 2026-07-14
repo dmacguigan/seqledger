@@ -9,7 +9,7 @@ import glob
 import os
 from datetime import date
 
-from .db import METADATA_SUFFIX, header_uniqid_column
+from .db import METADATA_SUFFIX, fastq_globs, get_config, header_uniqid_column
 
 FAIL = "FAIL"
 WARN = "WARN"
@@ -119,9 +119,13 @@ def check_data_files(conn, project_id, seq_data_relpath, seqdata_root):
     if not os.path.isdir(data_dir):
         return {"status": "unchecked", "n_missing": None, "n_orphan": None,
                 "missing": [], "orphan": []}
-    # Recursive: FASTQ may be nested in subdirs (matches ingest's discovery).
-    disk = {os.path.basename(p)
-            for p in glob.glob(os.path.join(data_dir, "**", "*.fastq.gz"), recursive=True)}
+    # Recursive: FASTQ may be nested in subdirs (matches ingest's discovery), and
+    # the extension set comes from the catalog config (default fastq.gz + fq.gz).
+    globs = fastq_globs(get_config(conn, "fastq_extensions")) or ["*.fastq.gz", "*.fq.gz"]
+    disk = set()
+    for pat in globs:
+        disk.update(os.path.basename(p)
+                    for p in glob.glob(os.path.join(data_dir, "**", pat), recursive=True))
     missing = sorted(db_files - disk)
     orphan = sorted(disk - db_files)
     status = "ok" if not missing and not orphan else "issues"

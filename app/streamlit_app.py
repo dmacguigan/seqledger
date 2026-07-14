@@ -650,18 +650,19 @@ def custom_table_view(samples_df, paths_df):
     rows = fpaths.to_dict("records")
 
     id_choices = {"Sample ID": "sample_id", "UniqID": "uniq_id"}
-    id_label = st.selectbox(
+
+    st.download_button("Download table CSV",
+                       table[tcols].to_csv(index=False).encode(),
+                       "oceandna_grab_and_go.csv", "text/csv")
+
+    c1, c2 = st.columns(2, vertical_alignment="bottom")
+    id_label = c1.selectbox(
         "MitoPilot ID column", list(id_choices),
         help="Which sample field fills MitoPilot's required unique 'ID' column.")
     mp_rows = omito.build_map_rows(table.to_dict("records"), rows,
                                    id_field=id_choices[id_label])
     mp_df = pd.DataFrame(mp_rows, columns=omito.MITOPILOT_COLUMNS)
-
-    d1, d2 = st.columns(2)
-    d1.download_button("Download table CSV",
-                       table[tcols].to_csv(index=False).encode(),
-                       "oceandna_grab_and_go.csv", "text/csv")
-    d2.download_button("Download MitoPilot map file",
+    c2.download_button("Download MitoPilot map file",
                        mp_df.to_csv(index=False).encode(),
                        "mitopilot_mapfile.csv", "text/csv",
                        help="CSV with ID, R1, R2, Taxon (R1/R2 are filenames; give "

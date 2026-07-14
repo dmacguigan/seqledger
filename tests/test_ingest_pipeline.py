@@ -32,7 +32,7 @@ def test_ingest_runs_all_three(tmp_path, capsys):
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
     # integrity ran and persisted (valid gzip fixtures -> ok)
     assert conn.execute(
-        "SELECT integrity_status FROM files WHERE read='R1'").fetchone()[0] == "ok"
+        "SELECT integrity_status FROM files WHERE direction='R1'").fetchone()[0] == "ok"
     assert conn.execute(
         "SELECT COUNT(*) FROM validation_log WHERE project_id='genohub-1_X'"
     ).fetchone()[0] == 1
@@ -64,7 +64,7 @@ def test_ingest_skip_flags(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
     # integrity + taxonomy skipped -> nothing persisted for them
     assert conn.execute(
-        "SELECT integrity_status FROM files WHERE read='R1'").fetchone()[0] is None
+        "SELECT integrity_status FROM files WHERE direction='R1'").fetchone()[0] is None
     assert conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0] == 0
 
 
@@ -86,7 +86,7 @@ def test_ingest_without_seqdata_root_skips_integrity(tmp_path, capsys):
     assert "skipped: pass --seqdata-root" in out
     conn = odb.connect(db)
     assert conn.execute(
-        "SELECT integrity_status FROM files WHERE read='R1'").fetchone()[0] is None
+        "SELECT integrity_status FROM files WHERE direction='R1'").fetchone()[0] is None
     # taxonomy still resolved
     assert conn.execute(
         "SELECT taxid FROM taxa WHERE taxon='Gadus morhua'").fetchone()[0] == 8049

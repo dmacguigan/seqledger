@@ -51,10 +51,13 @@ def _migrate(conn):
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
-    # Rename files.role -> files.read (clarified: names the R1/R2 read in the pair).
+    # Settle the R1/R2 column name on 'direction' (was 'role', briefly 'read').
     fcols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
-    if "role" in fcols and "read" not in fcols:
-        conn.execute("ALTER TABLE files RENAME COLUMN role TO read")
+    if "direction" not in fcols:
+        if "role" in fcols:
+            conn.execute("ALTER TABLE files RENAME COLUMN role TO direction")
+        elif "read" in fcols:
+            conn.execute("ALTER TABLE files RENAME COLUMN read TO direction")
 
 
 def init_db(conn, schema_path=SCHEMA_PATH):

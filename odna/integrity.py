@@ -105,7 +105,7 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
         jobs = min(8, os.cpu_count() or 1)
     today = date.today().isoformat()
 
-    sql = ("SELECT f.file_pk, f.project_id, f.sample_pk, f.read, f.filename, "
+    sql = ("SELECT f.file_pk, f.project_id, f.sample_pk, f.direction, f.filename, "
            "f.rel_path, p.seqdata_root "
            "FROM files f JOIN projects p ON p.project_id = f.project_id")
     params = ()
@@ -159,7 +159,7 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
 
     # Aggregate per project + R1/R2 read-count parity per sample.
     summaries = {}
-    mates = {}  # (project_id, sample_pk) -> {read: n_reads}
+    mates = {}  # (project_id, sample_pk) -> {direction: n_reads}
     for r in rows:
         pid = r["project_id"]
         res = results[r["file_pk"]]
@@ -170,7 +170,7 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
         s[{OK: "n_ok", GZIP_ERROR: "n_gzip_error", FORMAT_ERROR: "n_format_error",
            UNCHECKED: "n_unchecked"}[res["status"]]] += 1
         if r["sample_pk"] is not None and res["status"] == OK:
-            mates.setdefault((pid, r["sample_pk"]), {})[r["read"]] = res["n_reads"]
+            mates.setdefault((pid, r["sample_pk"]), {})[r["direction"]] = res["n_reads"]
 
     for (pid, _sample_pk), rc in mates.items():
         if rc.get("R1") is not None and rc.get("R2") is not None and rc["R1"] != rc["R2"]:

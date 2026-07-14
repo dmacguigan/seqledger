@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS files (
     file_pk      INTEGER PRIMARY KEY,
     project_id   TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
     sample_pk    INTEGER REFERENCES samples(sample_pk) ON DELETE CASCADE,
-    read         TEXT,                   -- 'R1' | 'R2'
+    direction    TEXT,                   -- 'R1' | 'R2'
     filename     TEXT NOT NULL,          -- basename, e.g. sample_1.fastq.gz
     rel_path     TEXT,                   -- path relative to raw_sequence_data root
     size_bytes   INTEGER,

@@ -121,7 +121,7 @@ def _upsert_sample(conn, project_id, sample_id, taxon, uniq_id, extra_json):
     return cur.fetchone()["sample_pk"]
 
 
-def _upsert_file(conn, project_id, sample_pk, read, filename, rel_path,
+def _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
                  size_bytes=None, owner_uid=None, owner_name=None):
     # Do not clobber md5 columns on re-ingest. Refresh size/owner only when known
     # (COALESCE keeps prior values if the file was unreachable this run).
@@ -130,15 +130,15 @@ def _upsert_file(conn, project_id, sample_pk, read, filename, rel_path,
         (project_id, filename)).fetchone() is None
     conn.execute(
         """INSERT INTO files
-             (project_id, sample_pk, read, filename, rel_path,
+             (project_id, sample_pk, direction, filename, rel_path,
               size_bytes, owner_uid, owner_name)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, filename) DO UPDATE SET
-             sample_pk=excluded.sample_pk, read=excluded.read, rel_path=excluded.rel_path,
+             sample_pk=excluded.sample_pk, direction=excluded.direction, rel_path=excluded.rel_path,
              size_bytes=COALESCE(excluded.size_bytes, files.size_bytes),
              owner_uid=COALESCE(excluded.owner_uid, files.owner_uid),
              owner_name=COALESCE(excluded.owner_name, files.owner_name)""",
-        (project_id, sample_pk, read, filename, rel_path,
+        (project_id, sample_pk, direction, filename, rel_path,
          size_bytes, owner_uid, owner_name))
     return was_new
 
@@ -224,12 +224,12 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
         extra_json = json.dumps(extra) if extra else None
         sample_pk = _upsert_sample(conn, project_id, sample_id, taxon, uniq_id, extra_json)
 
-        for read in ("R1", "R2"):
-            filename = row[read].strip()
+        for direction in ("R1", "R2"):
+            filename = row[direction].strip()
             csv_files.add(filename)
             rel_path = os.path.join(seq_data_relpath, filename)
             size, uid, name = disk_stats.get(filename, (None, None, None))
-            if _upsert_file(conn, project_id, sample_pk, read, filename, rel_path,
+            if _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
                             size_bytes=size, owner_uid=uid, owner_name=name):
                 stats["new_files"] += 1
 

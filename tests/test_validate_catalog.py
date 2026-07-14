@@ -84,7 +84,7 @@ def test_checksum_status_transitions(tmp_path):
     assert oval.check_checksums(conn, "genohub-1_X")["status"] == "verified"
 
     conn.execute(
-        "UPDATE files SET md5_match=0 WHERE project_id='genohub-1_X' AND read='R2'")
+        "UPDATE files SET md5_match=0 WHERE project_id='genohub-1_X' AND direction='R2'")
     cs = oval.check_checksums(conn, "genohub-1_X")
     assert cs["status"] == "mismatch" and cs["n_mismatch"] == 1
 

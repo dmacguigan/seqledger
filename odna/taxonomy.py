@@ -1,4 +1,4 @@
-"""Pure-Python NCBI taxonomy resolution for the Ocean DNA catalog.
+"""Pure-Python NCBI taxonomy resolution for the Ocean DNA sequence data catalog.
 
 Ports RiboPilot's approach (R/taxonomy.R): a pinned local NCBI taxdump, exact
 name->taxid, then genus-anchored fuzzy matching, plus a ranked lineage. The

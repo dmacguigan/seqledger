@@ -1,4 +1,4 @@
-"""Database helpers and shared constants for the Ocean DNA catalog."""
+"""Database helpers and shared constants for the Ocean DNA sequence data catalog."""
 
 import os
 import re

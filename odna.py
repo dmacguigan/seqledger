@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ocean DNA catalog CLI.
+"""Ocean DNA sequence data catalog CLI.
 
 Subcommands:
   init-db     create the catalog schema
@@ -473,7 +473,7 @@ def cmd_gui(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="Ocean DNA catalog CLI")
+    p = argparse.ArgumentParser(description="Ocean DNA sequence data catalog CLI")
     p.add_argument("--db", default="oceandna_catalog.db", help="path to catalog SQLite DB")
     sub = p.add_subparsers(dest="cmd", required=True)
 

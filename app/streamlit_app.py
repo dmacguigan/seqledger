@@ -1,4 +1,4 @@
-"""Read-only Streamlit GUI for browsing the Ocean DNA catalog.
+"""Read-only Streamlit GUI for browsing the Ocean DNA sequence data catalog.
 
 Launch via `python odna.py gui --db PATH` (which sets ODNA_DB and prints the SSH
 tunnel command). No SQL knowledge required: pick a view, search, filter, download CSV.
@@ -669,8 +669,8 @@ def custom_table_view(samples_df, paths_df):
 
 
 def main():
-    st.set_page_config(page_title="Ocean DNA catalog", layout="wide")
-    st.title("Ocean DNA raw sequence catalog")
+    st.set_page_config(page_title="Ocean DNA sequence data catalog", layout="wide")
+    st.title("Ocean DNA sequence data catalog")
 
     if not os.path.exists(DB_PATH):
         st.error(f"Catalog database not found: {DB_PATH}")

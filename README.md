@@ -1,4 +1,4 @@
-# Ocean DNA raw sequence catalog
+# Ocean DNA sequence data catalog
 
 A SQLite-backed catalog + Python tooling that replaces the per-project CSV "map
 files" as the source of truth for Ocean DNA raw sequence (FASTQ) data management.

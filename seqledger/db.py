@@ -4,7 +4,7 @@ import os
 import re
 import sqlite3
 
-SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "schema.sql")
+SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
 
 # Map file required columns. The fifth column is accepted as either "UniqID"
 # (as documented in the data management guide) or "UniqueID" (as the old

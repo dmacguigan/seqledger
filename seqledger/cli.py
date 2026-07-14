@@ -42,7 +42,7 @@ def _require_db(db_path):
     """Exit with a plain message (not a traceback) if the catalog doesn't exist."""
     if not os.path.exists(db_path):
         sys.exit(f"no catalog at '{db_path}'. Create one with:\n"
-                 f"  seqledger.py --db {db_path} init-db\nthen ingest your data.")
+                 f"  seqledger --db {db_path} init-db\nthen ingest your data.")
 
 
 # init-db flag name -> config key. Flags let a lab retarget the tool without
@@ -123,7 +123,7 @@ def cmd_ingest(args):
     GUI reflect the ingest without a separate `validate` run.
 
     Integrity (the gzip/FASTQ byte-scan) is deliberately NOT run here -- it reads
-    every byte and is slow, so it is a separate opt-in step: run `seqledger.py integrity`
+    every byte and is slow, so it is a separate opt-in step: run `seqledger integrity`
     (or `integrity --batch` on Hydra's I/O queue) when you want it.
     """
     from seqledger import taxonomy as otax
@@ -233,7 +233,7 @@ def cmd_ingest(args):
             except (OSError, URLError, tarfile.TarError) as e:
                 tax_results = None
                 print(f"(taxonomy skipped: {e}) -- ingest succeeded; run "
-                      f"`seqledger.py --db {args.db} taxonomy resolve` when ready.")
+                      f"`seqledger --db {args.db} taxonomy resolve` when ready.")
             if tax_results is not None:
                 review = os.path.join(os.path.dirname(os.path.abspath(args.db)) or ".",
                                       "taxonomy_review.csv")
@@ -242,7 +242,7 @@ def cmd_ingest(args):
                 print(f"resolved {len(tax_results)} taxa ({n_flag} fuzzy/unresolved)")
                 if tax_results:
                     print(f"review + edit confirmed_taxid in: {review}")
-                    print(f"then: seqledger.py --db {args.db} taxonomy apply --review {review}")
+                    print(f"then: seqledger --db {args.db} taxonomy apply --review {review}")
 
     # Refresh the stored data-files + checksum state. Ingest changes what's
     # cataloged -- new/changed rows and, with --prune, deletions -- so the
@@ -279,8 +279,8 @@ def cmd_ingest(args):
     conn.close()
     print("\ningest complete.")
     print(f"next: run the integrity check when ready (slow; reads every byte) --\n"
-          f"  seqledger.py --db {args.db} integrity --seqdata-root <raw_sequence_data>\n"
-          f"  or on Hydra: seqledger.py --db {args.db} integrity --batch "
+          f"  seqledger --db {args.db} integrity --seqdata-root <raw_sequence_data>\n"
+          f"  or on Hydra: seqledger --db {args.db} integrity --batch "
           f"--seqdata-root <raw_sequence_data>")
 
 
@@ -411,7 +411,9 @@ def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
     for d in (scripts_dir, logs_dir, results_dir):
         os.makedirs(d, exist_ok=True)
 
-    seqledger_py = os.path.abspath(__file__)
+    # Invoke the installed package (`python -m seqledger`) inside the job, so the
+    # command works regardless of where the package lives on the compute node.
+    run_prefix = ["python", "-m", "seqledger"]
     db_path = os.path.abspath(args.db)
     slots, mem = args.slots, args.mem
     mres = slots * mem
@@ -422,7 +424,7 @@ def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
         script_path = os.path.join(scripts_dir, f"integrity_{safe}.job")
         out_json = os.path.join(results_dir, f"{safe}.json")
         log_path = os.path.join(logs_dir, f"integrity_{safe}.log")
-        cmd = ["python", shlex.quote(seqledger_py), "--db", shlex.quote(db_path),
+        cmd = [*run_prefix, "--db", shlex.quote(db_path),
                "integrity", "--project", shlex.quote(pid),
                "--emit-json", shlex.quote(out_json), "--jobs", str(slots)]
         if args.seqdata_root:
@@ -457,7 +459,7 @@ def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
     else:
         print(f"submitted {len(job_ids)} job(s) to lTIO.sq")
     print("when the jobs finish, merge their results into the catalog:")
-    print(f"  python {seqledger_py} --db {db_path} integrity --collect {results_dir}")
+    print(f"  seqledger --db {db_path} integrity --collect {results_dir}")
 
 
 def cmd_integrity(args):
@@ -558,7 +560,7 @@ def cmd_taxonomy(args):
         n_flag = sum(1 for d in results if d["match_type"] != "exact")
         print(f"resolved {len(results)} taxa ({n_flag} fuzzy/unresolved)")
         print(f"review + edit confirmed_taxid in: {review}")
-        print(f"then: seqledger.py --db {args.db} taxonomy apply --review {review}")
+        print(f"then: seqledger --db {args.db} taxonomy apply --review {review}")
     elif args.action == "apply":
         applied, skipped = otax.apply_review(conn, taxdir, args.review)
         print(f"applied {applied} confirmed taxid(s)"
@@ -587,7 +589,7 @@ def cmd_gui(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="Ocean DNA sequence data catalog CLI")
+    p = argparse.ArgumentParser(prog="seqledger", description="seqledger: sequence-data catalog CLI")
     p.add_argument("--db", default="catalog.db", help="path to catalog SQLite DB")
     p.add_argument("--debug", action="store_true",
                    help="show the full traceback on error instead of a one-line message")

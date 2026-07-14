@@ -1,18 +1,14 @@
-import importlib.util
 import os
 
 from seqledger import db as odb
+from seqledger import cli as _cli
 from helpers import make_project, write_map_file
 from test_taxonomy import _write_taxdump
 
 
 def _load_cli():
-    """Load seqledger.py (the CLI script) by path; `import seqledger` gets the package."""
-    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "seqledger.py")
-    spec = importlib.util.spec_from_file_location("seqledger_cli", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    """The CLI module (seqledger.cli); .main(argv) is the entry point."""
+    return _cli
 
 
 def test_ingest_runs_taxonomy_and_datafiles_not_integrity(tmp_path, capsys):

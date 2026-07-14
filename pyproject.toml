@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seqledger"
+version = "0.1.0"
+description = "A SQLite-backed catalog + CLI + browse GUI for raw sequencing (FASTQ) data management on an HPC cluster"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Dan MacGuigan" }]
+keywords = ["bioinformatics", "fastq", "catalog", "hpc", "hydra", "data-management"]
+
+# Core tooling (init-db, ingest, checksums, validate, integrity, taxonomy, query)
+# is standard-library only. The GUI extra adds the browse app's dependencies.
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["streamlit>=1.40", "pandas>=2.0", "plotly>=5.20"]
+test = ["pytest>=7.0", "streamlit>=1.40", "pandas>=2.0", "plotly>=5.20"]
+
+[project.scripts]
+seqledger = "seqledger.cli:main"
+
+[tool.setuptools]
+packages = ["seqledger", "seqledger.app"]
+
+[tool.setuptools.package-data]
+# Ship the schema + the Streamlit app inside the wheel.
+seqledger = ["schema.sql"]
+"seqledger.app" = ["streamlit_app.py"]

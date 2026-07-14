@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 
-APP_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app", "streamlit_app.py")
+APP_PATH = os.path.join(os.path.dirname(__file__), "app", "streamlit_app.py")
 LOGIN_HOST = "hydra-login01.si.edu"
 
 

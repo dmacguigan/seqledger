@@ -1,6 +1,6 @@
 """Read-only Streamlit GUI for browsing the Ocean DNA sequence data catalog.
 
-Launch via `python seqledger.py gui --db PATH` (which sets SEQLEDGER_DB and prints the SSH
+Launch via `seqledger gui --db PATH` (which sets SEQLEDGER_DB and prints the SSH
 tunnel command). No SQL knowledge required: pick a view, search, filter, download CSV.
 
 Views:
@@ -18,8 +18,9 @@ import sys
 import pandas as pd
 import streamlit as st
 
-# Reach the seqledger package (this app lives in data_management_db/app/).
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Reach the seqledger package (this app lives in seqledger/app/); add the package
+# parent so `import seqledger` works when run as a bare script (not pip-installed).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from seqledger import rclone as orclone  # noqa: E402
 from seqledger import mitopilot as omito  # noqa: E402
 from seqledger import db as odb  # noqa: E402
@@ -518,7 +519,7 @@ def taxonomy_view(db_path, mtime):
     st.caption(f"{n_samples} samples across {n_proj} project(s); "
                "run `taxonomy resolve` to (re)populate. Unranked -> 'unknown'.")
     if not n_samples:
-        st.info("No resolved taxonomy yet. Run `seqledger.py taxonomy resolve`.")
+        st.info("No resolved taxonomy yet. Run `seqledger taxonomy resolve`.")
         return
 
     fig = px.sunburst(counts, path=cols, values="samples")

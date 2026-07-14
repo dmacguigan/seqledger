@@ -56,7 +56,7 @@ def _has_unresolved_taxa(conn):
     string never resolved before) rather than on confirmation status -- taxa
     stay unconfirmed until a manual `taxonomy apply`, so gating on `confirmed`
     would re-resolve (and reload the taxdump) on every re-ingest. When the step
-    does run, resolve_catalog(redo=False) still refreshes all unconfirmed taxa.
+    does run, resolve_catalog(scope="new") resolves only those new taxa.
     """
     return conn.execute(
         """SELECT 1 FROM samples s LEFT JOIN taxa t ON t.taxon = s.taxon
@@ -450,7 +450,9 @@ def cmd_taxonomy(args):
             otax.build_index(taxdir, force=True)
         elif args.rebuild_index:
             otax.build_index(taxdir, force=True)
-        results = otax.resolve_catalog(conn, taxdir, redo=args.redo)
+        scope = ("all" if args.redo
+                 else "unconfirmed" if args.refresh_unconfirmed else "new")
+        results = otax.resolve_catalog(conn, taxdir, scope=scope)
         review = os.path.join(os.path.dirname(os.path.abspath(args.db)) or ".",
                               "taxonomy_review.csv")
         otax.write_review_csv(results, review)
@@ -565,7 +567,11 @@ def build_parser():
     tr.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
     tr.add_argument("--force-download", action="store_true", help="re-download the taxdump")
     tr.add_argument("--rebuild-index", action="store_true", help="rebuild the taxdump index")
-    tr.add_argument("--redo", action="store_true", help="re-resolve confirmed taxa too")
+    tr.add_argument("--refresh-unconfirmed", action="store_true",
+                    help="also re-resolve taxa resolved before but not yet confirmed "
+                         "(default: only taxa never checked against NCBI)")
+    tr.add_argument("--redo", action="store_true",
+                    help="re-resolve every taxon, including confirmed ones")
     ta = tsub.add_parser("apply", help="apply confirmed_taxid overrides from a review CSV")
     ta.add_argument("--review", required=True, help="edited taxonomy_review.csv")
     ta.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")

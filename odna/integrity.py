@@ -153,14 +153,16 @@ def _cached_state(rows):
             for r in rows}
 
 
-def _run_checks(to_check, cached, jobs, progress, recheck, on_checked=None):
+def _run_checks(to_check, cached, jobs, progress, recheck, on_checked=None, results=None):
     """Concurrently check a {file_pk: path} map; return {file_pk: result}.
 
     on_checked(pk, res), if given, is called on the calling thread for each freshly
-    checked (non-skipped) file -- used to persist + commit incrementally so a kill
-    mid-run keeps completed work.
+    checked (non-skipped) file -- used to persist/checkpoint incrementally so a kill
+    mid-run keeps completed work. Pass an existing `results` dict to accumulate into
+    it (so a caller's checkpoint can serialize partial progress live).
     """
-    results = {}
+    if results is None:
+        results = {}
     total = len(to_check)
     if not total:
         return results
@@ -198,19 +200,27 @@ def _run_checks(to_check, cached, jobs, progress, recheck, on_checked=None):
     return results
 
 
-def _compute_results(rows, seqdata_root, jobs, progress, recheck, on_checked=None):
+def _compute_results(rows, seqdata_root, jobs, progress, recheck, on_checked=None,
+                     seed=None, results=None):
     """Resolve paths and check rows; unresolved (no root) paths become UNCHECKED.
 
     Returns {file_pk: result}. Does no DB writes itself; pass on_checked to persist.
+    seed pre-loads already-known results (e.g. a resume checkpoint): those file_pks
+    are skipped, not re-read. Pass `results` to accumulate into an existing dict.
     """
+    if results is None:
+        results = {}
+    if seed:
+        results.update(seed)
     cached = _cached_state(rows)
     # Resolve paths on the calling thread. The on-disk stat is done inside the
     # workers (not a serial pass here): over thousands of files on a network mount
     # each stat() is a round-trip, and doing them serially would hang silently for
     # minutes before the first progress tick.
     paths = {r["file_pk"]: _resolve_path(seqdata_root, r) for r in rows}
-    to_check = {pk: p for pk, p in paths.items() if p}
-    results = _run_checks(to_check, cached, jobs, progress, recheck, on_checked)
+    # Skip files already resolved (resume seed) -- don't re-read them.
+    to_check = {pk: p for pk, p in paths.items() if p and pk not in results}
+    _run_checks(to_check, cached, jobs, progress, recheck, on_checked, results=results)
     # Files with no resolvable path (root unknown) -> unchecked.
     for pk in paths:
         if pk not in results:
@@ -312,8 +322,37 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
     return aggregate_from_db(conn, sorted({r["project_id"] for r in rows}))
 
 
+def _write_results_json(out_path, project_id, run_date, results):
+    """Atomically write {project_id, run_date, results:{file_pk:{status,n_reads}}}."""
+    payload = {"project_id": project_id, "run_date": run_date,
+               "results": {str(pk): {"status": r["status"], "n_reads": r.get("n_reads")}
+                           for pk, r in results.items()}}
+    tmp = out_path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(payload, fh)
+    os.replace(tmp, out_path)  # atomic: a reader never sees a half-written file
+    return payload
+
+
+def _load_results_json(out_path):
+    """Load a prior (partial or complete) results JSON as {file_pk(int): result}.
+
+    Returns {} if the file is missing or unreadable/corrupt (e.g. a job killed
+    mid-write left a bad file -- start that project over rather than crashing).
+    """
+    if not os.path.exists(out_path):
+        return {}
+    try:
+        with open(out_path) as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return {int(pk): {"status": r["status"], "n_reads": r.get("n_reads"), "cached": True}
+            for pk, r in payload.get("results", {}).items()}
+
+
 def emit_project_json(conn, project_id, out_path, seqdata_root=None, jobs=None,
-                      progress=True, recheck=False):
+                      progress=True, recheck=False, resume=True):
     """Check one project and write per-file results to JSON -- no DB writes.
 
     Intended for a remote (qsub) worker that must not write the shared catalog DB
@@ -321,20 +360,38 @@ def emit_project_json(conn, project_id, out_path, seqdata_root=None, jobs=None,
     the storage it can reach, and emits
     {project_id, run_date, results: {file_pk: {status, n_reads}}}.
     Merge the JSON back into the catalog later with collect_json (integrity
-    --collect). The incremental skip still applies -- a re-submitted job reads the
-    prior gz_ok/size from the DB rows and skips unchanged files that already passed.
+    --collect).
+
+    Checkpointed + resumable within a single project: results are flushed to the
+    JSON every _COMMIT_EVERY freshly-checked files, and on (re)start any existing
+    JSON at out_path is loaded so already-checked files are skipped, not re-read.
+    So a job killed mid-project (e.g. the lTIO 72h wall / 12h-per-slot CPU cap)
+    resumes where it stopped when resubmitted, instead of starting over. recheck=True
+    (or resume=False) ignores the prior JSON and re-reads every file.
     """
     if jobs is None:
         jobs = min(8, os.cpu_count() or 1)
+    run_date = date.today().isoformat()
     rows = _select_rows(conn, project_id)
-    results = _compute_results(rows, seqdata_root, jobs, progress, recheck)
-    payload = {"project_id": project_id, "run_date": date.today().isoformat(),
-               "results": {str(pk): {"status": r["status"], "n_reads": r["n_reads"]}
-                           for pk, r in results.items()}}
-    tmp = out_path + ".tmp"
-    with open(tmp, "w") as fh:
-        json.dump(payload, fh)
-    os.replace(tmp, out_path)  # atomic: a reader never sees a half-written file
+
+    seed = _load_results_json(out_path) if (resume and not recheck) else {}
+    if seed and progress:
+        print(f"resuming {project_id}: {len(seed)} file result(s) already recorded "
+              f"in {out_path}", flush=True)
+
+    results = {}
+    since = [0]
+
+    def on_checked(pk, res):
+        # Checkpoint periodically so a kill mid-project keeps completed work.
+        since[0] += 1
+        if since[0] >= _COMMIT_EVERY:
+            _write_results_json(out_path, project_id, run_date, results)
+            since[0] = 0
+
+    _compute_results(rows, seqdata_root, jobs, progress, recheck,
+                     on_checked=on_checked, seed=seed, results=results)
+    payload = _write_results_json(out_path, project_id, run_date, results)
     if progress:
         print(f"wrote {len(results)} file result(s) for {project_id} -> {out_path}")
     return payload

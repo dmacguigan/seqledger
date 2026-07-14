@@ -178,8 +178,15 @@ def test_resolve_catalog_and_apply(tmp_path):
     url = otax.TAXDUMP_URL  # sanity: module constant present
     assert row["taxid"] and f"taxonomy/{row['taxid']}/" == f"taxonomy/8049/"
 
-    # confirmed taxa are skipped on re-resolve unless redo=True
+    # default scope="new" only resolves taxa with no row yet; both exist now -> none
+    assert otax.resolve_catalog(conn, taxdir) == []
+
+    # scope="unconfirmed" re-resolves unconfirmed taxa but skips confirmed ones
     conn.execute("UPDATE taxa SET confirmed=1 WHERE taxon='Zzz qqq'")
     conn.commit()
-    again = otax.resolve_catalog(conn, taxdir)
+    again = otax.resolve_catalog(conn, taxdir, scope="unconfirmed")
     assert [d["taxon"] for d in again] == ["Gadus morhua"]
+
+    # scope="all" re-resolves everything, including the confirmed taxon
+    allres = otax.resolve_catalog(conn, taxdir, scope="all")
+    assert sorted(d["taxon"] for d in allres) == ["Gadus morhua", "Zzz qqq"]

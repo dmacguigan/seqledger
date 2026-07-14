@@ -427,21 +427,35 @@ def _upsert_taxon(conn, d, today):
         f"ON CONFLICT(taxon) DO UPDATE SET {updates}", vals)
 
 
-def resolve_catalog(conn, taxdir, redo=False):
+def resolve_catalog(conn, taxdir, scope="new", redo=False):
     """Resolve distinct sample taxa and upsert into the `taxa` table.
 
-    By default only taxa not yet confirmed are (re-)resolved; redo=True also
-    re-resolves confirmed ones. Returns the list of resolution dicts.
+    scope picks which taxa to (re-)resolve:
+      "new"          only taxa with no `taxa` row yet -- never checked against NCBI.
+                     Default: fast, and it leaves prior resolutions (and any manual
+                     edits/confirmations) untouched, so a new ingest only resolves
+                     genuinely new names.
+      "unconfirmed"  also re-resolve taxa resolved before but not yet confirmed.
+      "all"          re-resolve every distinct taxon, including confirmed ones.
+    redo=True is a legacy alias for scope="all". Returns the resolution dicts.
     """
     if redo:
+        scope = "all"
+    if scope == "all":
         rows = conn.execute(
             "SELECT DISTINCT taxon FROM samples WHERE taxon IS NOT NULL AND taxon!=''")
-    else:
+    elif scope == "unconfirmed":
         rows = conn.execute(
             """SELECT DISTINCT s.taxon FROM samples s
                LEFT JOIN taxa t ON t.taxon = s.taxon
                WHERE s.taxon IS NOT NULL AND s.taxon != ''
                  AND (t.taxon IS NULL OR COALESCE(t.confirmed, 0) = 0)""")
+    else:  # "new": only taxa with no taxa row at all
+        rows = conn.execute(
+            """SELECT DISTINCT s.taxon FROM samples s
+               LEFT JOIN taxa t ON t.taxon = s.taxon
+               WHERE s.taxon IS NOT NULL AND s.taxon != ''
+                 AND t.taxon IS NULL""")
     taxa = [r[0] for r in rows]
     results = resolve_taxa(taxa, taxdir)
     today = date.today().isoformat()

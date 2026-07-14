@@ -1,4 +1,5 @@
 import gzip
+import json
 import os
 
 from odna import db as odb
@@ -217,3 +218,80 @@ def test_migration_adds_columns(tmp_path):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
     assert {"integrity_status", "gz_ok", "n_reads", "integrity_date"} <= cols
     odb._migrate(conn)  # second run must not raise
+
+
+# ---- batch emit-json checkpointing / resume --------------------------------
+
+def _emit_pks(conn):
+    return {r["direction"]: r["file_pk"]
+            for r in conn.execute("SELECT direction, file_pk FROM files")}
+
+
+def test_results_json_roundtrip_and_corrupt(tmp_path):
+    out = os.path.join(tmp_path, "x.json")
+    oint._write_results_json(out, "P1", "2020-01-01", {5: {"status": "ok", "n_reads": 10}})
+    assert oint._load_results_json(out) == {5: {"status": "ok", "n_reads": 10, "cached": True}}
+    # a job killed mid-write can leave a corrupt file -> start that project over
+    with open(out, "w") as f:
+        f.write("{ not valid json")
+    assert oint._load_results_json(out) == {}
+    assert oint._load_results_json(os.path.join(tmp_path, "missing.json")) == {}
+
+
+def test_emit_json_resume_skips_seeded_files(tmp_path):
+    # Both files are valid on disk. Pre-seed a JSON marking R1 with a (stale)
+    # gzip_error, as if a prior job had checked it. Resume must trust the seed and
+    # NOT re-read R1, while R2 (absent from the seed) is freshly checked -> ok.
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    pks = _emit_pks(conn)
+    out = os.path.join(tmp_path, "genohub-1_X.json")
+    with open(out, "w") as f:
+        json.dump({"project_id": "genohub-1_X", "run_date": "2000-01-01",
+                   "results": {str(pks["R1"]): {"status": "gzip_error", "n_reads": None}}}, f)
+
+    payload = oint.emit_project_json(conn, "genohub-1_X", out, seqdata_root=root,
+                                     progress=False)
+    res = payload["results"]
+    assert res[str(pks["R1"])]["status"] == "gzip_error"  # kept from seed, not re-read
+    assert res[str(pks["R2"])]["status"] == "ok"          # freshly checked
+
+
+def test_emit_json_recheck_ignores_seed(tmp_path):
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    pks = _emit_pks(conn)
+    out = os.path.join(tmp_path, "genohub-1_X.json")
+    with open(out, "w") as f:
+        json.dump({"project_id": "genohub-1_X", "run_date": "2000-01-01",
+                   "results": {str(pks["R1"]): {"status": "gzip_error", "n_reads": None}}}, f)
+
+    # recheck re-reads every file, ignoring the seed -> R1 corrected to ok
+    payload = oint.emit_project_json(conn, "genohub-1_X", out, seqdata_root=root,
+                                     recheck=True, progress=False)
+    assert payload["results"][str(pks["R1"])]["status"] == "ok"
+
+
+def test_emit_json_checkpoints_during_run(tmp_path, monkeypatch):
+    # With the checkpoint interval at 1, the JSON must exist (with progress) before
+    # the run finishes -- proving results are flushed incrementally, not only at end.
+    monkeypatch.setattr(oint, "_COMMIT_EVERY", 1)
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1"),
+            ("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "Gadus", "U2")]
+    conn, root = _setup(tmp_path, rows)
+    out = os.path.join(tmp_path, "genohub-1_X.json")
+
+    seen = {}
+
+    real = oint._write_results_json
+
+    def spy(path, pid, run_date, results):
+        seen["max"] = max(seen.get("max", 0), len(results))
+        seen["calls"] = seen.get("calls", 0) + 1
+        return real(path, pid, run_date, results)
+
+    monkeypatch.setattr(oint, "_write_results_json", spy)
+    oint.emit_project_json(conn, "genohub-1_X", out, seqdata_root=root, progress=False)
+    # 4 files -> at least one mid-run checkpoint + the final write (calls > 1)
+    assert seen["calls"] > 1
+    assert oint._load_results_json(out)  # a valid JSON exists at the end

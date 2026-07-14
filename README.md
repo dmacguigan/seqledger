@@ -136,7 +136,11 @@ python odna.py --db oceandna_catalog.db integrity --batch \
 #    the only step that writes the DB; runs locally + serially, then aggregates
 #    per-project summaries + validation_log the same as a live run):
 python odna.py --db oceandna_catalog.db integrity --collect integrity_batch/results
-#    Incremental skip still applies: a re-submitted job reads prior gz_ok/size
+#    Checkpointed + resumable per project: each job flushes its results JSON every
+#    ~200 checked files and, on restart, reloads its own JSON and skips already-done
+#    files -- so a job killed at the lTIO 72h wall / 12h-per-slot CPU cap resumes
+#    where it stopped when you just re-qsub it (no re-reading). --force re-reads all.
+#    Incremental skip also applies: a re-submitted job reads prior gz_ok/size
 #    from the DB and skips unchanged files that already passed. To also avoid
 #    submitting a no-op job for a project that is already fully checked, add
 #    --only-unchecked (skips projects with no never-checked file; ignored under
@@ -146,8 +150,11 @@ python odna.py --db oceandna_catalog.db integrity --batch --only-unchecked \
 
 # 5. taxonomy: resolve free-text Taxon -> NCBI TaxID + lineage
 #    Downloads a pinned NCBI taxdump into <db dir>/.taxonomy (once), indexes it,
-#    resolves every distinct sample Taxon (exact, then genus-anchored fuzzy),
-#    writes the results into the `taxa` table + a review CSV.
+#    resolves distinct sample Taxa (exact, then genus-anchored fuzzy), writes the
+#    results into the `taxa` table + a review CSV. By DEFAULT it resolves only taxa
+#    with no `taxa` row yet (never checked against NCBI), so a new ingest doesn't
+#    re-run every taxon. Add --refresh-unconfirmed to also re-resolve taxa resolved
+#    before but not yet confirmed, or --redo to re-resolve everything.
 #    NOTE: if you built a taxdump index before this version, rebuild it once so
 #    the new tax_names(taxid) index (large speed-up) is applied:
 #        python odna.py --db oceandna_catalog.db taxonomy resolve --rebuild-index

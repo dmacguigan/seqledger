@@ -121,8 +121,18 @@ def cmd_ingest(args):
     conn = odb.connect(args.db)
     odb.init_db(conn)
 
+    # Fail loudly (not silently-empty) when a root is missing/unmounted/mistyped --
+    # the most likely first-run mistake, which otherwise reports "ingest complete"
+    # over an empty catalog.
+    def _need_dir(path, what):
+        if path and not os.path.isdir(path):
+            conn.close()
+            sys.exit(f"{what} '{path}' does not exist or is not a directory -- check "
+                     "the path and that the filesystem (Store/NAS) is mounted.")
+
     print("== ingest ==")
     if args.map_file:
+        _need_dir(args.seqdata_root, "--seqdata-root")
         results = oingest.ingest_map_file(
             conn, args.map_file, seqdata_root=args.seqdata_root,
             metadata_root=args.metadata_root, prune=args.prune)
@@ -131,8 +141,15 @@ def cmd_ingest(args):
             conn.close()
             sys.exit("ingest needs either a map_file, or both --seqdata-root and "
                      "--metadata-root for auto-discovery")
+        _need_dir(args.seqdata_root, "--seqdata-root")
+        _need_dir(args.metadata_root, "--metadata-root")
         results = oingest.ingest_tree(
             conn, args.seqdata_root, args.metadata_root, prune=args.prune)
+
+    if not results:
+        print("WARNING: discovered 0 projects -- nothing was ingested. Check that "
+              "--seqdata-root has project folders and --metadata-root has "
+              "'<project>_mapfile.csv' files (and that the mount is present).")
     n_fail = 0
     ingested = []  # project_ids that did not FAIL
     tot_new = tot_changed = tot_files = 0
@@ -411,6 +428,22 @@ def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
 
 def cmd_integrity(args):
     from seqledger import integrity as ointegrity
+
+    # The remote batch worker (--emit-json) runs on a compute node against the
+    # shared master DB over NFS. It only SELECTs its file list and writes results
+    # to JSON, so it MUST open read-only and MUST NOT init_db -- otherwise every
+    # concurrently-scheduled job would take a write lock (and issue ALTERs on any
+    # schema drift), contending or corrupting the catalog over NFS.
+    if args.emit_json:
+        if not args.project:
+            sys.exit("integrity --emit-json requires --project")
+        conn = odb.connect_ro(args.db)
+        ointegrity.emit_project_json(
+            conn, args.project, args.emit_json, seqdata_root=args.seqdata_root,
+            jobs=args.jobs, recheck=args.force)
+        conn.close()
+        return
+
     conn = odb.connect(args.db)
     odb.init_db(conn)
 
@@ -418,16 +451,6 @@ def cmd_integrity(args):
         summaries = ointegrity.collect_json(conn, args.collect)
         conn.close()
         _print_integrity(summaries)
-        return
-
-    if args.emit_json:
-        if not args.project:
-            conn.close()
-            sys.exit("integrity --emit-json requires --project")
-        ointegrity.emit_project_json(
-            conn, args.project, args.emit_json, seqdata_root=args.seqdata_root,
-            jobs=args.jobs, recheck=args.force)
-        conn.close()
         return
 
     if args.batch:

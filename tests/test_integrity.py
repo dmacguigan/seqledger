@@ -295,3 +295,23 @@ def test_emit_json_checkpoints_during_run(tmp_path, monkeypatch):
     # 4 files -> at least one mid-run checkpoint + the final write (calls > 1)
     assert seen["calls"] > 1
     assert oint._load_results_json(out)  # a valid JSON exists at the end
+
+
+def test_emit_json_works_on_readonly_connection(tmp_path):
+    # The batch worker path opens the DB read-only (no init_db) so N compute nodes
+    # can't contend/corrupt the master over NFS. Emit must still work read-only.
+    import sqlite3
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    conn.close()
+    ro = odb.connect_ro(os.path.join(tmp_path, "cat.db"))
+    # a write must be rejected on the read-only connection
+    import pytest
+    with pytest.raises(sqlite3.OperationalError):
+        ro.execute("UPDATE files SET gz_ok=1")
+    out = os.path.join(tmp_path, "genohub-1_X.json")
+    payload = oint.emit_project_json(ro, "genohub-1_X", out, seqdata_root=root,
+                                     progress=False)
+    ro.close()
+    assert len(payload["results"]) == 2
+    assert all(r["status"] == "ok" for r in payload["results"].values())

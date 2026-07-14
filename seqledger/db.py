@@ -84,6 +84,18 @@ def connect(db_path):
     return conn
 
 
+def connect_ro(db_path):
+    """Open the catalog read-only (mode=ro): no writes, no migrate, no file creation.
+
+    For paths that must not write the shared DB over NFS -- notably the remote
+    integrity batch worker (--emit-json), which only reads its file list. mode=ro
+    (not immutable) so it stays correct while the CLI writes the master elsewhere.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 # Columns added after the initial schema. Applied to pre-existing DBs on init.
 _MIGRATIONS = [
     ("projects", "seqdata_root", "TEXT"),

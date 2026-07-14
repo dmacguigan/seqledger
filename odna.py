@@ -84,14 +84,26 @@ def cmd_ingest(args):
     odb.init_db(conn)
 
     print("== ingest ==")
-    results = oingest.ingest_map_file(conn, args.map_file, seqdata_root=args.seqdata_root,
-                                      metadata_root=args.metadata_root, prune=args.prune)
+    if args.map_file:
+        results = oingest.ingest_map_file(
+            conn, args.map_file, seqdata_root=args.seqdata_root,
+            metadata_root=args.metadata_root, prune=args.prune)
+    else:
+        if not args.seqdata_root or not args.metadata_root:
+            conn.close()
+            sys.exit("ingest needs either a map_file, or both --seqdata-root and "
+                     "--metadata-root for auto-discovery")
+        results = oingest.ingest_tree(
+            conn, args.seqdata_root, args.metadata_root, prune=args.prune)
     n_fail = 0
     ingested = []  # project_ids that did not FAIL
+    all_pids = [pid for pid, _, _, _ in results]
     tot_new = tot_changed = tot_files = 0
     tot_pruned_s = tot_pruned_f = 0
     for project_id, findings, status, stats in results:
         print(f"[{icons[status]}] {project_id}")
+        if stats.get("metadata_status") and stats["metadata_status"] != "ok":
+            print(f"    MAPFILE [{stats['metadata_status']}]: {stats['metadata_detail']}")
         for f in findings:
             print(f"    {f.level}: {f.message}")
         if status == "fail":
@@ -122,7 +134,9 @@ def cmd_ingest(args):
         if not args.seqdata_root:
             print("(skipped: pass --seqdata-root to check files on disk)")
         else:
-            pending = [pid for pid in ingested if _has_unchecked_files(conn, pid)]
+            # Includes flagged (missing/broken-mapfile) projects whose files were
+            # cataloged from disk -- they still have checkable FASTQ on disk.
+            pending = [pid for pid in all_pids if _has_unchecked_files(conn, pid)]
             if not pending:
                 print("(no new/unchecked files)")
             for pid in pending:
@@ -467,12 +481,17 @@ def build_parser():
 
     pi = sub.add_parser(
         "ingest",
-        help="load CSV map file(s); auto-run integrity + taxonomy, refresh data-files check")
-    pi.add_argument("map_file", help="two-column map file (metadata csv, data dir)")
+        help="auto-discover projects from a seqdata + metadata dir (or a map file); "
+             "auto-run integrity + taxonomy, refresh data-files check")
+    pi.add_argument("map_file", nargs="?",
+                    help="optional two-column map file (metadata csv, data dir) for "
+                         "manual/odd layouts; omit to auto-discover from the roots")
     pi.add_argument("--metadata-root",
-                    help="dir holding the per-project metadata CSVs (default: map file's dir)")
+                    help="dir holding the per-project '<project>_mapfile.csv' files "
+                         "(auto-discovery); with a map file, the dir its CSVs live in")
     pi.add_argument("--seqdata-root",
-                    help="root of raw_sequence_data; enables disk checks + the integrity step")
+                    help="root of raw_sequence_data; each top-level folder is a project. "
+                         "Required for auto-discovery; enables disk checks + integrity")
     pi.add_argument("--jobs", type=int, default=None, help="integrity worker count")
     pi.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
     pi.add_argument("--skip-integrity", action="store_true", help="skip the integrity step")

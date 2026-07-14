@@ -58,21 +58,32 @@ tests/                pytest suite + fixture builders
 # 1. create the catalog
 python odna.py --db oceandna_catalog.db init-db
 
-# 2. ingest metadata from a two-column map file (metadata csv, data dir),
-#    same format as scripts/.../example_map_file.txt. Per-project CSVs are
-#    looked up in --metadata-root (default: the map file's own dir).
-#    --seqdata-root enables on-disk R1/R2 + orphan checks when data is reachable.
+# 2. ingest metadata -- AUTO-DISCOVERY (recommended): point at the sequence-data
+#    root and the metadata root; no map file needed. Every top-level folder in
+#    --seqdata-root is a project, paired with '<project>_mapfile.csv' in
+#    --metadata-root. FASTQ files may be nested in subdirs -- they are found
+#    recursively. Projects are always added; pairing problems are flagged on the
+#    project row (metadata_status, shown in the GUI 'mapfile' column):
+#      missing_mapfile  folder on disk, no mapfile -> files cataloged, no samples
+#      missing_seqdata  mapfile present, no folder  -> samples cataloged, no files
+#      broken_mapfile   mapfile header malformed    -> files cataloged, no samples
+#    (an 'ok' project has a parseable mapfile and a matching folder).
 #
 #    ingest is self-driving: after loading rows it auto-runs the integrity and
 #    taxonomy-resolve steps (4b + 5 below) on whatever is new or changed. It
-#    upserts, so re-running on an edited CSV updates the rows (Taxon edits
-#    included) and re-resolves any changed name. The follow-on steps are gated
-#    so unchanged re-runs are cheap: integrity only touches files it has never
-#    checked (and needs --seqdata-root to reach them on disk), taxonomy only
-#    runs when a genuinely new Taxon string appears. Samples dropped from a CSV
-#    are reported but kept, not pruned. Use --skip-integrity / --skip-taxonomy
-#    to load metadata only; checksums stay separate (they need rclone output)
-#    and `taxonomy apply` stays a manual review step.
+#    upserts, so re-running picks up added/fixed mapfiles (a missing_mapfile
+#    project flips to ok once its mapfile appears) and re-resolves changed names.
+#    Follow-on steps are gated so unchanged re-runs are cheap. Samples dropped
+#    from a CSV are reported but kept, not pruned (use --prune to remove). Use
+#    --skip-integrity / --skip-taxonomy to load metadata only.
+python odna.py --db oceandna_catalog.db ingest \
+    --metadata-root ../raw_sequence_metadata \
+    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
+
+#    ingest metadata -- MANUAL (override for odd layouts): pass an explicit
+#    two-column map file (metadata csv, data dir), same format as
+#    scripts/.../example_map_file.txt. Per-project CSVs are looked up in
+#    --metadata-root (default: the map file's own dir).
 python odna.py --db oceandna_catalog.db ingest map_file.txt \
     --metadata-root ../raw_sequence_metadata \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data

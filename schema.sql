@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS projects (
     owner_uid         INTEGER,          -- OS uid owning the project data dir
     owner_name        TEXT,             -- resolved username for owner_uid
     date_ingested     TEXT,             -- ISO date the project was ingested
+    -- mapfile <-> project-folder pairing health, set by auto-discovery ingest
+    metadata_status   TEXT,             -- 'ok'|'missing_mapfile'|'missing_seqdata'|'broken_mapfile'
+    metadata_detail   TEXT,             -- plain-english explanation when not 'ok'
     -- data-files reciprocal check (mapfile <-> disk), refreshed by `validate`
     data_check_status    TEXT,          -- 'ok' | 'issues' | 'unchecked'
     data_check_n_missing INTEGER,       -- mapfile R1/R2 not found on disk

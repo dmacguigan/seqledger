@@ -1,10 +1,25 @@
-"""Ingest CSV map files into the catalog (metadata only; no hashing)."""
+"""Ingest CSV map files into the catalog (metadata only; no hashing).
+
+Two ways in:
+  ingest_tree      auto-discover: point at a seqdata root + a metadata root and
+                   pair each project folder with its `<project>_mapfile.csv`.
+  ingest_map_file  explicit two-column map file (metadata csv, data dir). Kept for
+                   manual/odd layouts and back-compat.
+
+Auto-discovery records a per-project `metadata_status` for pairing problems:
+  ok               mapfile present + parseable, folder present
+  missing_mapfile  project folder on disk, no mapfile -> files cataloged, no samples
+  missing_seqdata  mapfile present, no project folder -> samples cataloged, no files
+  broken_mapfile   mapfile present but header is malformed -> files cataloged, no samples
+In every case the project is still added to the catalog (so nothing is hidden).
+"""
 
 import csv
 import glob
 import io
 import json
 import os
+import re
 from datetime import date
 
 try:
@@ -12,8 +27,27 @@ try:
 except ImportError:  # non-Unix; ownership capture unavailable
     pwd = None
 
-from .db import header_uniqid_column, parse_project_id
-from .validate import validate_metadata, overall_status
+from .db import METADATA_SUFFIX, REQUIRED_COLUMNS, header_uniqid_column, parse_project_id
+from .validate import Finding, FAIL, WARN, validate_metadata, overall_status
+
+# Plain-english explanations stored on the project row (also surfaced in the GUI).
+MISSING_MAPFILE_DETAIL = (
+    "No matching '<project>_mapfile.csv' was found in the metadata directory for "
+    "this sequence-data folder. The FASTQ files were cataloged from disk, but "
+    "sample metadata (taxon, UniqID) is missing until a mapfile is added.")
+MISSING_SEQDATA_DETAIL = (
+    "A mapfile exists but no matching folder was found in the sequence-data "
+    "directory. Samples were cataloged from the mapfile, but no files are on disk.")
+_BROKEN_MAPFILE_DETAIL = (
+    "The mapfile is present but could not be parsed: the first columns must be "
+    "{required},UniqID (or UniqueID). The FASTQ files were cataloged from disk; "
+    "sample metadata was skipped until the mapfile is fixed.")
+
+
+def _broken_mapfile_detail(header):
+    got = ",".join(h.strip() for h in header[:5]) if header else "(empty/unreadable)"
+    return (_BROKEN_MAPFILE_DETAIL.format(required=",".join(REQUIRED_COLUMNS))
+            + f" Got: {got}.")
 
 
 def _owner_name(uid, cache):
@@ -37,6 +71,34 @@ def _stat_owner(path, cache):
     except OSError:
         return None, None, None
     return st.st_uid, _owner_name(st.st_uid, cache), st.st_size
+
+
+_DIRECTION_RE = re.compile(r"(?:^|[._-])(?:R?([12]))\.fastq\.gz$", re.IGNORECASE)
+
+
+def _infer_direction(filename):
+    """Best-effort R1/R2 from a FASTQ filename (e.g. x_1.fastq.gz, x_R2.fastq.gz)."""
+    m = _DIRECTION_RE.search(filename)
+    return f"R{m.group(1)}" if m else None
+
+
+def _discover_disk_files(data_dir, seqdata_root, uid_cache):
+    """Find *.fastq.gz under data_dir (recursively; files may be nested in subdirs).
+
+    Returns ({basename: {"rel_path", "size", "uid", "name"}}, collisions), where
+    rel_path is relative to seqdata_root and collisions lists basenames that appear
+    in more than one subdirectory (last one wins).
+    """
+    found = {}
+    collisions = []
+    for p in sorted(glob.glob(os.path.join(data_dir, "**", "*.fastq.gz"), recursive=True)):
+        fn = os.path.basename(p)
+        if fn in found:
+            collisions.append(fn)
+        uid, name, size = _stat_owner(p, uid_cache)
+        found[fn] = {"rel_path": os.path.relpath(p, seqdata_root),
+                     "size": size, "uid": uid, "name": name}
+    return found, collisions
 
 
 def read_map_file(map_file_path):
@@ -84,6 +146,15 @@ def _read_csv(metadata_path):
     return header, rows
 
 
+def _mapfile_header_ok(mapfile_path):
+    """(header_is_valid, header_list) for a mapfile, tolerating read errors."""
+    try:
+        header, _ = _read_csv(mapfile_path)
+    except OSError:
+        return False, []
+    return header_uniqid_column(header) is not None, header
+
+
 def _known_uniq_ids(conn, exclude_project):
     cur = conn.execute(
         "SELECT uniq_id, project_id FROM samples WHERE uniq_id IS NOT NULL AND project_id != ?",
@@ -92,20 +163,25 @@ def _known_uniq_ids(conn, exclude_project):
 
 
 def _upsert_project(conn, project_id, source, number, description, metadata_filename,
-                    seq_data_relpath, seqdata_root=None, owner_uid=None, owner_name=None):
+                    seq_data_relpath, seqdata_root=None, owner_uid=None, owner_name=None,
+                    metadata_status="ok", metadata_detail=None):
     conn.execute(
         """INSERT INTO projects
              (project_id, source, project_number, description, metadata_file,
-              seq_data_relpath, seqdata_root, owner_uid, owner_name, date_ingested)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              seq_data_relpath, seqdata_root, owner_uid, owner_name, date_ingested,
+              metadata_status, metadata_detail)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id) DO UPDATE SET
              source=excluded.source, project_number=excluded.project_number,
              description=excluded.description, metadata_file=excluded.metadata_file,
              seq_data_relpath=excluded.seq_data_relpath,
              seqdata_root=excluded.seqdata_root, owner_uid=excluded.owner_uid,
-             owner_name=excluded.owner_name, date_ingested=excluded.date_ingested""",
+             owner_name=excluded.owner_name, date_ingested=excluded.date_ingested,
+             metadata_status=excluded.metadata_status,
+             metadata_detail=excluded.metadata_detail""",
         (project_id, source, number, description, metadata_filename,
-         seq_data_relpath, seqdata_root, owner_uid, owner_name, date.today().isoformat()))
+         seq_data_relpath, seqdata_root, owner_uid, owner_name, date.today().isoformat(),
+         metadata_status, metadata_detail))
 
 
 def _upsert_sample(conn, project_id, sample_id, taxon, uniq_id, extra_json):
@@ -143,8 +219,15 @@ def _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
     return was_new
 
 
-def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, prune=False):
-    """Validate and load one project.
+def _empty_stats():
+    return {"new_samples": 0, "changed_samples": 0, "new_files": 0,
+            "changed_taxa": set(), "orphan_samples": [], "pruned_samples": [],
+            "pruned_files": 0, "metadata_status": "ok", "metadata_detail": None}
+
+
+def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, prune=False,
+                   metadata_status="ok", metadata_detail=None):
+    """Validate and load one project from its mapfile.
 
     Returns (project_id, findings, status, stats). `stats` summarizes what the
     upsert changed so the caller can drive integrity/taxonomy only where needed:
@@ -155,42 +238,42 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
       orphan_samples -- sample_ids in the catalog but absent from this CSV
       pruned_samples -- sample_ids deleted from the catalog (only when prune=True)
       pruned_files   -- count of stale file rows deleted (only when prune=True)
+      metadata_status/metadata_detail -- mapfile<->folder pairing health (see module doc)
+
+    FASTQ files are discovered recursively under the data dir, so files nested in
+    subdirectories are found and their real (nested) rel_path is recorded.
 
     With prune=True, rows that the (corrected) CSV no longer references are
     deleted: samples dropped from the CSV (their files cascade) and any file row
     whose filename is no longer listed (e.g. a filename typo fixed in place).
-    This clears the samples/files that a stale mapfile left flagged as missing;
-    the caller should re-run `validate --seqdata-root` afterwards to refresh
-    data_check_issues and the checksum/status columns. On a FAIL (nothing
-    written), stats is all-zero/empty and no pruning happens.
+    On a FAIL (nothing written), stats is all-zero/empty and no pruning happens.
     """
     metadata_filename = os.path.basename(metadata_path)
     project_id, source, number, description = parse_project_id(seq_data_relpath)
 
     header, rows = _read_csv(metadata_path)
 
-    disk_filenames = None
+    disk = None  # {basename: {rel_path,size,uid,name}}
     proj_owner_uid = proj_owner_name = None
-    disk_stats = {}  # filename -> (size_bytes, owner_uid, owner_name)
+    collisions = []
     uid_cache = {}
     if seqdata_root:
         data_dir = os.path.join(seqdata_root, seq_data_relpath)
         proj_owner_uid, proj_owner_name, _ = _stat_owner(data_dir, uid_cache)
-        disk_filenames = set()
-        for p in glob.glob(os.path.join(data_dir, "*.fastq.gz")):
-            fn = os.path.basename(p)
-            disk_filenames.add(fn)
-            uid, name, size = _stat_owner(p, uid_cache)
-            disk_stats[fn] = (size, uid, name)
+        disk, collisions = _discover_disk_files(data_dir, seqdata_root, uid_cache)
 
+    disk_filenames = set(disk) if disk is not None else None
     findings, has_fail = validate_metadata(
         metadata_filename, header, rows, disk_filenames,
         known_uniq_ids=_known_uniq_ids(conn, project_id))
+    for fn in collisions:
+        findings.append(Finding(WARN, f"'{fn}' appears in more than one subdirectory; "
+                                       "the last one found was cataloged"))
     status = overall_status(findings)
 
-    stats = {"new_samples": 0, "changed_samples": 0, "new_files": 0,
-             "changed_taxa": set(), "orphan_samples": [], "pruned_samples": [],
-             "pruned_files": 0}
+    stats = _empty_stats()
+    stats["metadata_status"] = metadata_status
+    stats["metadata_detail"] = metadata_detail
     if has_fail:
         return project_id, findings, status, stats
 
@@ -198,7 +281,8 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
     abs_root = os.path.abspath(seqdata_root) if seqdata_root else None
     _upsert_project(conn, project_id, source, number, description,
                     metadata_filename, seq_data_relpath, seqdata_root=abs_root,
-                    owner_uid=proj_owner_uid, owner_name=proj_owner_name)
+                    owner_uid=proj_owner_uid, owner_name=proj_owner_name,
+                    metadata_status=metadata_status, metadata_detail=metadata_detail)
 
     # Snapshot existing samples so we can tell new vs changed vs (dropped) orphans.
     existing = {r["sample_id"]: r["taxon"] for r in conn.execute(
@@ -227,8 +311,11 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
         for direction in ("R1", "R2"):
             filename = row[direction].strip()
             csv_files.add(filename)
-            rel_path = os.path.join(seq_data_relpath, filename)
-            size, uid, name = disk_stats.get(filename, (None, None, None))
+            info = disk.get(filename) if disk else None
+            rel_path = info["rel_path"] if info else os.path.join(seq_data_relpath, filename)
+            size = info["size"] if info else None
+            uid = info["uid"] if info else None
+            name = info["name"] if info else None
             if _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
                             size_bytes=size, owner_uid=uid, owner_name=name):
                 stats["new_files"] += 1
@@ -250,6 +337,121 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
 
     conn.commit()
     return project_id, findings, status, stats
+
+
+def _ingest_diskonly(conn, project_id, data_dir, seqdata_root, metadata_status, detail):
+    """Catalog a project's on-disk FASTQ files with no sample metadata.
+
+    Used when a project has no usable mapfile (missing_mapfile / broken_mapfile):
+    the project row is created (flagged with metadata_status) and every *.fastq.gz
+    found on disk is cataloged with sample_pk NULL and a best-effort R1/R2 guess, so
+    the files are visible and can still be integrity-checked. Returns a stats dict.
+    """
+    uid_cache = {}
+    project_id_, source, number, description = parse_project_id(project_id)
+    abs_root = os.path.abspath(seqdata_root) if seqdata_root else None
+    proj_uid = proj_name = None
+    disk = {}
+    if data_dir:
+        proj_uid, proj_name, _ = _stat_owner(data_dir, uid_cache)
+        disk, _coll = _discover_disk_files(data_dir, seqdata_root, uid_cache)
+
+    _upsert_project(conn, project_id_, source, number, description, None, project_id,
+                    seqdata_root=abs_root, owner_uid=proj_uid, owner_name=proj_name,
+                    metadata_status=metadata_status, metadata_detail=detail)
+
+    stats = _empty_stats()
+    stats["metadata_status"] = metadata_status
+    stats["metadata_detail"] = detail
+    for fn, info in sorted(disk.items()):
+        if _upsert_file(conn, project_id_, None, _infer_direction(fn), fn,
+                        info["rel_path"], size_bytes=info["size"],
+                        owner_uid=info["uid"], owner_name=info["name"]):
+            stats["new_files"] += 1
+    conn.commit()
+    return stats
+
+
+def discover_projects(seqdata_root, metadata_root):
+    """Pair each project folder under seqdata_root with its metadata mapfile.
+
+    A project is any top-level directory in seqdata_root; its mapfile is
+    '<project>_mapfile.csv' in metadata_root. The union of both sides is returned
+    (so folders with no mapfile and mapfiles with no folder both surface).
+    Returns a list of {project_id, data_dir (abs or None), mapfile (path or None)}.
+    """
+    disk = {}
+    if seqdata_root and os.path.isdir(seqdata_root):
+        for name in sorted(os.listdir(seqdata_root)):
+            full = os.path.join(seqdata_root, name)
+            if os.path.isdir(full):
+                disk[name] = full
+    mapfiles = {}
+    if metadata_root and os.path.isdir(metadata_root):
+        for p in sorted(glob.glob(os.path.join(metadata_root, "*" + METADATA_SUFFIX))):
+            pid = os.path.basename(p)[:-len(METADATA_SUFFIX)]
+            mapfiles[pid] = p
+    return [{"project_id": pid, "data_dir": disk.get(pid), "mapfile": mapfiles.get(pid)}
+            for pid in sorted(set(disk) | set(mapfiles))]
+
+
+def ingest_tree(conn, seqdata_root, metadata_root, prune=False):
+    """Auto-discover and ingest every project under seqdata_root / metadata_root.
+
+    Each project folder is paired with its '<project>_mapfile.csv'. Pairing problems
+    are flagged on the project row (metadata_status) but never block ingest:
+      - folder + valid mapfile      -> samples + files (metadata_status 'ok')
+      - mapfile only (no folder)    -> samples from mapfile (metadata_status 'missing_seqdata')
+      - folder only (no mapfile)    -> files from disk, no samples ('missing_mapfile')
+      - folder + broken mapfile     -> files from disk, no samples ('broken_mapfile')
+    Returns the same list of (project_id, findings, status, stats) as ingest_map_file.
+    """
+    results = []
+    for proj in discover_projects(seqdata_root, metadata_root):
+        pid = proj["project_id"]
+        data_dir = proj["data_dir"]
+        mapfile = proj["mapfile"]
+        has_dir = data_dir is not None
+
+        if mapfile is None:  # folder on disk, no mapfile
+            stats = _ingest_diskonly(conn, pid, data_dir, seqdata_root,
+                                     "missing_mapfile", MISSING_MAPFILE_DETAIL)
+            results.append((pid, [Finding(WARN, "no mapfile for this project folder; "
+                                                "files cataloged without sample metadata")],
+                            "warn", stats))
+            continue
+
+        header_ok, header = _mapfile_header_ok(mapfile)
+        if not header_ok:  # mapfile present but unparseable
+            detail = _broken_mapfile_detail(header)
+            stats = _ingest_diskonly(conn, pid, data_dir, seqdata_root,
+                                     "broken_mapfile", detail)
+            results.append((pid, [Finding(FAIL, "mapfile header is malformed; "
+                                                "sample metadata skipped")],
+                            "fail", stats))
+            continue
+
+        # Parseable mapfile: normal load. Flag missing_seqdata when no folder exists.
+        mstatus = "ok" if has_dir else "missing_seqdata"
+        detail = None if has_dir else MISSING_SEQDATA_DETAIL
+        pid_, findings, status, stats = ingest_project(
+            conn, mapfile, pid, seqdata_root=seqdata_root, prune=prune,
+            metadata_status=mstatus, metadata_detail=detail)
+
+        if status == "fail":
+            # Valid mapfile structure but content failed validation (e.g. duplicate
+            # IDs). Still record the project + its on-disk files so nothing is hidden;
+            # the failure stays in findings and is logged by the caller.
+            stats = _ingest_diskonly(conn, pid, data_dir, seqdata_root, mstatus, detail)
+            findings = findings  # keep the FAIL findings
+        elif not has_dir:
+            findings = [Finding(WARN, "no project folder on disk for this mapfile")] + findings
+            if status == "pass":
+                status = "warn"
+        stats["metadata_status"] = mstatus
+        stats["metadata_detail"] = detail
+        results.append((pid_, findings, status, stats))
+    return results
 
 
 def ingest_map_file(conn, map_file_path, seqdata_root=None, metadata_root=None, prune=False):

@@ -119,8 +119,9 @@ def check_data_files(conn, project_id, seq_data_relpath, seqdata_root):
     if not os.path.isdir(data_dir):
         return {"status": "unchecked", "n_missing": None, "n_orphan": None,
                 "missing": [], "orphan": []}
+    # Recursive: FASTQ may be nested in subdirs (matches ingest's discovery).
     disk = {os.path.basename(p)
-            for p in glob.glob(os.path.join(data_dir, "*.fastq.gz"))}
+            for p in glob.glob(os.path.join(data_dir, "**", "*.fastq.gz"), recursive=True)}
     missing = sorted(db_files - disk)
     orphan = sorted(disk - db_files)
     status = "ok" if not missing and not orphan else "issues"

@@ -43,6 +43,26 @@ _ISSUE_DETAIL = {
     "orphan":               "Sequence file is present on disk but is not referenced by any mapfile row.",
 }
 
+# projects.metadata_status -> (short label, plain-english meaning). The full
+# per-project sentence is stored in metadata_detail; this is the at-a-glance label.
+_MAPFILE_LABEL = {
+    "ok":              "OK",
+    "missing_mapfile": "no mapfile",
+    "missing_seqdata": "no data folder",
+    "broken_mapfile":  "broken mapfile",
+}
+_MAPFILE_DETAIL = {
+    "missing_mapfile": "A project folder is on disk but has no '<project>_mapfile.csv' "
+                       "in the metadata directory. Files were cataloged from disk; "
+                       "sample metadata (taxon, UniqID) is missing until a mapfile is added.",
+    "missing_seqdata": "A mapfile exists but no matching project folder was found in the "
+                       "sequence-data directory. Samples were cataloged from the mapfile, "
+                       "but no files are on disk.",
+    "broken_mapfile":  "The mapfile is present but its header is malformed (expected "
+                       "ID,R1,R2,Taxon,UniqID). Files were cataloged from disk; sample "
+                       "metadata was skipped until the mapfile is fixed.",
+}
+
 
 def _sql(db_path, query):
     con = sqlite3.connect(db_path)
@@ -112,6 +132,8 @@ def load_projects(db_path, mtime):
                (SELECT MAX(f.integrity_date) FROM files f
                   WHERE f.project_id = p.project_id) AS integrity_date,
                p.owner_name, p.seq_data_relpath AS data_dir,
+               COALESCE(p.metadata_status, 'ok') AS metadata_status,
+               p.metadata_detail,
                p.data_check_date, p.date_ingested
         FROM projects p
         ORDER BY p.project_id""")
@@ -152,6 +174,10 @@ def checksum_label(row):
     if row["n_uncompared"]:
         return f"incomplete ({int(row['n_uncompared'])} uncompared)"
     return "verified"
+
+
+def mapfile_label(row):
+    return _MAPFILE_LABEL.get(row["metadata_status"], row["metadata_status"])
 
 
 def integrity_label(row):
@@ -261,6 +287,7 @@ def projects_view(df, issues):
     with st.sidebar:
         st.header("Filters")
         search = st.text_input("Search (project, description)")
+        mapfile_only = st.checkbox("Only mapfile issues")
         data_only = st.checkbox("Only data-files issues")
         cs_only = st.checkbox("Only checksum issues")
         integ_only = st.checkbox("Only integrity issues")
@@ -270,6 +297,8 @@ def projects_view(df, issues):
         mask = (view["project_id"].str.lower().str.contains(s, na=False)
                 | view["description"].str.lower().str.contains(s, na=False))
         view = view[mask]
+    if mapfile_only:
+        view = view[view["metadata_status"] != "ok"]
     if data_only:
         view = view[view["data_check_status"] == "issues"]
     if cs_only:
@@ -278,13 +307,15 @@ def projects_view(df, issues):
         view = view[view["n_integrity_bad"] > 0]
 
     show = view.copy()
+    show["mapfile"] = show.apply(mapfile_label, axis=1) if len(show) else []
     show["data_files"] = show.apply(data_files_label, axis=1) if len(show) else []
     show["checksum"] = show.apply(checksum_label, axis=1) if len(show) else []
     show["integrity"] = show.apply(integrity_label, axis=1) if len(show) else []
-    st.caption(f"{len(view)} of {len(df)} projects. Select a row to list its "
-               "data_files issues below (files missing from disk / missing from mapfile).")
+    st.caption(f"{len(view)} of {len(df)} projects. 'mapfile' flags a folder with no "
+               "mapfile, a mapfile with no folder, or a broken mapfile. Select a row for "
+               "its mapfile explanation + data-files issues below.")
     cols = ["project_id", "source", "description", "n_samples", "n_files",
-            "data_files", "checksum", "integrity", "owner_name", "data_dir",
+            "mapfile", "data_files", "checksum", "integrity", "owner_name", "data_dir",
             "date_ingested"]
     event = st.dataframe(show[cols], width="stretch", hide_index=True,
                          on_select="rerun", selection_mode="single-row",
@@ -293,7 +324,12 @@ def projects_view(df, issues):
 
     sel = event.selection.rows if event and event.selection else []
     if sel:
-        pid = show.iloc[sel[0]]["project_id"]
+        prow = show.iloc[sel[0]]
+        pid = prow["project_id"]
+        mstatus = prow["metadata_status"]
+        if mstatus != "ok":
+            detail = prow.get("metadata_detail") or _MAPFILE_DETAIL.get(mstatus, "")
+            st.warning(f"**Mapfile issue ({_MAPFILE_LABEL.get(mstatus, mstatus)}):** {detail}")
         sub = issues[issues["project_id"] == pid].copy()
         st.subheader(f"Data-files issues: {pid}")
         if len(sub):

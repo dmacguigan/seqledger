@@ -36,6 +36,8 @@ _MIGRATIONS = [
     ("projects", "data_check_n_missing", "INTEGER"),
     ("projects", "data_check_n_orphan", "INTEGER"),
     ("projects", "data_check_date", "TEXT"),
+    ("projects", "metadata_status", "TEXT"),
+    ("projects", "metadata_detail", "TEXT"),
     ("files", "owner_uid", "INTEGER"),
     ("files", "owner_name", "TEXT"),
     ("files", "integrity_status", "TEXT"),

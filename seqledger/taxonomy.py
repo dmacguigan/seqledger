@@ -347,7 +347,12 @@ def _resolve_one(idx, taxon, name_index=None):
                 if sp:
                     scored = sorted(sp, key=lambda r: _levenshtein(cand.lower(), r[1].lower()))
                     best_taxid, best_name = scored[0]
-                    if _levenshtein(cand.lower(), best_name.lower()) <= max(2, -(-len(epithet) // 3)):
+                    best_dist = _levenshtein(cand.lower(), best_name.lower())
+                    # Accept a species only for a plausible typo (<=2 edits, and fewer
+                    # edits than the epithet is long). A novel/undescribed epithet with
+                    # no close real species falls through to genus rank rather than
+                    # being silently renamed to the nearest catalogued species.
+                    if best_dist <= 2 and best_dist < len(epithet):
                         d["match_type"] = "fuzzy_species"
                         d["clean"] = cand
                         d["alternatives"] = " | ".join(f"{n} [{i}]" for i, n in scored[:5])

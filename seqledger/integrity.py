@@ -64,6 +64,7 @@ def check_fastq_gz(path, chunk_size=1 << 20):
     """
     n_lines = 0
     ended_nl = True
+    tail = b""  # last <=2 decompressed bytes, to spot a trailing blank line
     try:
         with _fastgz.open(path, "rb") as fh:
             while True:
@@ -72,11 +73,14 @@ def check_fastq_gz(path, chunk_size=1 << 20):
                     break
                 n_lines += chunk.count(b"\n")
                 ended_nl = chunk.endswith(b"\n")
+                tail = (tail + chunk)[-2:]
     except _GZIP_ERRORS as e:
         return {"status": GZIP_ERROR, "n_reads": None, "detail": str(e)}
 
     if not ended_nl:  # final record without a trailing newline still counts
         n_lines += 1
+    elif tail == b"\n\n":  # tolerate a single trailing blank line (common editor artifact)
+        n_lines -= 1
     if n_lines % 4 != 0:
         return {"status": FORMAT_ERROR, "n_reads": None,
                 "detail": f"line count {n_lines} is not a multiple of 4"}
@@ -232,6 +236,12 @@ def _compute_results(rows, seqdata_root, jobs, progress, recheck, on_checked=Non
     return results
 
 
+def _sum_reads(vals):
+    """Sum read counts for one direction (list may hold Nones); None if all unknown."""
+    nums = [v for v in (vals or []) if v is not None]
+    return sum(nums) if nums else None
+
+
 def aggregate_from_db(conn, project_ids, log=True):
     """Summarize per-project integrity + R1/R2 parity by reading the files table.
 
@@ -248,19 +258,27 @@ def aggregate_from_db(conn, project_ids, log=True):
             "FROM files WHERE project_id=?", (pid,)).fetchall()
         s = {"n_files": 0, "n_ok": 0, "n_gzip_error": 0, "n_format_error": 0,
              "n_unchecked": 0, "parity_warnings": []}
-        mates = {}  # sample_pk -> {direction: n_reads}
+        mates = {}  # sample_pk -> {direction: [n_reads, ...]} (a sample may be lane-split)
         for r in rows:
             status = r["integrity_status"] or UNCHECKED
             s["n_files"] += 1
             s[{OK: "n_ok", GZIP_ERROR: "n_gzip_error", FORMAT_ERROR: "n_format_error",
                UNCHECKED: "n_unchecked"}.get(status, "n_unchecked")] += 1
-            if r["sample_pk"] is not None and status == OK:
-                mates.setdefault(r["sample_pk"], {})[r["direction"]] = r["n_reads"]
+            if status == OK:
+                if r["n_reads"] == 0:
+                    s["parity_warnings"].append(
+                        f"{r['direction'] or 'file'} for sample_pk={r['sample_pk']} "
+                        "has 0 reads (empty file / failed transfer?)")
+                if r["sample_pk"] is not None:
+                    mates.setdefault(r["sample_pk"], {}).setdefault(
+                        r["direction"], []).append(r["n_reads"])
         for sample_pk, rc in mates.items():
-            if (rc.get("R1") is not None and rc.get("R2") is not None
-                    and rc["R1"] != rc["R2"]):
+            # Sum per direction so lane-split samples (L001/L002) compare correctly
+            # instead of one arbitrary lane overwriting another.
+            r1, r2 = _sum_reads(rc.get("R1")), _sum_reads(rc.get("R2"))
+            if r1 is not None and r2 is not None and r1 != r2:
                 s["parity_warnings"].append(
-                    f"sample_pk={sample_pk}: R1 has {rc['R1']} reads, R2 has {rc['R2']}")
+                    f"sample_pk={sample_pk}: R1 has {r1} reads, R2 has {r2}")
         if s["n_gzip_error"] or s["n_format_error"]:
             s["status"] = "fail"
         elif s["parity_warnings"] or s["n_unchecked"]:

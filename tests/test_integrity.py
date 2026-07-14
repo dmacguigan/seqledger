@@ -315,3 +315,56 @@ def test_emit_json_works_on_readonly_connection(tmp_path):
     ro.close()
     assert len(payload["results"]) == 2
     assert all(r["status"] == "ok" for r in payload["results"].values())
+
+
+# ---- data-quality fixes ----------------------------------------------------
+
+def test_direction_regex_matches_real_naming():
+    inf = oingest._infer_direction
+    assert inf("s1_1.fastq.gz") == "R1"
+    assert inf("s1_2.fastq.gz") == "R2"
+    assert inf("Sample_S1_L001_R1_001.fastq.gz") == "R1"   # canonical bcl2fastq
+    assert inf("Sample_S1_L002_R2_001.fastq.gz") == "R2"
+    assert inf("lib_1.fq.gz") == "R1"                       # .fq.gz
+    assert inf("A_R2.fq.gz") == "R2"
+    assert inf("sample.R1.fastq.gz") == "R1"
+    assert inf("nothing_here.txt") is None
+
+
+def test_trailing_blank_line_tolerated(tmp_path):
+    p = str(tmp_path / "a.fastq.gz")
+    with gzip.open(p, "wb") as f:
+        f.write(b"@r1\nACGT\n+\nIIII\n\n")  # one record + a trailing blank line
+    res = oint.check_fastq_gz(p)
+    assert res["status"] == oint.OK and res["n_reads"] == 1
+
+
+def test_empty_fastq_flagged_as_zero_reads(tmp_path):
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    _write_gz(root, "s1_1.fastq.gz", b"")  # empty but valid gzip -> 0 reads
+    res = oint.check_catalog_integrity(conn, seqdata_root=root)["genohub-1_X"]
+    assert res["status"] == "warn"
+    assert any("0 reads" in w for w in res["parity_warnings"])
+
+
+def test_parity_sums_lane_split(tmp_path):
+    # Two lanes per direction: totals match (2+3 == 4+1) so NO parity warning,
+    # even though individual lane counts differ -- the old code compared one lane.
+    conn, root = _setup(tmp_path, [("s1","s1_1.fastq.gz","s1_2.fastq.gz","Gadus","U1")])
+    # give sample s1 a second lane per direction with differing per-lane counts
+    _write_gz(root, "s1_1.fastq.gz", b"@a\nAC\n+\nII\n@b\nGT\n+\nII\n")  # 2 reads
+    _write_gz(root, "s1_2.fastq.gz", b"@a\nAC\n+\nII\n@b\nGT\n+\nII\n@c\nAA\n+\nII\n@d\nTT\n+\nII\n")  # 4 reads
+    sk = conn.execute("SELECT sample_pk FROM samples WHERE sample_id='s1'").fetchone()[0]
+    import gzip as _gz
+    # add lane-2 files for the same sample/direction directly
+    for fn, direction, n in [("s1_L2_1.fastq.gz","R1",3),("s1_L2_2.fastq.gz","R2",1)]:
+        with _gz.open(os.path.join(root,"genohub-1_X",fn),"wb") as f:
+            f.write(b"".join(b"@x\nAC\n+\nII\n" for _ in range(n)))
+        conn.execute("INSERT INTO files(project_id,sample_pk,direction,filename,rel_path) VALUES(?,?,?,?,?)",
+                     ("genohub-1_X", sk, direction, fn, os.path.join("genohub-1_X",fn)))
+    conn.commit()
+    res = oint.check_catalog_integrity(conn, seqdata_root=root)["genohub-1_X"]
+    # R1 total = 2+3 = 5, R2 total = 4+1 = 5 -> equal -> no parity warning
+    parity = [w for w in res["parity_warnings"] if "R1 has" in w]
+    assert parity == [], parity

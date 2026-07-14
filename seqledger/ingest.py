@@ -77,11 +77,15 @@ def _stat_owner(path, cache):
     return st.st_uid, _owner_name(st.st_uid, cache), st.st_size
 
 
-_DIRECTION_RE = re.compile(r"(?:^|[._-])(?:R?([12]))\.fastq\.gz$", re.IGNORECASE)
+# R1/R2 from a FASTQ name: the read token (optionally 'R') followed by an optional
+# lane/chunk suffix (_001) and a .fastq.gz or .fq.gz extension. Matches bare
+# 'x_1.fastq.gz', 'x_R2.fq.gz', and canonical bcl2fastq 'S1_L001_R1_001.fastq.gz'.
+_DIRECTION_RE = re.compile(
+    r"(?:^|[._-])R?([12])(?:_\d+)?\.(?:fastq|fq)\.gz$", re.IGNORECASE)
 
 
 def _infer_direction(filename):
-    """Best-effort R1/R2 from a FASTQ filename (e.g. x_1.fastq.gz, x_R2.fastq.gz)."""
+    """Best-effort R1/R2 from a FASTQ filename (e.g. x_1.fastq.gz, S1_L001_R2_001.fq.gz)."""
     m = _DIRECTION_RE.search(filename)
     return f"R{m.group(1)}" if m else None
 

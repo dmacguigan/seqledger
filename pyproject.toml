@@ -9,7 +9,10 @@ description = "A SQLite-backed catalog + CLI + browse GUI for raw sequencing (FA
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Dan MacGuigan" }]
+authors = [
+    { name = "Dan MacGuigan" },
+    { name = "Claude (Anthropic)", email = "noreply@anthropic.com" },
+]
 keywords = ["bioinformatics", "fastq", "catalog", "hpc", "hydra", "data-management"]
 
 # Core tooling (init-db, ingest, checksums, validate, integrity, taxonomy, query)

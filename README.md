@@ -101,6 +101,26 @@ python odna.py --db oceandna_catalog.db integrity \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 #    (--seqdata-root is optional; each project's ingest-time root is used by default)
 
+# 4b-batch. integrity --batch: run the check on Hydra's I/O queue (lTIO.sq).
+#    The Store/NAS partition is only reachable from a compute node via the I/O
+#    queue, so --batch generates one qsub script per project and submits it there
+#    (respects --project to limit to one). Each remote job checks its project and
+#    writes results to <batch-dir>/results/<project>.json instead of the DB -- no
+#    two Hydra nodes ever write the shared SQLite catalog at once. The env inside
+#    each job is `source ~/.bashrc; conda activate odna`.
+#    Tunables: --slots (mthread slots + remote --jobs, default 4), --mem (GB/slot,
+#    default 2), --batch-dir (default ./integrity_batch), --no-submit (write the
+#    scripts but don't qsub). Note lTIO caps: 6 slots/user, 2 concurrent jobs,
+#    8G/slot, 72h wall -- with the default 4 slots a 2nd concurrent job queues.
+python odna.py --db oceandna_catalog.db integrity --batch \
+    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
+#    Once the jobs finish, merge their JSON results back into the catalog (this is
+#    the only step that writes the DB; runs locally + serially, then aggregates
+#    per-project summaries + validation_log the same as a live run):
+python odna.py --db oceandna_catalog.db integrity --collect integrity_batch/results
+#    Incremental skip still applies: a re-submitted job reads prior gz_ok/size
+#    from the DB and skips unchanged files that already passed.
+
 # 5. taxonomy: resolve free-text Taxon -> NCBI TaxID + lineage
 #    Downloads a pinned NCBI taxdump into <db dir>/.taxonomy (once), indexes it,
 #    resolves every distinct sample Taxon (exact, then genus-anchored fuzzy),

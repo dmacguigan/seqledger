@@ -121,6 +121,33 @@ def test_tree_broken_mapfile_flags_and_catalogs_disk(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 1
 
 
+def test_tree_valid_header_invalid_rows_flags_invalid_not_ok(tmp_path):
+    # Regression: a VALID header whose ROW content fails validation (a control row
+    # with an empty UniqID) must be flagged 'invalid_mapfile', NOT silently 'ok'.
+    seq, meta = _roots(tmp_path)
+    _gz(os.path.join(seq, "genohub-9_C", "s1_1.fastq.gz"))
+    _gz(os.path.join(seq, "genohub-9_C", "s1_2.fastq.gz"))
+    with open(os.path.join(meta, "genohub-9_C_mapfile.csv"), "w") as f:
+        f.write("ID,R1,R2,Taxon,UniqID\n")
+        f.write("s1,s1_1.fastq.gz,s1_2.fastq.gz,Gadus,U1\n")
+        f.write("Amp_neg_Plate1,c_1.fastq.gz,c_2.fastq.gz,control,\n")  # empty UniqID -> FAIL
+
+    conn = _fresh_db(tmp_path)
+    results = oingest.ingest_tree(conn, seq, meta)
+
+    assert results[0][2] == "fail"
+    row = conn.execute(
+        "SELECT metadata_status, metadata_detail FROM projects "
+        "WHERE project_id='genohub-9_C'").fetchone()
+    assert row["metadata_status"] == "invalid_mapfile"      # not 'ok'
+    assert "UniqID" in row["metadata_detail"] or "empty" in row["metadata_detail"].lower()
+    # files cataloged from disk, but NO samples loaded (content failed validation)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM files WHERE project_id='genohub-9_C'").fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM samples WHERE project_id='genohub-9_C'").fetchone()[0] == 0
+
+
 def test_discover_projects_unions_both_sides(tmp_path):
     seq, meta = _roots(tmp_path)
     os.makedirs(os.path.join(seq, "onlyfolder"))

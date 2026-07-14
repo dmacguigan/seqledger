@@ -60,6 +60,7 @@ _MAPFILE_LABEL = {
     "missing_mapfile": "no mapfile",
     "missing_seqdata": "no data folder",
     "broken_mapfile":  "broken mapfile",
+    "invalid_mapfile": "invalid rows",
 }
 _MAPFILE_DETAIL = {
     "unknown": "This catalog copy predates the mapfile-status check, or the status "
@@ -73,6 +74,10 @@ _MAPFILE_DETAIL = {
     "broken_mapfile":  "The mapfile is present but its header is malformed (expected "
                        "ID,R1,R2,Taxon,UniqID). Files were cataloged from disk; sample "
                        "metadata was skipped until the mapfile is fixed.",
+    "invalid_mapfile": "The mapfile header is valid but some rows failed validation "
+                       "(e.g. empty required fields, duplicate IDs), so no samples were "
+                       "loaded. Files were cataloged from disk. See the project's detail "
+                       "for the specific rows; fix them and re-ingest.",
 }
 
 

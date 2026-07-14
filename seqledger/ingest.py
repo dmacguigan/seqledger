@@ -11,6 +11,8 @@ Auto-discovery records a per-project `metadata_status` for pairing problems:
   missing_mapfile  project folder on disk, no mapfile -> files cataloged, no samples
   missing_seqdata  mapfile present, no project folder -> samples cataloged, no files
   broken_mapfile   mapfile present but header is malformed -> files cataloged, no samples
+  invalid_mapfile  header valid but row content fails validation (e.g. empty required
+                   field, duplicate/identical IDs) -> files cataloged, no samples
 In every case the project is still added to the catalog (so nothing is hidden).
 """
 
@@ -52,6 +54,22 @@ def _broken_mapfile_detail(header):
     got = ",".join(h.strip() for h in header[:5]) if header else "(empty/unreadable)"
     return (_BROKEN_MAPFILE_DETAIL.format(required=",".join(REQUIRED_COLUMNS))
             + f" Got: {got}.")
+
+
+_INVALID_MAPFILE_PREFIX = (
+    "The mapfile header is valid but some rows failed validation, so no samples were "
+    "loaded (the FASTQ files were still cataloged from disk). Fix the flagged rows in "
+    "the mapfile -- e.g. add UniqIDs for control rows, or remove them -- and re-ingest. "
+    "Problems: ")
+
+
+def _invalid_mapfile_detail(findings, max_items=5):
+    """One-line summary of the FAIL findings for a content-invalid mapfile."""
+    fails = [f.message for f in findings if f.level == FAIL]
+    shown = "; ".join(fails[:max_items])
+    if len(fails) > max_items:
+        shown += f"; (+{len(fails) - max_items} more)"
+    return _INVALID_MAPFILE_PREFIX + (shown or "row validation failed") + "."
 
 
 def _owner_name(uid, cache):
@@ -472,11 +490,14 @@ def ingest_tree(conn, seqdata_root, metadata_root, prune=False):
             metadata_status=mstatus, metadata_detail=detail)
 
         if status == "fail":
-            # Valid mapfile structure but content failed validation (e.g. duplicate
-            # IDs). Still record the project + its on-disk files so nothing is hidden;
-            # the failure stays in findings and is logged by the caller.
+            # Valid header but the ROW CONTENT failed validation (empty required
+            # field, duplicate/identical IDs, ...). ingest_project wrote nothing, so
+            # catalog the on-disk files and stamp a non-ok status -- otherwise the
+            # project row would masquerade as 'ok' while holding 0 samples. The
+            # detail summarizes the FAIL findings so the fix (edit the rows) is clear.
+            mstatus = "invalid_mapfile"
+            detail = _invalid_mapfile_detail(findings)
             stats = _ingest_diskonly(conn, pid, data_dir, seqdata_root, mstatus, detail)
-            findings = findings  # keep the FAIL findings
         elif not has_dir:
             findings = [Finding(WARN, "no project folder on disk for this mapfile")] + findings
             if status == "pass":

@@ -356,7 +356,8 @@ locally, then open `http://localhost:8501`. Read-only browsing plus a
 build-your-own selection view (sidebar):
 
 - **Projects** - per-project summary stats plus check fields: `mapfile`
-  (folder<->mapfile pairing: OK / no mapfile / no data folder / broken mapfile),
+  (folder<->mapfile pairing: OK / no mapfile / no data folder / broken mapfile /
+  invalid rows),
   `data_files` (mapfile <-> disk reciprocal: OK / "N missing, M orphan"), and
   `checksum` (Store vs P-drive: verified / "N mismatch" / incomplete). Filter to
   just the flagged ones ("Only mapfile issues" etc). Select a project row to see
@@ -412,7 +413,7 @@ seqledger --db catalog.db init-db --set io_queue=sThM.q   # any key
 | you see | it means / what to do |
 |---|---|
 | `ingest` prints `WARNING: discovered 0 projects` | the roots are empty/unmounted/mistyped, or no `<project>_mapfile.csv` files — check the paths and that Store/NAS is mounted. |
-| Projects view `mapfile` = `no mapfile` / `broken mapfile` / `no data folder` | a project folder has no (or a malformed) mapfile, or a mapfile has no folder. Select the row for the full explanation; the files are still cataloged. |
+| Projects view `mapfile` = `no mapfile` / `broken mapfile` / `no data folder` / `invalid rows` | a project folder has no mapfile, a malformed header, no folder, or (`invalid rows`) a valid header whose rows failed validation (empty required field, duplicate IDs) so no samples loaded. Select the row for the specific problem; the files are still cataloged. Fix the mapfile and re-ingest. |
 | `data_files` = "N missing / M orphan" | files listed in the mapfile aren't on disk (missing), or on-disk FASTQ aren't in the mapfile (orphan). |
 | a batch integrity/copy job "fails" near 72h | it hit the lTIO wall/CPU cap; the per-project checkpoint is saved — just **re-`qsub`** (integrity resumes; rclone `--checksum` skips copied files). |
 | `integrity --collect` skips a file "no .done marker" | that project's job is still running or was killed — let it finish (or resubmit), then re-collect. |

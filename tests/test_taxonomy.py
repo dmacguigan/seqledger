@@ -190,3 +190,24 @@ def test_resolve_catalog_and_apply(tmp_path):
     # scope="all" re-resolves everything, including the confirmed taxon
     allres = otax.resolve_catalog(conn, taxdir, scope="all")
     assert sorted(d["taxon"] for d in allres) == ["Gadus morhua", "Zzz qqq"]
+
+
+def test_apply_review_skips_bad_rows(tmp_path):
+    taxdir = _write_taxdump(str(tmp_path / "tax"))
+    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
+    odb.init_db(conn)
+    conn.execute("INSERT INTO taxa(taxon, match_type) VALUES ('Gadus morhua','unresolved')")
+    conn.commit()
+    csv_path = os.path.join(tmp_path, "review.csv")
+    with open(csv_path, "w") as f:
+        f.write("taxon,confirmed_taxid\n")
+        f.write("Gadus morhua,8049\n")          # valid -> applied
+        f.write("Bad taxon,notanumber\n")       # non-numeric -> skipped
+        f.write("Ghost,99999999\n")             # not in taxdump -> skipped
+    applied, skipped = otax.apply_review(conn, taxdir, csv_path)
+    assert applied == 1
+    assert len(skipped) == 2
+    assert any("not a number" in m for m in skipped)
+    assert any("not found" in m for m in skipped)
+    row = conn.execute("SELECT confirmed, match_type FROM taxa WHERE taxon='Gadus morhua'").fetchone()
+    assert row["confirmed"] == 1 and row["match_type"] == "confirmed"

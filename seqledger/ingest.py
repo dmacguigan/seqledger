@@ -347,10 +347,15 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
             "DELETE FROM samples WHERE project_id=? AND sample_id=?",
             [(project_id, sid) for sid in stats["orphan_samples"]])
         stats["pruned_samples"] = list(stats["orphan_samples"])
-        placeholders = ",".join("?" * len(csv_files)) or "NULL"
-        cur = conn.execute(
-            f"DELETE FROM files WHERE project_id=? AND filename NOT IN ({placeholders})",
-            (project_id, *csv_files))
+        if csv_files:
+            placeholders = ",".join("?" * len(csv_files))
+            cur = conn.execute(
+                f"DELETE FROM files WHERE project_id=? AND filename NOT IN ({placeholders})",
+                (project_id, *csv_files))
+        else:
+            # Empty CSV: `filename NOT IN (NULL)` matches nothing (SQL 3-valued logic),
+            # so delete all this project's file rows explicitly instead.
+            cur = conn.execute("DELETE FROM files WHERE project_id=?", (project_id,))
         stats["pruned_files"] = cur.rowcount
 
     conn.commit()

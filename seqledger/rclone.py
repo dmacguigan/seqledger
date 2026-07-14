@@ -121,6 +121,9 @@ rm -f "$LIST"
 #$ -cwd
 
 {header_est}echo + `date` $JOB_NAME running on $HOSTNAME in $QUEUE with jobID=$JOB_ID
+# -notify sends SIGUSR1/2 before a wall-cap kill; resubmitting the SAME script
+# resumes (rclone --checksum skips files already copied).
+trap 'echo "= `date` notified (approaching the 72h wall) -- stopping; resubmit this script to resume"; exit 2' SIGUSR1 SIGUSR2
 module load {rclone_module}
 
 DEST={shlex.quote(dest)}

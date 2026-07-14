@@ -427,9 +427,13 @@ def _upsert_taxon(conn, d, today):
     vals = [d.get(c) for c in _TAXA_COLS] + [today]
     placeholders = ",".join("?" for _ in cols)
     updates = ",".join(f"{c}=excluded.{c}" for c in cols)
+    # Never let an automated re-resolve overwrite a user-confirmed taxon: a
+    # `resolve --redo` would otherwise flip its match_type back to a machine guess
+    # while leaving confirmed=1, so it reappears as "unresolved" in query/GUI.
     conn.execute(
         f"INSERT INTO taxa ({','.join(cols)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(taxon) DO UPDATE SET {updates}", vals)
+        f"ON CONFLICT(taxon) DO UPDATE SET {updates} WHERE COALESCE(taxa.confirmed, 0) = 0",
+        vals)
 
 
 def resolve_catalog(conn, taxdir, scope="new", redo=False):
@@ -494,23 +498,42 @@ def _apply_confirmed(conn, d, today):
 
 
 def apply_review(conn, taxdir, csv_path):
-    """Fold user-confirmed taxids from a review CSV back into `taxa`."""
+    """Fold user-confirmed taxids from a review CSV back into `taxa`.
+
+    The CSV is hand-edited (often in Excel), so each row is validated on its own:
+    a non-numeric or unresolvable confirmed_taxid is reported and skipped rather
+    than aborting the whole run (which would discard every good edit in the pass).
+    Returns (applied, skipped) where skipped is a list of "taxon: reason" strings.
+    """
     build_index(taxdir)
     idx = open_index(taxdir)
     today = date.today().isoformat()
-    n = 0
+    applied = 0
+    skipped = []
     try:
         with open(csv_path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
+                taxon = (row.get("taxon") or "").strip()
                 ct = (row.get("confirmed_taxid") or "").strip()
                 if not ct:
                     continue
-                d = _blank(row["taxon"], clean_taxon(row["taxon"]))
-                _fill_lineage(idx, d, int(ct))
+                if not taxon:
+                    skipped.append(f"(blank taxon): row has confirmed_taxid '{ct}'")
+                    continue
+                try:
+                    taxid = int(ct)
+                except ValueError:
+                    skipped.append(f"{taxon}: confirmed_taxid '{ct}' is not a number")
+                    continue
+                d = _blank(taxon, clean_taxon(taxon))
+                _fill_lineage(idx, d, taxid)
+                if d["sci_name"] is None:  # taxid not found in the taxdump
+                    skipped.append(f"{taxon}: taxid {taxid} not found in the NCBI taxdump")
+                    continue
                 d["match_type"] = "confirmed"
                 _apply_confirmed(conn, d, today)
-                n += 1
+                applied += 1
         conn.commit()
     finally:
         idx.close()
-    return n
+    return applied, skipped

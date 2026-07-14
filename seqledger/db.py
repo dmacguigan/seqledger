@@ -129,6 +129,10 @@ def _migrate(conn):
             conn.execute("ALTER TABLE files RENAME COLUMN role TO direction")
         elif "read" in fcols:
             conn.execute("ALTER TABLE files RENAME COLUMN read TO direction")
+        else:
+            # No known legacy name to rename; add the column so downstream queries
+            # (which all reference files.direction) never hit 'no such column'.
+            conn.execute("ALTER TABLE files ADD COLUMN direction TEXT")
 
 
 def init_db(conn, schema_path=SCHEMA_PATH):

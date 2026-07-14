@@ -368,3 +368,13 @@ def test_parity_sums_lane_split(tmp_path):
     # R1 total = 2+3 = 5, R2 total = 4+1 = 5 -> equal -> no parity warning
     parity = [w for w in res["parity_warnings"] if "R1 has" in w]
     assert parity == [], parity
+
+
+def test_migrate_adds_direction_when_no_legacy_name(tmp_path):
+    conn = odb.connect(os.path.join(tmp_path, "old.db"))
+    conn.executescript(
+        "CREATE TABLE projects (project_id TEXT PRIMARY KEY);"
+        "CREATE TABLE files (file_pk INTEGER PRIMARY KEY, project_id TEXT, filename TEXT);")
+    conn.commit()
+    odb._migrate(conn)
+    assert "direction" in {r["name"] for r in conn.execute("PRAGMA table_info(files)")}

@@ -16,8 +16,11 @@ import argparse
 import os
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
+import tarfile
+from urllib.error import URLError
 
 from seqledger import db as odb
 from seqledger import ingest as oingest
@@ -33,6 +36,13 @@ def _print_rows(rows, cols):
     print("\t".join(cols))
     for r in rows:
         print("\t".join("" if r[c] is None else str(r[c]) for c in cols))
+
+
+def _require_db(db_path):
+    """Exit with a plain message (not a traceback) if the catalog doesn't exist."""
+    if not os.path.exists(db_path):
+        sys.exit(f"no catalog at '{db_path}'. Create one with:\n"
+                 f"  seqledger.py --db {db_path} init-db\nthen ingest your data.")
 
 
 # init-db flag name -> config key. Flags let a lab retarget the tool without
@@ -121,6 +131,17 @@ def cmd_ingest(args):
     conn = odb.connect(args.db)
     odb.init_db(conn)
 
+    # Destructive: confirm before deleting rows a (possibly truncated) source no
+    # longer lists. Bypass with --yes for scripts / non-interactive runs.
+    if (args.prune or args.prune_projects) and not args.yes and sys.stdin.isatty():
+        flags = " + ".join(f for f, on in
+                           (("--prune", args.prune), ("--prune-projects", args.prune_projects)) if on)
+        resp = input(f"{flags} will DELETE catalog rows the source(s) no longer list "
+                     "(check for a truncated CSV first). Continue? [y/N] ")
+        if resp.strip().lower() not in ("y", "yes"):
+            conn.close()
+            sys.exit("aborted.")
+
     # Fail loudly (not silently-empty) when a root is missing/unmounted/mistyped --
     # the most likely first-run mistake, which otherwise reports "ingest complete"
     # over an empty catalog.
@@ -204,15 +225,24 @@ def cmd_ingest(args):
             print("(no new taxa to resolve)")
         else:
             taxdir = args.taxdir or _default_taxdir(args.db)
-            tax_results = otax.resolve_catalog(conn, taxdir, redo=False)
-            review = os.path.join(os.path.dirname(os.path.abspath(args.db)) or ".",
-                                  "taxonomy_review.csv")
-            otax.write_review_csv(tax_results, review)
-            n_flag = sum(1 for d in tax_results if d["match_type"] != "exact")
-            print(f"resolved {len(tax_results)} taxa ({n_flag} fuzzy/unresolved)")
-            if tax_results:
-                print(f"review + edit confirmed_taxid in: {review}")
-                print(f"then: seqledger.py --db {args.db} taxonomy apply --review {review}")
+            # The metadata ingest above is already committed. Resolving new taxa may
+            # download the NCBI taxdump (first run / offline node); don't let that
+            # failure surface as a traceback that makes the user think ingest failed.
+            try:
+                tax_results = otax.resolve_catalog(conn, taxdir, scope="new")
+            except (OSError, URLError, tarfile.TarError) as e:
+                tax_results = None
+                print(f"(taxonomy skipped: {e}) -- ingest succeeded; run "
+                      f"`seqledger.py --db {args.db} taxonomy resolve` when ready.")
+            if tax_results is not None:
+                review = os.path.join(os.path.dirname(os.path.abspath(args.db)) or ".",
+                                      "taxonomy_review.csv")
+                otax.write_review_csv(tax_results, review)
+                n_flag = sum(1 for d in tax_results if d["match_type"] != "exact")
+                print(f"resolved {len(tax_results)} taxa ({n_flag} fuzzy/unresolved)")
+                if tax_results:
+                    print(f"review + edit confirmed_taxid in: {review}")
+                    print(f"then: seqledger.py --db {args.db} taxonomy apply --review {review}")
 
     # Refresh the stored data-files + checksum state. Ingest changes what's
     # cataloged -- new/changed rows and, with --prune, deletions -- so the
@@ -290,6 +320,7 @@ def _checksum_label(cs):
 
 
 def cmd_validate(args):
+    _require_db(args.db)
     conn = odb.connect(args.db)
     results = ovalidate.validate_catalog(conn, seqdata_root=args.seqdata_root)
     conn.close()
@@ -349,6 +380,9 @@ def _batch_script(name, log_path, slots, mem, mres, run_cmd,
 #$ -cwd
 
 echo + `date` $JOB_NAME running on $HOSTNAME in $QUEUE with jobID=$JOB_ID
+# -notify sends SIGUSR1/2 before a wall/CPU-cap kill; log why we're stopping so a
+# novice knows to just resubmit (the per-project JSON checkpoint is already saved).
+trap 'echo "= `date` notified (approaching a queue cap) -- stopping; resubmit to resume"; exit 2' SIGUSR1 SIGUSR2
 source ~/.bashrc
 conda activate {conda_env}
 {run_cmd}
@@ -476,7 +510,8 @@ def cmd_integrity(args):
 
 
 def cmd_query(args):
-    conn = odb.connect(args.db)
+    _require_db(args.db)
+    conn = odb.connect_ro(args.db)  # read-only: a typo can't create a stray empty DB
     if args.what == "uniq-id":
         _print_rows(oquery.find_by_uniq_id(conn, args.term),
                     ["project_id", "sample_id", "taxon", "uniq_id"])
@@ -525,8 +560,11 @@ def cmd_taxonomy(args):
         print(f"review + edit confirmed_taxid in: {review}")
         print(f"then: seqledger.py --db {args.db} taxonomy apply --review {review}")
     elif args.action == "apply":
-        n = otax.apply_review(conn, taxdir, args.review)
-        print(f"applied {n} confirmed taxid(s)")
+        applied, skipped = otax.apply_review(conn, taxdir, args.review)
+        print(f"applied {applied} confirmed taxid(s)"
+              + (f", skipped {len(skipped)}" if skipped else ""))
+        for msg in skipped:
+            print(f"    SKIP: {msg}")
     conn.close()
 
 
@@ -551,6 +589,8 @@ def cmd_gui(args):
 def build_parser():
     p = argparse.ArgumentParser(description="Ocean DNA sequence data catalog CLI")
     p.add_argument("--db", default="catalog.db", help="path to catalog SQLite DB")
+    p.add_argument("--debug", action="store_true",
+                   help="show the full traceback on error instead of a one-line message")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pdb = sub.add_parser(
@@ -600,6 +640,8 @@ def build_parser():
                          "vanished from BOTH the seqdata and metadata dirs (cascades "
                          "to their samples/files). Refuses to run if the roots turn up "
                          "no projects, so a missing mount can't wipe the catalog.")
+    pi.add_argument("--yes", action="store_true",
+                    help="skip the confirmation prompt for --prune / --prune-projects")
     pi.set_defaults(func=cmd_ingest)
 
     pc = sub.add_parser("checksums", help="load + compare rclone md5sum output")
@@ -699,7 +741,14 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    args.func(args)
+    try:
+        args.func(args)
+    except (OSError, sqlite3.Error, ValueError) as e:
+        if getattr(args, "debug", False):
+            raise
+        # A plain one-line message instead of a raw traceback for the common
+        # mistakes (missing path/DB, bad input). Use --debug to see the traceback.
+        sys.exit(f"error: {e}")
 
 
 if __name__ == "__main__":

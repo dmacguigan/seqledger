@@ -102,6 +102,13 @@ def _check_path(path, cached=None, recheck=False):
     try:
         size = os.stat(path).st_size
     except OSError:
+        # A stat failure on a network mount is often transient (stale handle, EIO,
+        # a momentary unmount). If the file previously passed, keep that result
+        # (cached=True leaves the DB row unchanged) rather than downgrading a
+        # verified file to 'unchecked' and wiping its read count.
+        if not recheck and cached and cached.get("gz_ok") == 1 and cached.get("integrity_date"):
+            return {"status": OK, "n_reads": cached.get("n_reads"), "detail": None,
+                    "cached": True}
         return {"status": UNCHECKED, "n_reads": None, "detail": "not found on disk",
                 "cached": False}
     if (not recheck and cached and cached.get("gz_ok") == 1
@@ -397,6 +404,10 @@ def emit_project_json(conn, project_id, out_path, seqdata_root=None, jobs=None,
         print(f"resuming {project_id}: {len(seed)} file result(s) already recorded "
               f"in {out_path}", flush=True)
 
+    done_path = out_path + ".done"
+    if os.path.exists(done_path):  # a prior full run; this run supersedes it
+        os.remove(done_path)
+
     results = {}
     since = [0]
 
@@ -410,6 +421,10 @@ def emit_project_json(conn, project_id, out_path, seqdata_root=None, jobs=None,
     _compute_results(rows, seqdata_root, jobs, progress, recheck,
                      on_checked=on_checked, seed=seed, results=results)
     payload = _write_results_json(out_path, project_id, run_date, results)
+    # Mark completion: collect_json only merges projects whose job actually finished,
+    # so running early over checkpoint-partial JSONs can't record a bogus status.
+    with open(done_path, "w") as fh:
+        fh.write(run_date + "\n")
     if progress:
         print(f"wrote {len(results)} file result(s) for {project_id} -> {out_path}")
     return payload
@@ -432,12 +447,27 @@ def collect_json(conn, results_dir, progress=True):
     project_ids = set()
     n_files = 0
     for path in paths:
-        with open(path) as fh:
-            payload = json.load(fh)
+        # Only merge a project whose job wrote its completion marker; a running (or
+        # cap-killed) job leaves a checkpoint-partial JSON with no .done -- merging
+        # it would record an authoritative-looking status from half-checked data.
+        if not os.path.exists(path + ".done"):
+            if progress:
+                print(f"  skipping {os.path.basename(path)}: no .done marker "
+                      "(job still running or was killed -- resubmit, then re-collect)")
+            continue
+        try:
+            with open(path) as fh:
+                payload = json.load(fh)
+        except (OSError, ValueError):
+            if progress:
+                print(f"  skipping unreadable {os.path.basename(path)}")
+            continue
         pid = payload.get("project_id")
         run_date = payload.get("run_date") or today
         pfiles = payload.get("results", {})
         for pk_str, r in pfiles.items():
+            if not r.get("status"):
+                continue
             _persist(conn, int(pk_str),
                      {"status": r["status"], "n_reads": r.get("n_reads")}, run_date)
             n_files += 1

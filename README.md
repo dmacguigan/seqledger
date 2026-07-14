@@ -119,7 +119,12 @@ python odna.py --db oceandna_catalog.db integrity --batch \
 #    per-project summaries + validation_log the same as a live run):
 python odna.py --db oceandna_catalog.db integrity --collect integrity_batch/results
 #    Incremental skip still applies: a re-submitted job reads prior gz_ok/size
-#    from the DB and skips unchanged files that already passed.
+#    from the DB and skips unchanged files that already passed. To also avoid
+#    submitting a no-op job for a project that is already fully checked, add
+#    --only-unchecked (skips projects with no never-checked file; ignored under
+#    --force):
+python odna.py --db oceandna_catalog.db integrity --batch --only-unchecked \
+    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 
 # 5. taxonomy: resolve free-text Taxon -> NCBI TaxID + lineage
 #    Downloads a pinned NCBI taxdump into <db dir>/.taxonomy (once), indexes it,

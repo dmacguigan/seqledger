@@ -382,6 +382,13 @@ def cmd_integrity(args):
 
     if args.batch:
         projects = ointegrity.list_projects(conn, args.project)
+        # File-level skip already happens inside each remote job (it reads prior
+        # gz_ok/size from the DB and re-reads only changed files). --only-unchecked
+        # goes further and skips *submitting a job at all* for projects that have
+        # no never-checked files, so a fully-validated project costs no queue slot.
+        # --force means "re-read everything", so the filter is meaningless there.
+        if args.only_unchecked and not args.force:
+            projects = [p for p in projects if _has_unchecked_files(conn, p)]
         conn.close()
         _submit_batch(args, projects)
         return
@@ -513,6 +520,11 @@ def build_parser():
                           "(default 2; lTIO caps 8G/slot)")
     pin.add_argument("--no-submit", action="store_true",
                      help="with --batch, write the qsub scripts but do not run qsub")
+    pin.add_argument("--only-unchecked", action="store_true",
+                     help="with --batch, skip submitting a job for any project whose "
+                          "files have all been checked before (no never-checked file); "
+                          "avoids no-op jobs on the queue. Ignored with --force. Note "
+                          "each job already skips unchanged already-passed files.")
     pin.add_argument("--emit-json", metavar="PATH",
                      help="(used by batch jobs) check one --project and write results to "
                           "PATH as JSON instead of writing the DB")

@@ -454,6 +454,28 @@ def ingest_tree(conn, seqdata_root, metadata_root, prune=False):
     return results
 
 
+def prune_missing_projects(conn, seqdata_root, metadata_root):
+    """Delete catalog projects that vanished from BOTH roots (folder + mapfile gone).
+
+    Only for auto-discovery. Cascades to the project's samples/files/backups/etc.
+    Safety: if discovery turns up nothing (roots empty / unmounted / unreadable),
+    this refuses to prune and returns skipped=True, so a missing mount can't wipe
+    the catalog. Only projects whose stored seqdata_root matches this run's root are
+    eligible, so projects ingested from a different root are never touched.
+    Returns {"pruned": [project_id, ...], "skipped": bool}.
+    """
+    discovered = {p["project_id"] for p in discover_projects(seqdata_root, metadata_root)}
+    if not discovered:
+        return {"pruned": [], "skipped": True}
+    abs_root = os.path.abspath(seqdata_root)
+    in_db = [r["project_id"] for r in conn.execute(
+        "SELECT project_id FROM projects WHERE seqdata_root=?", (abs_root,))]
+    gone = sorted(pid for pid in in_db if pid not in discovered)
+    conn.executemany("DELETE FROM projects WHERE project_id=?", [(p,) for p in gone])
+    conn.commit()
+    return {"pruned": gone, "skipped": False}
+
+
 def ingest_map_file(conn, map_file_path, seqdata_root=None, metadata_root=None, prune=False):
     """Ingest all projects listed in a two-column map file.
 

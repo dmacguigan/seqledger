@@ -135,6 +135,67 @@ def test_discover_projects_unions_both_sides(tmp_path):
     assert found["both"]["data_dir"] and found["both"]["mapfile"]
 
 
+def test_prune_missing_projects_deletes_vanished(tmp_path):
+    seq, meta = _roots(tmp_path)
+    make_project(seq, "genohub-1_A", "genohub-1_A_mapfile.csv",
+                 [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
+    make_project(seq, "genohub-2_B", "genohub-2_B_mapfile.csv",
+                 [("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "Gadus", "U2")])
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, seq, meta)
+    assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
+
+    # B vanishes from both roots (folder + mapfile removed).
+    shutil = __import__("shutil")
+    shutil.rmtree(os.path.join(seq, "genohub-2_B"))
+    os.remove(os.path.join(meta, "genohub-2_B_mapfile.csv"))
+
+    res = oingest.prune_missing_projects(conn, seq, meta)
+    assert res["skipped"] is False
+    assert res["pruned"] == ["genohub-2_B"]
+    # project + its samples/files cascade-deleted; A untouched
+    assert [r["project_id"] for r in conn.execute("SELECT project_id FROM projects")] == \
+        ["genohub-1_A"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM samples WHERE project_id='genohub-2_B'").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM files WHERE project_id='genohub-2_B'").fetchone()[0] == 0
+
+
+def test_prune_missing_projects_refuses_when_nothing_discovered(tmp_path):
+    seq, meta = _roots(tmp_path)
+    make_project(seq, "genohub-1_A", "genohub-1_A_mapfile.csv",
+                 [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, seq, meta)
+
+    # Simulate an unmounted / empty root: discovery finds nothing -> must NOT prune.
+    empty = str(tmp_path / "empty_root")
+    os.makedirs(empty, exist_ok=True)
+    res = oingest.prune_missing_projects(conn, empty, empty)
+    assert res["skipped"] is True
+    assert res["pruned"] == []
+    assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1  # kept
+
+
+def test_prune_missing_projects_ignores_other_roots(tmp_path):
+    seq, meta = _roots(tmp_path)
+    make_project(seq, "genohub-1_A", "genohub-1_A_mapfile.csv",
+                 [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, seq, meta)
+
+    # A project stored under a DIFFERENT seqdata_root must not be pruned by a run
+    # over this root, even though it isn't discovered here.
+    conn.execute("INSERT INTO projects (project_id, seqdata_root) VALUES (?, ?)",
+                 ("other-proj", "/some/other/root"))
+    conn.commit()
+    res = oingest.prune_missing_projects(conn, seq, meta)
+    assert res["pruned"] == []  # nothing under this root vanished
+    assert conn.execute(
+        "SELECT COUNT(*) FROM projects WHERE project_id='other-proj'").fetchone()[0] == 1
+
+
 def test_tree_reingest_upgrades_missing_mapfile_to_ok(tmp_path):
     seq, meta = _roots(tmp_path)
     _gz(os.path.join(seq, "genohub-1_X", "s1_1.fastq.gz"))

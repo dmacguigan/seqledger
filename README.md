@@ -75,9 +75,14 @@ python odna.py --db oceandna_catalog.db init-db
 #    so re-running picks up added/fixed mapfiles (a missing_mapfile project flips to
 #    ok once its mapfile appears) and re-resolves changed names. These steps are
 #    gated so unchanged re-runs are cheap. Samples dropped from a CSV are reported
-#    but kept, not pruned (use --prune to remove). Use --skip-taxonomy to load
-#    metadata only. NOTE: the integrity byte-scan (4b) is NOT run by ingest -- it
-#    is slow, so run it separately when ready.
+#    but kept, not pruned (use --prune to remove them + stale file rows). A project
+#    that vanished from BOTH roots (folder + mapfile deleted) lingers unless you add
+#    --prune-projects, which deletes it (cascading to its samples/files); that step
+#    refuses to run if the roots turn up no projects, so a missing mount can't wipe
+#    the catalog. (Deleting only a mapfile flips the project to missing_mapfile and
+#    leaves its old samples in place.) Use --skip-taxonomy to load metadata only.
+#    NOTE: the integrity byte-scan (4b) is NOT run by ingest -- it is slow, so run
+#    it separately when ready.
 python odna.py --db oceandna_catalog.db ingest \
     --metadata-root ../raw_sequence_metadata \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data

@@ -130,6 +130,21 @@ def cmd_ingest(args):
     if args.prune and (tot_pruned_s or tot_pruned_f):
         print(f"pruned {tot_pruned_s} sample(s) and {tot_pruned_f} stale file row(s)")
 
+    if args.prune_projects:
+        print("\n== prune projects ==")
+        if args.map_file:
+            print("(ignored: --prune-projects only applies to auto-discovery, not a map file)")
+        else:
+            pr = oingest.prune_missing_projects(conn, args.seqdata_root, args.metadata_root)
+            if pr["skipped"]:
+                print("refusing to prune: no projects discovered under the roots "
+                      "(empty / unmounted / wrong path?)")
+            elif pr["pruned"]:
+                print(f"deleted {len(pr['pruned'])} vanished project(s) "
+                      f"(gone from disk + metadata): {', '.join(pr['pruned'])}")
+            else:
+                print("no vanished projects to prune")
+
     if not args.skip_taxonomy:
         print("\n== taxonomy resolve ==")
         if not _has_unresolved_taxa(conn):
@@ -479,6 +494,11 @@ def build_parser():
     pi.add_argument("--prune", action="store_true",
                     help="delete catalog samples/files the CSV no longer lists "
                          "(then re-run `validate --seqdata-root`)")
+    pi.add_argument("--prune-projects", action="store_true",
+                    help="auto-discovery only: delete whole catalog projects that "
+                         "vanished from BOTH the seqdata and metadata dirs (cascades "
+                         "to their samples/files). Refuses to run if the roots turn up "
+                         "no projects, so a missing mount can't wipe the catalog.")
     pi.set_defaults(func=cmd_ingest)
 
     pc = sub.add_parser("checksums", help="load + compare rclone md5sum output")

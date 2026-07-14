@@ -27,6 +27,22 @@ DB_PATH = os.environ.get("ODNA_DB", "oceandna_catalog.db")
 # Full absolute path when the seqdata_root was captured at ingest, else the relpath.
 _FULL_PATH = "COALESCE(p.seqdata_root || '/' || f.rel_path, f.rel_path)"
 
+# data_check_issues.kind -> (short label, one-line explanation). Legacy rows
+# ('missing'/'orphan', written before the kind rename) map to the same text so
+# older catalogs still read clearly without a re-validate.
+_ISSUE_LABEL = {
+    "missing from disk":    "missing from disk",
+    "missing":              "missing from disk",
+    "missing from mapfile": "missing from mapfile",
+    "orphan":               "missing from mapfile",
+}
+_ISSUE_DETAIL = {
+    "missing from disk":    "Sequence file is listed in the mapfile but was not found on disk.",
+    "missing":              "Sequence file is listed in the mapfile but was not found on disk.",
+    "missing from mapfile": "Sequence file is present on disk but is not referenced by any mapfile row.",
+    "orphan":               "Sequence file is present on disk but is not referenced by any mapfile row.",
+}
+
 
 def _sql(db_path, query):
     con = sqlite3.connect(db_path)
@@ -103,11 +119,13 @@ def load_projects(db_path, mtime):
 
 @st.cache_data(ttl=60)
 def load_data_issues(db_path, mtime):
-    return _sql(db_path, """
+    return _sql(db_path, f"""
         SELECT i.project_id, i.kind, i.filename,
+               {_FULL_PATH} AS full_path,
                s.sample_id, f.read, s.taxon, s.uniq_id
         FROM data_check_issues i
         LEFT JOIN files f ON f.project_id = i.project_id AND f.filename = i.filename
+        LEFT JOIN projects p ON p.project_id = i.project_id
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
         ORDER BY i.project_id, i.kind, i.filename""")
 
@@ -120,9 +138,9 @@ def data_files_label(row):
         return "unchecked"
     parts = []
     if row["data_check_n_missing"]:
-        parts.append(f"{int(row['data_check_n_missing'])} missing")
+        parts.append(f"{int(row['data_check_n_missing'])} missing from disk")
     if row["data_check_n_orphan"]:
-        parts.append(f"{int(row['data_check_n_orphan'])} orphan")
+        parts.append(f"{int(row['data_check_n_orphan'])} missing from mapfile")
     return ", ".join(parts) or "issues"
 
 
@@ -244,7 +262,7 @@ def projects_view(df, issues):
     show["checksum"] = show.apply(checksum_label, axis=1) if len(show) else []
     show["integrity"] = show.apply(integrity_label, axis=1) if len(show) else []
     st.caption(f"{len(view)} of {len(df)} projects. Select a row to list its "
-               "data_files issues below (missing / orphan files).")
+               "data_files issues below (files missing from disk / missing from mapfile).")
     cols = ["project_id", "source", "description", "n_samples", "n_files",
             "data_files", "checksum", "integrity", "owner_name", "data_dir",
             "date_ingested"]
@@ -256,12 +274,16 @@ def projects_view(df, issues):
     sel = event.selection.rows if event and event.selection else []
     if sel:
         pid = show.iloc[sel[0]]["project_id"]
-        sub = issues[issues["project_id"] == pid]
+        sub = issues[issues["project_id"] == pid].copy()
         st.subheader(f"Data-files issues: {pid}")
         if len(sub):
+            sub["issue"] = sub["kind"].map(_ISSUE_LABEL).fillna(sub["kind"])
+            sub["detail"] = sub["kind"].map(_ISSUE_DETAIL).fillna("")
             st.dataframe(
-                sub[["kind", "filename", "sample_id", "read", "taxon", "uniq_id"]],
-                width="stretch", hide_index=True)
+                sub[["issue", "detail", "filename", "full_path", "sample_id",
+                     "read", "taxon", "uniq_id"]],
+                width="stretch", hide_index=True,
+                column_config={"full_path": "expected path"})
             _download(sub, f"{pid}_data_issues.csv")
         else:
             st.info("No recorded data-files issues. "

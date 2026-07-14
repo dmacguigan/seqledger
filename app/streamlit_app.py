@@ -8,7 +8,7 @@ Views:
   Projects     one row per sequencing project, with summary stats + owner
   Files        one row per FASTQ, full absolute path, size, owner, backup status
   Taxonomy     interactive breadth of NCBI-resolved sample taxonomy
-  Custom table search + collect samples; export CSV + an rclone copy job for them
+  Grab & Go    search + collect samples; export CSV + an rclone copy job for them
 """
 
 import os
@@ -582,7 +582,7 @@ def custom_table_view(samples_df, paths_df):
 
     st.subheader("Search results")
     st.caption(f"{len(view)} match(es). Select rows and click **Add to custom table**. "
-               f"Custom table currently holds {len(cart)} sample(s).")
+               f"Grab & Go table currently holds {len(cart)} sample(s).")
     cols = ["project_id", "sample_id", "taxon", "tax_name", "uniq_id"]
     event = st.dataframe(
         view[cols], width="stretch", hide_index=True,
@@ -607,7 +607,7 @@ def custom_table_view(samples_df, paths_df):
         st.rerun()
 
     st.divider()
-    st.subheader(f"Custom table ({len(cart)} sample(s))")
+    st.subheader(f"Grab & Go table ({len(cart)} sample(s))")
     if not cart:
         st.info("No samples yet. Search above and add some.")
         return
@@ -628,9 +628,9 @@ def custom_table_view(samples_df, paths_df):
             r = table.iloc[i]
             cart.pop(_cart_key(r["project_id"], r["sample_id"]), None)
         st.rerun()
-    st.download_button("Download custom table CSV",
+    st.download_button("Download table CSV",
                        table[tcols].to_csv(index=False).encode(),
-                       "oceandna_custom_table.csv", "text/csv")
+                       "oceandna_grab_and_go.csv", "text/csv")
 
     # Files backing the selected samples: paths, sizes, source roots for rclone.
     fpaths = paths_df[paths_df.set_index(["project_id", "sample_id"]).index.isin(keyset)]
@@ -677,7 +677,7 @@ def main():
         return
 
     view_name = st.sidebar.radio(
-        "View", ["Samples", "Projects", "Files", "Taxonomy", "Custom table"])
+        "View", ["Samples", "Projects", "Files", "Taxonomy", "Grab & Go"])
     mtime = os.path.getmtime(DB_PATH)
     if view_name == "Samples":
         samples_view(load_samples(DB_PATH, mtime), load_files(DB_PATH, mtime))

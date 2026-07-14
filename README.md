@@ -191,7 +191,7 @@ build-your-own selection view (sidebar):
 - **Taxonomy** - interactive Plotly sunburst of the catalog's taxonomic breadth
   (filter by project, pick the deepest rank, toggle the `unknown` bucket) plus a
   per-rank sample-count bar chart. Populated by `taxonomy resolve`.
-- **Custom table** - build a hand-picked set of samples. Search by project,
+- **Grab & Go** - build a hand-picked set of samples. Search by project,
   taxonomy (taxon / NCBI name / lineage), sample ID, and UniqID, with a **regex
   toggle**; add matches (selected rows or all) to a running table that persists as
   you refine the search. Export the table to CSV, and generate an **rclone copy

@@ -300,8 +300,8 @@ def load_files(db_path, mtime):
         SELECT f.project_id, s.sample_id, f.direction, f.filename,
                {_FULL_PATH} AS full_path,
                f.size_bytes, f.owner_name,
-               CASE f.md5_match WHEN 1 THEN 'OK' WHEN 0 THEN 'MISMATCH'
-                    ELSE 'uncompared' END AS backup,
+               CASE f.md5_match WHEN 1 THEN 'Verified' WHEN 0 THEN 'Mismatch'
+                    ELSE 'Not compared' END AS backup,
                COALESCE(f.integrity_status, 'unchecked') AS integrity,
                f.n_reads, f.integrity_date
         FROM files f
@@ -472,7 +472,7 @@ def files_view(df, samples_df):
         st.header("Filters")
         projects = sorted(df["project_id"].unique())
         chosen = st.multiselect("Project", projects)
-        backup = st.selectbox("Backup status", ["All", "OK", "MISMATCH", "uncompared"])
+        backup = st.selectbox("Backup status", ["All", "Verified", "Mismatch", "Not compared"])
         integrity = st.selectbox(
             "Integrity", ["All", "ok", "gzip_error", "format_error", "unchecked"])
         search = st.text_input("Search (sample, filename)")

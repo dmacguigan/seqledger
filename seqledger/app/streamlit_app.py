@@ -595,8 +595,9 @@ def taxonomy_view(db_path, mtime):
         include_unknown = st.checkbox("Include 'unknown'", value=True)
         ring_cap = st.slider(
             "Levels shown", 2, len(RANK_COLS), 4,
-            help="Rank levels drawn up front. Sunburst: click a wedge to drill deeper. "
-                 "Treemap: raise this to expand (fewer = faster). Clicking scopes the bar below.")
+            help="Rank levels drawn per step (fewer = faster). Both charts drill on "
+                 "click: Sunburst zooms client-side; Treemap re-roots deeper. Clicking "
+                 "also scopes the bar below.")
         comp_label = st.selectbox("Composition rank (stacked bar)", RANK_LABELS,
                                   index=RANK_LABELS.index("phylum"))
 
@@ -612,42 +613,29 @@ def taxonomy_view(db_path, mtime):
         return
 
     # --- Hierarchy chart: sunburst or treemap ---
-    # px.sunburst/treemap send + lay out EVERY node in `path`, so passing the full
-    # species-deep tree is thousands of nodes. The two charts pay for that
-    # differently, so they're built differently:
-    #  - Sunburst: cheap radial arcs. Pre-load the full depth and draw `ring_cap`
-    #    rings up front (maxdepth); clicking a wedge drills deeper client-side with
-    #    no rerun. This is fast enough even deep.
-    #  - Treemap: squarified layout + a labeled rectangle per tile is costly over
-    #    thousands of tiles (the reported slowness). Build it from only the shown
-    #    levels so the node count stays small; the "Levels shown" slider expands it.
+    # px.sunburst/treemap send + lay out EVERY node in `path`, so a species-deep
+    # tree is thousands of nodes. The two charts handle depth differently:
+    #  - Sunburst: cheap radial arcs. Pre-load the full depth, draw `ring_cap` rings
+    #    (maxdepth); clicking a wedge drills deeper client-side, no rerun.
+    #  - Treemap: its squarified per-tile layout is costly at scale (the reported
+    #    slowness), so it uses server-side PROGRESSIVE drill: it renders only
+    #    `ring_cap` levels below a movable root; clicking a tile re-roots deeper (a
+    #    small, fast rebuild), so you can reach species without ever loading it all.
     st.subheader(f"Taxonomic breadth ({chart_type.lower()})")
     if chart_type == "Treemap":
-        chart_cols = cols[:min(ring_cap, depth)]
-        chart_counts = (counts.groupby(chart_cols, sort=False)["samples"].sum()
-                        .reset_index())
-        if len(chart_counts) > 1500:
-            st.warning(f"{len(chart_counts):,} tiles at this depth — the treemap may be "
-                       "slow. Lower 'Levels shown', pick a coarser 'Deepest rank', filter "
-                       "by project, or switch to Sunburst (it drills deeper on click).")
-        fig = px.treemap(chart_counts, path=chart_cols, values="samples")
+        lineage, sub = _treemap_drilldown(px, counts, cols, depth, ring_cap)
     else:
-        chart_cols, chart_counts = cols, counts
         fig = px.sunburst(counts, path=cols, values="samples")
         fig.update_traces(maxdepth=min(ring_cap, depth))  # draw ring_cap rings; drill deeper on click
-    fig.update_layout(margin=dict(t=10, l=10, r=10, b=10))
-    event = st.plotly_chart(fig, width="stretch", on_select="rerun", key="hierarchy")
-
-    # Clicking a node scopes the detail bar to that node's subtree. Both px.sunburst
-    # and px.treemap build each node id as the "/"-joined lineage.
-    lineage = _selected_lineage(event, chart_counts, chart_cols)
-    sub = counts
-    for col, val in zip(chart_cols, lineage):
-        sub = sub[sub[col] == val]
+        fig.update_layout(margin=dict(t=10, l=10, r=10, b=10))
+        event = st.plotly_chart(fig, width="stretch", on_select="rerun", key="hierarchy")
+        lineage = _selected_lineage(event, counts, cols)
+        sub = counts
+        for col, val in zip(cols, lineage):
+            sub = sub[sub[col] == val]
 
     if lineage:
-        st.caption("Bar chart scoped to: " + " › ".join(lineage)
-                   + "  — click the chart's center/root to reset.")
+        st.caption("Bar chart scoped to: " + " › ".join(lineage))
     st.subheader(f"Sample count by {depth_label}")
     if sub.empty:
         st.info(f"No {depth_label}-level samples under this selection.")
@@ -715,6 +703,62 @@ def _selected_lineage(event, counts, cols):
                                 .iloc[0])
             return []
     return lineage[:len(cols)]
+
+
+def _treemap_drilldown(px, counts, cols, depth, ring_cap):
+    """Progressive treemap: render `ring_cap` levels below a movable root; clicking a
+    tile re-roots deeper so you can reach species without ever loading the full tree.
+
+    Returns (root_lineage, subtree_counts) -- the current root path and the counts
+    filtered to it, for the detail bar below. The root persists in session_state and
+    is re-validated against the (possibly re-filtered) counts each run.
+    """
+    root = list(st.session_state.get("tm_root", []))
+    sub = counts
+    valid = []
+    for i, val in enumerate(root):
+        if i < depth and (sub[cols[i]] == val).any():
+            sub = sub[sub[cols[i]] == val]
+            valid.append(val)
+        else:
+            break  # filters changed under us -> truncate the root to what still exists
+    root = valid
+    st.session_state["tm_root"] = root
+
+    if root:
+        nav = st.columns([1, 1, 6])
+        if nav[0].button("⬆ Up", key="tm_up"):
+            st.session_state["tm_root"] = root[:-1]
+            st.rerun()
+        if nav[1].button("⌂ Top", key="tm_reset"):
+            st.session_state["tm_root"] = []
+            st.rerun()
+        nav[2].caption("Rooted at: " + " › ".join(root) + " — click a tile to drill deeper.")
+    else:
+        st.caption("Click a tile to drill into that clade (down to species, without "
+                   "loading the whole tree).")
+
+    start = len(root)
+    tm_cols = cols[start:min(start + ring_cap, depth)]
+    if not tm_cols:
+        st.info("At the deepest rank for this selection — go Up, or raise 'Deepest rank'.")
+        return root, sub
+
+    tm_data = sub.groupby(tm_cols, sort=False)["samples"].sum().reset_index()
+    fig = px.treemap(tm_data, path=tm_cols, values="samples")
+    fig.update_layout(margin=dict(t=10, l=10, r=10, b=10))
+    event = st.plotly_chart(fig, width="stretch", on_select="rerun", key="hierarchy")
+
+    clicked = _selected_lineage(event, tm_data, tm_cols)
+    if clicked:
+        # Drill on a NEW click only; a stored selection can replay on rerun, so a
+        # dedup token (current root + click) prevents an endless re-root loop.
+        token = (tuple(root), tuple(clicked))
+        if st.session_state.get("tm_last") != token:
+            st.session_state["tm_last"] = token
+            st.session_state["tm_root"] = root + list(clicked)
+            st.rerun()
+    return root, sub
 
 
 def _match(series, query, use_regex):

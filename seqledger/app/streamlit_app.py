@@ -594,8 +594,9 @@ def taxonomy_view(db_path, mtime):
                                    index=RANK_LABELS.index("order"))
         include_unknown = st.checkbox("Include 'unknown'", value=True)
         ring_cap = st.slider(
-            "Initial levels shown", 2, len(RANK_COLS), 4,
-            help="How many levels the chart draws up front; click a wedge/tile to drill deeper.")
+            "Levels shown", 2, len(RANK_COLS), 4,
+            help="How many rank levels the hierarchy chart renders. Fewer = faster; "
+                 "click a wedge/tile to scope the bar below. Raise to expand the tree.")
         comp_label = st.selectbox("Composition rank (stacked bar)", RANK_LABELS,
                                   index=RANK_LABELS.index("phylum"))
 
@@ -610,21 +611,31 @@ def taxonomy_view(db_path, mtime):
         st.info("No resolved taxonomy yet. Run `seqledger taxonomy resolve`.")
         return
 
-    # --- Hierarchy chart: sunburst or treemap of the same lineage counts ---
+    # --- Hierarchy chart: sunburst or treemap ---
+    # Build the chart from ONLY the levels shown (ring_cap), not all `depth` levels.
+    # px.sunburst/treemap send + lay out every node in `path`, so passing the full
+    # species-deep tree (thousands of nodes) is what makes the treemap slow even
+    # though maxdepth hides most of it. Grouping to the shown levels keeps the node
+    # count small; clicking a node scopes the detail bar below (a rerun), and the
+    # "Levels shown" slider expands the tree when you want more.
+    hier_depth = min(ring_cap, depth)
+    hier_cols = cols[:hier_depth]
+    hier_counts = (counts.groupby(hier_cols, sort=False)["samples"].sum()
+                   .reset_index())
     st.subheader(f"Taxonomic breadth ({chart_type.lower()})")
+    if len(hier_counts) > 1500:
+        st.warning(f"{len(hier_counts):,} nodes at this depth — the chart may be slow. "
+                   "Lower 'Levels shown', pick a coarser 'Deepest rank', or filter by project.")
     _hier = px.treemap if chart_type == "Treemap" else px.sunburst
-    fig = _hier(counts, path=cols, values="samples")
-    # Draw only `ring_cap` levels up front; deeper load on click. At species depth
-    # the tree has thousands of leaf nodes -- maxdepth caps what's rendered.
-    fig.update_traces(maxdepth=min(ring_cap, depth))
+    fig = _hier(hier_counts, path=hier_cols, values="samples")
     fig.update_layout(margin=dict(t=10, l=10, r=10, b=10))
     event = st.plotly_chart(fig, width="stretch", on_select="rerun", key="hierarchy")
 
-    # Clicking a node filters the bar chart below to that node's subtree. Both
-    # px.sunburst and px.treemap build each node id as the "/"-joined lineage.
-    lineage = _selected_lineage(event, counts, cols)
+    # Clicking a node scopes the detail bar to that node's subtree. Both px.sunburst
+    # and px.treemap build each node id as the "/"-joined lineage.
+    lineage = _selected_lineage(event, hier_counts, hier_cols)
     sub = counts
-    for col, val in zip(cols, lineage):
+    for col, val in zip(hier_cols, lineage):
         sub = sub[sub[col] == val]
 
     if lineage:

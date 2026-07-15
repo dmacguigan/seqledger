@@ -356,6 +356,29 @@ def _download(df, name):
     st.download_button("Download CSV", df.to_csv(index=False).encode(), name, "text/csv")
 
 
+def _column_filters(df, cols, key):
+    """Per-column substring filters shown as a row of boxes above a table.
+
+    Streamlit can't put inputs inside a dataframe header, so this renders a row of
+    small text boxes (one per column, column name as placeholder) in a collapsible
+    'Filter columns' bar just above the table. Returns df with rows kept only where
+    every non-empty box's text appears (case-insensitive) in that column. All
+    columns are preserved, so downstream row selection still works.
+    """
+    with st.expander("🔍 Filter columns", expanded=False):
+        boxes = st.columns(len(cols))
+        active = {}
+        for box, c in zip(boxes, cols):
+            val = box.text_input(c, key=f"colf_{key}_{c}", placeholder=c,
+                                 label_visibility="collapsed")
+            if val.strip():
+                active[c] = val.strip()
+    out = df
+    for c, val in active.items():
+        out = out[out[c].fillna("").astype(str).str.contains(val, case=False, na=False, regex=False)]
+    return out
+
+
 def samples_view(df, files_df):
     with st.sidebar:
         st.header("Filters")
@@ -377,12 +400,13 @@ def samples_view(df, files_df):
                 | _contains(view["uniq_id"], s))
         view = view[mask]
 
-    st.caption(f"{len(view)} of {len(df)} samples (full R1/R2 paths, taxid + "
-               "lineage are in the CSV export). Select a row to list its files below.")
     show = view.copy()
     show["backup"] = show["backup_verified"].map(backup_label)
     on_screen = ["project_id", "sample_id", "taxon", "ncbi_url", "tax_match",
                  "uniq_id", "uniq_id_url", "flags", "backup"]
+    show = _column_filters(show, on_screen, "samples")
+    st.caption(f"{len(show)} of {len(df)} samples (full R1/R2 paths, taxid + "
+               "lineage are in the CSV export). Select a row to list its files below.")
     event = st.dataframe(
         show[on_screen], width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row", key="samples_table",
@@ -398,7 +422,7 @@ def samples_view(df, files_df):
     sel = event.selection.rows if event and event.selection else []
     if not sel:
         return
-    r = view.iloc[sel[0]]
+    r = show.iloc[sel[0]]
     pid, sid = r["project_id"], r["sample_id"]
     fsub = files_df[(files_df["project_id"] == pid)
                     & (files_df["sample_id"] == sid)].copy()
@@ -442,12 +466,13 @@ def projects_view(df, issues):
     show["data_files"] = show.apply(data_files_label, axis=1) if len(show) else []
     show["checksum"] = show.apply(checksum_label, axis=1) if len(show) else []
     show["integrity"] = show.apply(integrity_label, axis=1) if len(show) else []
-    st.caption(f"{len(view)} of {len(df)} projects. 'mapfile' flags a folder with no "
-               "mapfile, a mapfile with no folder, or a broken mapfile. Select a row for "
-               "its mapfile explanation + data-files issues below.")
     cols = ["project_id", "source", "description", "n_samples", "n_files",
             "mapfile", "data_files", "checksum", "integrity", "owner_name", "data_dir",
             "date_ingested"]
+    show = _column_filters(show, cols, "projects")
+    st.caption(f"{len(show)} of {len(df)} projects. 'mapfile' flags a folder with no "
+               "mapfile, a mapfile with no folder, or a broken mapfile. Select a row for "
+               "its mapfile explanation + data-files issues below.")
     event = st.dataframe(show[cols], width="stretch", hide_index=True,
                          on_select="rerun", selection_mode="single-row",
                          key="projects_table")
@@ -498,18 +523,19 @@ def files_view(df, samples_df):
         s = search.lower()
         mask = (_contains(view["sample_id"], s) | _contains(view["filename"], s))
         view = view[mask]
-    st.caption(f"{len(view)} of {len(df)} files. "
-               "Select a row to show its sample info below.")
     show = view.copy()
     show["size"] = show["size_bytes"].map(human_size)
     on_screen = ["project_id", "sample_id", "direction", "filename", "full_path",
                  "size", "owner_name", "backup", "integrity", "n_reads",
                  "integrity_date"]
+    show = _column_filters(show, on_screen, "files")
+    st.caption(f"{len(show)} of {len(df)} files. "
+               "Select a row to show its sample info below.")
     event = st.dataframe(
         show[on_screen], width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row", key="files_table",
         column_config={"n_reads": "reads", "integrity_date": "checked"})
-    _download(view, f"{_config(DB_PATH, 'catalog_slug')}_files.csv")
+    _download(show, f"{_config(DB_PATH, 'catalog_slug')}_files.csv")
 
     sel = event.selection.rows if event and event.selection else []
     if not sel:

@@ -386,7 +386,9 @@ build-your-own selection view (sidebar):
 
 The Samples view also links each row to its NCBI datasets taxonomy browser page,
 and when a sample's UniqID is a URL (e.g. a specimen-record page) a clickable
-`UniqID link` column resolves it. Each view filters/searches and downloads CSV.
+`UniqID link` column resolves it. Each view filters/searches and downloads CSV, and
+the Samples / Projects / Files tables have a **"Filter columns"** bar (one box per
+column) for per-column substring filtering.
 
 ## Configuration
 

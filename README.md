@@ -366,9 +366,12 @@ build-your-own selection view (sidebar):
 - **Samples** - one row per sample; the on-screen table stays lean, but the CSV
   export carries the full absolute R1/R2 paths + owner.
 - **Files** - one row per FASTQ: full absolute path, size, owner, backup status.
-- **Taxonomy** - interactive Plotly sunburst of the catalog's taxonomic breadth
-  (filter by project, pick the deepest rank, toggle the `unknown` bucket) plus a
-  per-rank sample-count bar chart. Populated by `taxonomy resolve`.
+- **Taxonomy** - interactive view of the catalog's taxonomic breadth (filter by
+  project, pick the deepest rank, toggle the `unknown` bucket), with an
+  interactive hierarchy chart you can switch between **sunburst and treemap**,
+  a click-scoped per-rank sample-count bar, a **resolution-quality** breakdown
+  (confirmed / exact / fuzzy / unresolved), and a **composition-by-project**
+  stacked bar (colored by a chosen rank). Populated by `taxonomy resolve`.
 - **Grab & Go** - build a hand-picked set of samples. Search by project,
   taxonomy (taxon / NCBI name / lineage), sample ID, and UniqID, with a **regex
   toggle**; add matches (selected rows or all) to a running table that persists as

@@ -32,6 +32,17 @@ RANK_COLS = ["tax_domain", "tax_kingdom", "tax_phylum", "tax_class",
 RANK_LABELS = ["domain", "kingdom", "phylum", "class",
                "order", "family", "genus", "species"]
 
+# taxa.match_type ordered best -> worst, with an accessible good->uncertain color
+# ramp (works on light + dark). Samples with no taxa row fall into 'unresolved'.
+MATCH_ORDER = ["confirmed", "exact", "fuzzy_species", "fuzzy_genus",
+               "fuzzy_higher", "unresolved"]
+MATCH_LABELS = {"confirmed": "confirmed", "exact": "exact",
+                "fuzzy_species": "fuzzy (species)", "fuzzy_genus": "fuzzy (genus)",
+                "fuzzy_higher": "fuzzy (higher)", "unresolved": "unresolved"}
+MATCH_COLORS = {"confirmed": "#0B7268", "exact": "#3C8A57",
+                "fuzzy_species": "#C9A227", "fuzzy_genus": "#C77D11",
+                "fuzzy_higher": "#B5532A", "unresolved": "#7A8A86"}
+
 DB_PATH = os.environ.get("SEQLEDGER_DB", "catalog.db")
 
 # Full absolute path when the seqdata_root was captured at ingest, else the relpath.
@@ -547,6 +558,29 @@ def _taxonomy_counts(db_path, mtime, chosen, depth, include_unknown):
     return counts, len(v), v["project_id"].nunique()
 
 
+@st.cache_data(ttl=60)
+def _matchtype_counts(db_path, mtime, chosen):
+    """Sample counts by taxonomy match_type (resolution confidence)."""
+    df = load_taxonomy(db_path, mtime)
+    v = df if not chosen else df[df["project_id"].isin(list(chosen))]
+    mt = v["match_type"].replace("", pd.NA).fillna("unresolved")
+    counts = mt.value_counts().rename_axis("match_type").reset_index(name="samples")
+    counts["order"] = counts["match_type"].map(
+        {m: i for i, m in enumerate(MATCH_ORDER)}).fillna(len(MATCH_ORDER))
+    counts["label"] = counts["match_type"].map(MATCH_LABELS).fillna(counts["match_type"])
+    return counts.sort_values("order")
+
+
+@st.cache_data(ttl=60)
+def _composition_counts(db_path, mtime, chosen, rank_col):
+    """Per-project sample counts within one rank (for the stacked composition bar)."""
+    df = load_taxonomy(db_path, mtime)
+    v = df if not chosen else df[df["project_id"].isin(list(chosen))]
+    v = v[["project_id", rank_col]].copy()
+    v[rank_col] = v[rank_col].replace("", pd.NA).fillna("unknown")
+    return v.groupby(["project_id", rank_col], sort=False).size().reset_index(name="samples")
+
+
 def taxonomy_view(db_path, mtime):
     import plotly.express as px
 
@@ -555,12 +589,15 @@ def taxonomy_view(db_path, mtime):
         st.header("Filters")
         projects = sorted(df["project_id"].unique())
         chosen = st.multiselect("Project", projects)
+        chart_type = st.radio("Hierarchy chart", ["Sunburst", "Treemap"], horizontal=True)
         depth_label = st.selectbox("Deepest rank", RANK_LABELS,
                                    index=RANK_LABELS.index("order"))
         include_unknown = st.checkbox("Include 'unknown'", value=True)
         ring_cap = st.slider(
-            "Initial rings shown", 2, len(RANK_COLS), 4,
-            help="The sunburst renders this many rings; click a wedge to drill deeper.")
+            "Initial levels shown", 2, len(RANK_COLS), 4,
+            help="How many levels the chart draws up front; click a wedge/tile to drill deeper.")
+        comp_label = st.selectbox("Composition rank (stacked bar)", RANK_LABELS,
+                                  index=RANK_LABELS.index("phylum"))
 
     depth = RANK_LABELS.index(depth_label) + 1
     cols = RANK_COLS[:depth]
@@ -573,18 +610,18 @@ def taxonomy_view(db_path, mtime):
         st.info("No resolved taxonomy yet. Run `seqledger taxonomy resolve`.")
         return
 
-    fig = px.sunburst(counts, path=cols, values="samples")
-    # Render only the outer `ring_cap` rings up front; deeper rings load on click.
-    # At species depth the tree has thousands of leaf wedges, and drawing them all
-    # is what makes the initial paint slow -- maxdepth caps the drawn arcs.
+    # --- Hierarchy chart: sunburst or treemap of the same lineage counts ---
+    st.subheader(f"Taxonomic breadth ({chart_type.lower()})")
+    _hier = px.treemap if chart_type == "Treemap" else px.sunburst
+    fig = _hier(counts, path=cols, values="samples")
+    # Draw only `ring_cap` levels up front; deeper load on click. At species depth
+    # the tree has thousands of leaf nodes -- maxdepth caps what's rendered.
     fig.update_traces(maxdepth=min(ring_cap, depth))
     fig.update_layout(margin=dict(t=10, l=10, r=10, b=10))
-    event = st.plotly_chart(fig, width="stretch", on_select="rerun", key="sunburst")
+    event = st.plotly_chart(fig, width="stretch", on_select="rerun", key="hierarchy")
 
-    # Clicking a wedge filters the bar chart below to that node's subtree, so it
-    # tracks wherever the user drills in the sunburst. px.sunburst builds each
-    # wedge id as the "/"-joined lineage from the root, which pins the exact
-    # subtree; fall back to matching the label if no id comes back.
+    # Clicking a node filters the bar chart below to that node's subtree. Both
+    # px.sunburst and px.treemap build each node id as the "/"-joined lineage.
     lineage = _selected_lineage(event, counts, cols)
     sub = counts
     for col, val in zip(cols, lineage):
@@ -592,7 +629,7 @@ def taxonomy_view(db_path, mtime):
 
     if lineage:
         st.caption("Bar chart scoped to: " + " › ".join(lineage)
-                   + "  — click the sunburst center to reset.")
+                   + "  — click the chart's center/root to reset.")
     st.subheader(f"Sample count by {depth_label}")
     if sub.empty:
         st.info(f"No {depth_label}-level samples under this selection.")
@@ -601,6 +638,33 @@ def taxonomy_view(db_path, mtime):
                .reset_index(name="samples").set_index(depth_label))
         st.bar_chart(bar, width="stretch")
     _download(counts, f"{_config(DB_PATH, 'catalog_slug')}_taxonomy_counts.csv")
+
+    # --- Resolution quality: how confidently taxa were identified ---
+    st.divider()
+    st.subheader("Resolution quality")
+    st.caption("How each sample's taxon resolved against NCBI: confirmed/exact are "
+               "reliable; fuzzy is a best-guess correction; unresolved had no match.")
+    mt = _matchtype_counts(db_path, mtime, tuple(chosen))
+    fig_mt = px.bar(mt, x="samples", y="label", orientation="h",
+                    color="match_type", color_discrete_map=MATCH_COLORS,
+                    category_orders={"label": list(mt["label"])[::-1]})
+    fig_mt.update_layout(showlegend=False, yaxis_title=None, xaxis_title="samples",
+                         margin=dict(t=6, l=6, r=6, b=6), height=max(160, 34 * len(mt)))
+    st.plotly_chart(fig_mt, width="stretch", key="matchtype")
+
+    # --- Composition by project: stacked sample counts within a coarse rank ---
+    st.divider()
+    st.subheader(f"Composition by project ({comp_label})")
+    rank_col = RANK_COLS[RANK_LABELS.index(comp_label)]
+    comp = _composition_counts(db_path, mtime, tuple(chosen), rank_col)
+    n_cat = comp[rank_col].nunique()
+    st.caption(f"Sample counts per project, colored by {comp_label} "
+               f"({n_cat} group(s)). Pick a coarser rank if the legend is too busy.")
+    fig_c = px.bar(comp, x="project_id", y="samples", color=rank_col,
+                   color_discrete_sequence=px.colors.qualitative.Safe)
+    fig_c.update_layout(barmode="stack", xaxis_title=None, legend_title=comp_label,
+                        margin=dict(t=6, l=6, r=6, b=6))
+    st.plotly_chart(fig_c, width="stretch", key="composition")
 
 
 def _selected_lineage(event, counts, cols):

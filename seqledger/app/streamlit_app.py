@@ -12,6 +12,7 @@ Views:
 """
 
 import os
+import re
 import sqlite3
 import sys
 
@@ -118,9 +119,35 @@ def _config(db_path, key):
         return odb.CONFIG_DEFAULTS.get(key)
 
 
+# A UniqID is sometimes a URL (e.g. a specimen record page). Render those as a
+# clickable link in a companion column while keeping the plain text column intact.
+_URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+
+
+def _as_url(v):
+    """Return the value if it's an http(s) URL, else None (blank in a LinkColumn)."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    s = str(v).strip()
+    return s if _URL_RE.match(s) else None
+
+
+def _with_uniqid_url(df):
+    """Add a `uniq_id_url` column (the URL when uniq_id is one, else None)."""
+    if "uniq_id" in df.columns:
+        df = df.copy()
+        df["uniq_id_url"] = df["uniq_id"].map(_as_url)
+    return df
+
+
+# column_config entry to render uniq_id_url as a compact clickable link.
+def _uniqid_link_col():
+    return st.column_config.LinkColumn("UniqID link", display_text="open ↗")
+
+
 @st.cache_data(ttl=60)
 def load_samples(db_path, mtime):
-    return _sql(db_path, f"""
+    return _with_uniqid_url(_sql(db_path, f"""
         SELECT s.project_id, s.sample_id, s.taxon, s.uniq_id, s.flags,
                p.source, p.seq_data_relpath AS data_dir,
                COALESCE(b.verified, 0) AS backup_verified,
@@ -145,7 +172,7 @@ def load_samples(db_path, mtime):
         JOIN projects p ON p.project_id = s.project_id
         LEFT JOIN backups b ON b.project_id = s.project_id AND b.location = 'pdrive'
         LEFT JOIN taxa t ON t.taxon = s.taxon
-        ORDER BY s.project_id, s.sample_id""")
+        ORDER BY s.project_id, s.sample_id"""))
 
 
 @st.cache_data(ttl=60)
@@ -204,7 +231,7 @@ def load_projects(db_path, mtime):
 
 @st.cache_data(ttl=60)
 def load_data_issues(db_path, mtime):
-    return _sql(db_path, f"""
+    return _with_uniqid_url(_sql(db_path, f"""
         SELECT i.project_id, i.kind, i.filename,
                {_FULL_PATH} AS full_path,
                s.sample_id, f.direction, s.taxon, s.uniq_id
@@ -212,7 +239,7 @@ def load_data_issues(db_path, mtime):
         LEFT JOIN files f ON f.project_id = i.project_id AND f.filename = i.filename
         LEFT JOIN projects p ON p.project_id = i.project_id
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
-        ORDER BY i.project_id, i.kind, i.filename""")
+        ORDER BY i.project_id, i.kind, i.filename"""))
 
 
 def data_files_label(row):
@@ -334,7 +361,7 @@ def samples_view(df, files_df):
     st.caption(f"{len(view)} of {len(df)} samples (full R1/R2 paths, taxid + "
                "lineage are in the CSV export). Select a row to list its files below.")
     on_screen = ["project_id", "sample_id", "taxon", "ncbi_url", "tax_match",
-                 "uniq_id", "flags", "backup_verified"]
+                 "uniq_id", "uniq_id_url", "flags", "backup_verified"]
     event = st.dataframe(
         view[on_screen], width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row", key="samples_table",
@@ -343,7 +370,8 @@ def samples_view(df, files_df):
             # The matched name (carried in the URL fragment) is the link label,
             # linking to its NCBI datasets taxonomy page.
             "ncbi_url": st.column_config.LinkColumn(
-                "NCBI taxon match", display_text=r"#(.+)$")})
+                "NCBI taxon match", display_text=r"#(.+)$"),
+            "uniq_id_url": _uniqid_link_col()})
     _download(view, f"{_config(DB_PATH, 'catalog_slug')}_samples.csv")
 
     sel = event.selection.rows if event and event.selection else []
@@ -419,9 +447,10 @@ def projects_view(df, issues):
             sub["detail"] = sub["kind"].map(_ISSUE_DETAIL).fillna("")
             st.dataframe(
                 sub[["issue", "detail", "filename", "full_path", "sample_id",
-                     "direction", "taxon", "uniq_id"]],
+                     "direction", "taxon", "uniq_id", "uniq_id_url"]],
                 width="stretch", hide_index=True,
-                column_config={"full_path": "expected path"})
+                column_config={"full_path": "expected path",
+                               "uniq_id_url": _uniqid_link_col()})
             _download(sub, f"{pid}_data_issues.csv")
         else:
             st.info("No recorded data-files issues. "
@@ -471,14 +500,15 @@ def files_view(df, samples_df):
     st.subheader(f"Sample info: {sid} ({pid})")
     if len(ssub):
         cols = [c for c in ["sample_id", "taxon", "ncbi_url", "tax_match",
-                            "taxid", "lineage", "uniq_id", "backup_verified",
-                            "r1_path", "r2_path"] if c in ssub.columns]
+                            "taxid", "lineage", "uniq_id", "uniq_id_url",
+                            "backup_verified", "r1_path", "r2_path"] if c in ssub.columns]
         st.dataframe(
             ssub[cols], width="stretch", hide_index=True,
             column_config={
                 "tax_match": "match type",
                 "ncbi_url": st.column_config.LinkColumn(
-                    "NCBI taxon match", display_text=r"#(.+)$")})
+                    "NCBI taxon match", display_text=r"#(.+)$"),
+                "uniq_id_url": _uniqid_link_col()})
         _download(ssub, f"{sid}_sample.csv")
     else:
         st.info("No sample record for this file "
@@ -646,11 +676,11 @@ def custom_table_view(samples_df, paths_df):
     st.subheader("Search results")
     st.caption(f"{len(view)} match(es). Select rows and click **Add to custom table**. "
                f"Grab & Go table currently holds {len(cart)} sample(s).")
-    cols = ["project_id", "sample_id", "taxon", "tax_name", "uniq_id"]
+    cols = ["project_id", "sample_id", "taxon", "tax_name", "uniq_id", "uniq_id_url"]
     event = st.dataframe(
         view[cols], width="stretch", hide_index=True,
         on_select="rerun", selection_mode="multi-row", key="cart_search",
-        column_config={"tax_name": "NCBI name"})
+        column_config={"tax_name": "NCBI name", "uniq_id_url": _uniqid_link_col()})
 
     sel = event.selection.rows if event and event.selection else []
     c1, c2, c3 = st.columns(3)
@@ -680,11 +710,12 @@ def custom_table_view(samples_df, paths_df):
     table = samples_df[idx.isin(keyset)].copy()
 
     tcols = ["project_id", "sample_id", "taxon", "tax_name", "taxid", "uniq_id",
-             "lineage", "r1_path", "r2_path"]
+             "uniq_id_url", "lineage", "r1_path", "r2_path"]
     tcols = [c for c in tcols if c in table.columns]
     tevent = st.dataframe(
         table[tcols], width="stretch", hide_index=True,
-        on_select="rerun", selection_mode="multi-row", key="cart_table")
+        on_select="rerun", selection_mode="multi-row", key="cart_table",
+        column_config={"uniq_id_url": _uniqid_link_col()})
     tsel = tevent.selection.rows if tevent and tevent.selection else []
     if st.button(f"➖ Remove selected ({len(tsel)})", disabled=not tsel):
         for i in tsel:

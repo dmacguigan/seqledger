@@ -381,8 +381,9 @@ build-your-own selection view (sidebar):
   disk-space estimate. Copy it from the screen or download the `.job`, then
   `qsub` it on the login node.
 
-The Samples view also links each row to its NCBI datasets taxonomy browser page.
-Each view filters/searches and downloads CSV.
+The Samples view also links each row to its NCBI datasets taxonomy browser page,
+and when a sample's UniqID is a URL (e.g. a specimen-record page) a clickable
+`UniqID link` column resolves it. Each view filters/searches and downloads CSV.
 
 ## Configuration
 

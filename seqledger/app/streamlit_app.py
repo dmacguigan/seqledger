@@ -595,8 +595,8 @@ def taxonomy_view(db_path, mtime):
         include_unknown = st.checkbox("Include 'unknown'", value=True)
         ring_cap = st.slider(
             "Levels shown", 2, len(RANK_COLS), 4,
-            help="How many rank levels the hierarchy chart renders. Fewer = faster; "
-                 "click a wedge/tile to scope the bar below. Raise to expand the tree.")
+            help="Rank levels drawn up front. Sunburst: click a wedge to drill deeper. "
+                 "Treemap: raise this to expand (fewer = faster). Clicking scopes the bar below.")
         comp_label = st.selectbox("Composition rank (stacked bar)", RANK_LABELS,
                                   index=RANK_LABELS.index("phylum"))
 
@@ -612,30 +612,37 @@ def taxonomy_view(db_path, mtime):
         return
 
     # --- Hierarchy chart: sunburst or treemap ---
-    # Build the chart from ONLY the levels shown (ring_cap), not all `depth` levels.
-    # px.sunburst/treemap send + lay out every node in `path`, so passing the full
-    # species-deep tree (thousands of nodes) is what makes the treemap slow even
-    # though maxdepth hides most of it. Grouping to the shown levels keeps the node
-    # count small; clicking a node scopes the detail bar below (a rerun), and the
-    # "Levels shown" slider expands the tree when you want more.
-    hier_depth = min(ring_cap, depth)
-    hier_cols = cols[:hier_depth]
-    hier_counts = (counts.groupby(hier_cols, sort=False)["samples"].sum()
-                   .reset_index())
+    # px.sunburst/treemap send + lay out EVERY node in `path`, so passing the full
+    # species-deep tree is thousands of nodes. The two charts pay for that
+    # differently, so they're built differently:
+    #  - Sunburst: cheap radial arcs. Pre-load the full depth and draw `ring_cap`
+    #    rings up front (maxdepth); clicking a wedge drills deeper client-side with
+    #    no rerun. This is fast enough even deep.
+    #  - Treemap: squarified layout + a labeled rectangle per tile is costly over
+    #    thousands of tiles (the reported slowness). Build it from only the shown
+    #    levels so the node count stays small; the "Levels shown" slider expands it.
     st.subheader(f"Taxonomic breadth ({chart_type.lower()})")
-    if len(hier_counts) > 1500:
-        st.warning(f"{len(hier_counts):,} nodes at this depth — the chart may be slow. "
-                   "Lower 'Levels shown', pick a coarser 'Deepest rank', or filter by project.")
-    _hier = px.treemap if chart_type == "Treemap" else px.sunburst
-    fig = _hier(hier_counts, path=hier_cols, values="samples")
+    if chart_type == "Treemap":
+        chart_cols = cols[:min(ring_cap, depth)]
+        chart_counts = (counts.groupby(chart_cols, sort=False)["samples"].sum()
+                        .reset_index())
+        if len(chart_counts) > 1500:
+            st.warning(f"{len(chart_counts):,} tiles at this depth — the treemap may be "
+                       "slow. Lower 'Levels shown', pick a coarser 'Deepest rank', filter "
+                       "by project, or switch to Sunburst (it drills deeper on click).")
+        fig = px.treemap(chart_counts, path=chart_cols, values="samples")
+    else:
+        chart_cols, chart_counts = cols, counts
+        fig = px.sunburst(counts, path=cols, values="samples")
+        fig.update_traces(maxdepth=min(ring_cap, depth))  # draw ring_cap rings; drill deeper on click
     fig.update_layout(margin=dict(t=10, l=10, r=10, b=10))
     event = st.plotly_chart(fig, width="stretch", on_select="rerun", key="hierarchy")
 
     # Clicking a node scopes the detail bar to that node's subtree. Both px.sunburst
     # and px.treemap build each node id as the "/"-joined lineage.
-    lineage = _selected_lineage(event, hier_counts, hier_cols)
+    lineage = _selected_lineage(event, chart_counts, chart_cols)
     sub = counts
-    for col, val in zip(hier_cols, lineage):
+    for col, val in zip(chart_cols, lineage):
         sub = sub[sub[col] == val]
 
     if lineage:

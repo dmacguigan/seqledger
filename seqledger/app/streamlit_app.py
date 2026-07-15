@@ -147,8 +147,11 @@ def _uniqid_link_col():
 
 @st.cache_data(ttl=60)
 def load_samples(db_path, mtime):
+    # Tolerate a catalog copy that predates the samples.flags migration (the GUI
+    # opens read-only and never migrates -- e.g. an older synced Scratch copy).
+    flags = "s.flags" if "flags" in _table_columns(db_path, "samples") else "NULL"
     return _with_uniqid_url(_sql(db_path, f"""
-        SELECT s.project_id, s.sample_id, s.taxon, s.uniq_id, s.flags,
+        SELECT s.project_id, s.sample_id, s.taxon, s.uniq_id, {flags} AS flags,
                p.source, p.seq_data_relpath AS data_dir,
                COALESCE(b.verified, 0) AS backup_verified,
                t.sci_name AS tax_name, t.match_type AS tax_match,
@@ -240,6 +243,11 @@ def load_data_issues(db_path, mtime):
         LEFT JOIN projects p ON p.project_id = i.project_id
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
         ORDER BY i.project_id, i.kind, i.filename"""))
+
+
+def backup_label(v):
+    """Plain-english P-drive backup state from the 1/0 backups.verified flag."""
+    return "Verified" if v == 1 else "Not verified"
 
 
 def data_files_label(row):
@@ -360,10 +368,12 @@ def samples_view(df, files_df):
 
     st.caption(f"{len(view)} of {len(df)} samples (full R1/R2 paths, taxid + "
                "lineage are in the CSV export). Select a row to list its files below.")
+    show = view.copy()
+    show["backup"] = show["backup_verified"].map(backup_label)
     on_screen = ["project_id", "sample_id", "taxon", "ncbi_url", "tax_match",
-                 "uniq_id", "uniq_id_url", "flags", "backup_verified"]
+                 "uniq_id", "uniq_id_url", "flags", "backup"]
     event = st.dataframe(
-        view[on_screen], width="stretch", hide_index=True,
+        show[on_screen], width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row", key="samples_table",
         column_config={
             "tax_match": "match type",
@@ -372,7 +382,7 @@ def samples_view(df, files_df):
             "ncbi_url": st.column_config.LinkColumn(
                 "NCBI taxon match", display_text=r"#(.+)$"),
             "uniq_id_url": _uniqid_link_col()})
-    _download(view, f"{_config(DB_PATH, 'catalog_slug')}_samples.csv")
+    _download(show, f"{_config(DB_PATH, 'catalog_slug')}_samples.csv")
 
     sel = event.selection.rows if event and event.selection else []
     if not sel:
@@ -499,9 +509,11 @@ def files_view(df, samples_df):
                       & (samples_df["sample_id"] == sid)]
     st.subheader(f"Sample info: {sid} ({pid})")
     if len(ssub):
+        ssub = ssub.copy()
+        ssub["backup"] = ssub["backup_verified"].map(backup_label)
         cols = [c for c in ["sample_id", "taxon", "ncbi_url", "tax_match",
                             "taxid", "lineage", "uniq_id", "uniq_id_url",
-                            "backup_verified", "r1_path", "r2_path"] if c in ssub.columns]
+                            "backup", "r1_path", "r2_path"] if c in ssub.columns]
         st.dataframe(
             ssub[cols], width="stretch", hide_index=True,
             column_config={

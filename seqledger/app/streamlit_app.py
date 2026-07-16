@@ -334,13 +334,10 @@ def load_file_paths(db_path, mtime):
 
 
 def human_size(n):
+    """Byte count reported in GB (e.g. 1.50 GB). Missing -> ''."""
     if n is None or pd.isna(n):
         return ""
-    n = float(n)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024 or unit == "TB":
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024
+    return f"{float(n) / 1024**3:.2f} GB"
 
 
 def _contains(series, s):

@@ -23,14 +23,10 @@ def _missing(v):
 
 
 def human_size(n):
-    """Human-readable byte count (e.g. 1.5 GB). None/negative -> 'unknown'."""
+    """Byte count reported in GB (e.g. 1.50 GB). None/negative -> 'unknown'."""
     if _missing(n) or n < 0:
         return "unknown"
-    n = float(n)
-    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
-        if n < 1024 or unit == "PB":
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024
+    return f"{float(n) / 1024**3:.2f} GB"
 
 
 def group_by_root(file_rows):

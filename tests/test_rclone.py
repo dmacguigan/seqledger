@@ -13,8 +13,8 @@ def _rows():
 
 
 def test_human_size():
-    assert orclone.human_size(0) == "0 B"
-    assert orclone.human_size(1536) == "1.5 KB"
+    assert orclone.human_size(0) == "0.00 GB"
+    assert orclone.human_size(1610612736) == "1.50 GB"  # 1.5 * 1024**3
     assert orclone.human_size(None) == "unknown"
 
 
@@ -49,7 +49,7 @@ def test_build_copy_script_has_ltio_directives_and_rclone():
     assert "--files-from" in script and "--transfers 4" in script
     assert "projA/s1_1.fastq.gz" in script and "projB/x_1.fastq.gz" in script
     assert "DEST=/pool/dest" in script  # shell-quoted destination (no quoting needed)
-    assert "estimated transfer: 350 B across 3 file(s)" in script
+    assert "estimated transfer: 0.00 GB across 3 file(s)" in script
     # guard: refuse to run without a usable destination
     assert 'if [ -z "$DEST" ]' in script
     assert "no destination set" in script

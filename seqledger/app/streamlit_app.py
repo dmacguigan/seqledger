@@ -195,11 +195,17 @@ def load_samples(db_path, mtime):
     # opens read-only and never migrates -- e.g. an older synced Scratch copy).
     flags = "s.flags" if "flags" in _table_columns(db_path, "samples") else "NULL"
     # Tolerate a catalog copy predating the WoRMS columns (older read-only replica).
+    # worms_url embeds the accepted name in a URL '#'-fragment so the link column can
+    # display the name as its label (a LinkColumn display_text regex), exactly like
+    # ncbi_url -- no separate name/link columns. worms_name is kept for search + CSV.
     worms_sel = (
         "t.worms_sci_name AS worms_name, t.worms_status AS worms_status, "
-        f"CASE WHEN t.aphia_id IS NOT NULL THEN '{WORMS_TAX_URL}' || t.aphia_id END AS worms_url"
+        "t.worms_match_type AS worms_match, "
+        f"CASE WHEN t.aphia_id IS NOT NULL THEN '{WORMS_TAX_URL}' || t.aphia_id "
+        "|| '#' || COALESCE(t.worms_sci_name, s.taxon) END AS worms_url"
         if "aphia_id" in _table_columns(db_path, "taxa")
-        else "NULL AS worms_name, NULL AS worms_status, NULL AS worms_url")
+        else "NULL AS worms_name, NULL AS worms_status, NULL AS worms_match, "
+             "NULL AS worms_url")
     return _with_uniqid_url(_sql(db_path, f"""
         SELECT s.project_id, s.sample_id, s.taxon, s.uniq_id, {flags} AS flags,
                p.source, p.seq_data_relpath AS data_dir,
@@ -446,8 +452,8 @@ def samples_view(df, files_df):
 
     show = view.copy()
     show["backup"] = show["backup_verified"].map(backup_label)
-    on_screen = ["project_id", "sample_id", "taxon", "ncbi_url", "tax_match",
-                 "worms_name", "worms_status", "worms_url",
+    on_screen = ["project_id", "sample_id", "taxon",
+                 "ncbi_url", "tax_match", "worms_url", "worms_match", "worms_status",
                  "uniq_id", "uniq_id_url", "flags", "backup"]
     show = _column_filters(show, on_screen, "samples")
     st.caption(f"{len(show)} of {len(df)} samples (full R1/R2 paths, taxid + "
@@ -456,14 +462,14 @@ def samples_view(df, files_df):
         show[on_screen], width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row", key="samples_table",
         column_config={
-            "tax_match": "match type",
-            # The matched name (carried in the URL fragment) is the link label,
-            # linking to its NCBI datasets taxonomy page.
-            "ncbi_url": st.column_config.LinkColumn(
-                "NCBI taxon match", display_text=r"#(.+)$"),
-            "worms_name": "WoRMS name",
+            # Each source's matched name is a link (label = the name, carried in the
+            # URL '#'-fragment) to its taxonomy page; the "* match" column is that
+            # source's match confidence, so NCBI vs WoRMS fuzziness is never conflated.
+            "ncbi_url": st.column_config.LinkColumn("NCBI name", display_text=r"#(.+)$"),
+            "tax_match": "NCBI match",
+            "worms_url": st.column_config.LinkColumn("WoRMS name", display_text=r"#(.+)$"),
+            "worms_match": "WoRMS match",
             "worms_status": "WoRMS status",
-            "worms_url": st.column_config.LinkColumn("WoRMS", display_text="open ↗"),
             "uniq_id_url": _uniqid_link_col()})
     _download(show, f"{_config(DB_PATH, 'catalog_slug')}_samples.csv")
 
@@ -597,18 +603,17 @@ def files_view(df, samples_df):
         ssub = ssub.copy()
         ssub["backup"] = ssub["backup_verified"].map(backup_label)
         cols = [c for c in ["sample_id", "taxon", "ncbi_url", "tax_match",
-                            "taxid", "lineage", "worms_name", "worms_status",
-                            "worms_url", "uniq_id", "uniq_id_url",
+                            "taxid", "lineage", "worms_url", "worms_match",
+                            "worms_status", "uniq_id", "uniq_id_url",
                             "backup", "r1_path", "r2_path"] if c in ssub.columns]
         st.dataframe(
             ssub[cols], width="stretch", hide_index=True,
             column_config={
-                "tax_match": "match type",
-                "ncbi_url": st.column_config.LinkColumn(
-                    "NCBI taxon match", display_text=r"#(.+)$"),
-                "worms_name": "WoRMS name",
+                "ncbi_url": st.column_config.LinkColumn("NCBI name", display_text=r"#(.+)$"),
+                "tax_match": "NCBI match",
+                "worms_url": st.column_config.LinkColumn("WoRMS name", display_text=r"#(.+)$"),
+                "worms_match": "WoRMS match",
                 "worms_status": "WoRMS status",
-                "worms_url": st.column_config.LinkColumn("WoRMS", display_text="open ↗"),
                 "uniq_id_url": _uniqid_link_col()})
         _download(ssub, f"{sid}_sample.csv")
     else:

@@ -131,11 +131,12 @@ def _fetch_match_chunk(names, marine_only):
     return out
 
 
-def match_names(names, cache, marine_only=False):
+def match_names(names, cache, marine_only=False, progress=False):
     """Batch-match cleaned names via TAXAMATCH; returns {name: [AphiaRecord, ...]}.
 
     Cache-backed per name, so only never-seen names hit the API. `marine_only=False`
     keeps brackish/freshwater samples (WoRMS covers them) rather than dropping them.
+    The network batches are the slow part, so progress is reported here (per batch).
     """
     names = _dedup(names)
     out, misses = {}, []
@@ -145,12 +146,22 @@ def match_names(names, cache, marine_only=False):
             out[n] = cached
         else:
             misses.append(n)
+    if progress and misses:
+        cached_n = len(names) - len(misses)
+        print(f"  querying WoRMS for {len(misses)} name(s)"
+              + (f" ({cached_n} cached)" if cached_n else ""))
+    done = 0
     for chunk in _chunks(misses, _BATCH):
         got = _fetch_match_chunk(chunk, marine_only)
         for n in chunk:
             out[n] = got.get(n, [])
             _cache_put(cache, n, out[n])
         cache.commit()
+        done += len(chunk)
+        if progress:
+            print(f"\r  matched {done}/{len(misses)} name(s)", end="", flush=True)
+    if progress and misses:
+        print()
     return out
 
 
@@ -230,12 +241,15 @@ def resolve_taxa_worms(taxa, taxdir, progress=True, marine_only=False):
     cache = _cache_open(taxdir)
     out = []
     try:
-        matches = match_names([c for c in cleans.values() if c], cache, marine_only)
+        matches = match_names([c for c in cleans.values() if c], cache, marine_only,
+                              progress=progress)
+        # Mapping records -> rows is cheap, except the occasional synonym-follow fetch;
+        # the counter reflects it every 100 taxa (and at the end) like the NCBI path.
         total = len(taxa)
         for i, t in enumerate(taxa, 1):
             out.append(_resolve_one(t, matches.get(cleans[t], []), cache))
             if progress and (i % 100 == 0 or i == total):
-                print(f"\r  WoRMS-resolved {i}/{total} taxa", end="", flush=True)
+                print(f"\r  resolved {i}/{total} taxa", end="", flush=True)
         if progress and total:
             print()
     finally:

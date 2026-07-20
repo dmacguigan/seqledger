@@ -591,7 +591,7 @@ def _resolve_worms(oworms, conn, args, taxdir, scope, base):
     review = os.path.join(base, "worms_review.csv")
     oworms.write_review_csv_worms(results, review)
     n_flag = sum(1 for d in results if d["worms_match_type"] not in ("exact", "confirmed"))
-    print(f"WoRMS: resolved {len(results)} taxa ({n_flag} fuzzy/unresolved)")
+    print(f"WoRMS: resolved {len(results)} taxa ({n_flag} non-exact/unresolved)")
     print(f"  review + edit confirmed_aphia_id in: {review}")
     print(f"  then: seqledger --db {args.db} taxonomy apply --source worms --review {review}")
 

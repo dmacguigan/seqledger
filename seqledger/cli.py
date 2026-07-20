@@ -565,31 +565,60 @@ def _default_taxdir(db_path):
     return os.path.join(os.path.dirname(os.path.abspath(db_path)) or ".", ".taxonomy")
 
 
+def _resolve_ncbi(otax, conn, args, taxdir, scope, base):
+    if args.force_download:
+        otax.ensure_taxdump(taxdir, force=True)
+        otax.build_index(taxdir, force=True)
+    elif args.rebuild_index:
+        otax.build_index(taxdir, force=True)
+    results = otax.resolve_catalog(conn, taxdir, scope=scope)
+    review = os.path.join(base, "taxonomy_review.csv")
+    otax.write_review_csv(results, review)
+    n_flag = sum(1 for d in results if d["match_type"] != "exact")
+    print(f"NCBI: resolved {len(results)} taxa ({n_flag} fuzzy/unresolved)")
+    print(f"  review + edit confirmed_taxid in: {review}")
+    print(f"  then: seqledger --db {args.db} taxonomy apply --review {review}")
+
+
+def _resolve_worms(oworms, conn, args, taxdir, scope, base):
+    # WoRMS is an online step; a network failure warns (leaving any NCBI side
+    # intact) rather than aborting the whole command.
+    try:
+        results = oworms.resolve_catalog_worms(conn, taxdir, scope=scope)
+    except (OSError, ValueError) as e:  # URLError/HTTPError subclass OSError; bad JSON -> ValueError
+        print(f"WoRMS: skipped ({e}) -- network needed; retry when online.")
+        return
+    review = os.path.join(base, "worms_review.csv")
+    oworms.write_review_csv_worms(results, review)
+    n_flag = sum(1 for d in results if d["worms_match_type"] not in ("exact", "confirmed"))
+    print(f"WoRMS: resolved {len(results)} taxa ({n_flag} fuzzy/unresolved)")
+    print(f"  review + edit confirmed_aphia_id in: {review}")
+    print(f"  then: seqledger --db {args.db} taxonomy apply --source worms --review {review}")
+
+
 def cmd_taxonomy(args):
     from seqledger import taxonomy as otax
+    from seqledger import worms as oworms
     conn = odb.connect(args.db)
     odb.init_db(conn)
     taxdir = args.taxdir or _default_taxdir(args.db)
+    base = os.path.dirname(os.path.abspath(args.db)) or "."
     if args.action == "resolve":
-        if args.force_download:
-            otax.ensure_taxdump(taxdir, force=True)
-            otax.build_index(taxdir, force=True)
-        elif args.rebuild_index:
-            otax.build_index(taxdir, force=True)
         scope = ("all" if args.redo
                  else "unconfirmed" if args.refresh_unconfirmed else "new")
-        results = otax.resolve_catalog(conn, taxdir, scope=scope)
-        review = os.path.join(os.path.dirname(os.path.abspath(args.db)) or ".",
-                              "taxonomy_review.csv")
-        otax.write_review_csv(results, review)
-        n_flag = sum(1 for d in results if d["match_type"] != "exact")
-        print(f"resolved {len(results)} taxa ({n_flag} fuzzy/unresolved)")
-        print(f"review + edit confirmed_taxid in: {review}")
-        print(f"then: seqledger --db {args.db} taxonomy apply --review {review}")
+        if args.source in ("ncbi", "both"):
+            _resolve_ncbi(otax, conn, args, taxdir, scope, base)
+        if args.source in ("worms", "both"):
+            _resolve_worms(oworms, conn, args, taxdir, scope, base)
     elif args.action == "apply":
-        applied, skipped = otax.apply_review(conn, taxdir, args.review)
-        print(f"applied {applied} confirmed taxid(s)"
-              + (f", skipped {len(skipped)}" if skipped else ""))
+        if args.source == "worms":
+            applied, skipped = oworms.apply_review_worms(conn, taxdir, args.review)
+            print(f"applied {applied} confirmed AphiaID(s)"
+                  + (f", skipped {len(skipped)}" if skipped else ""))
+        else:
+            applied, skipped = otax.apply_review(conn, taxdir, args.review)
+            print(f"applied {applied} confirmed taxid(s)"
+                  + (f", skipped {len(skipped)}" if skipped else ""))
         for msg in skipped:
             print(f"    SKIP: {msg}")
     conn.close()
@@ -728,21 +757,27 @@ def build_parser():
     pq.add_argument("term", nargs="?", default="")
     pq.set_defaults(func=cmd_query)
 
-    pt = sub.add_parser("taxonomy", help="resolve sample taxa to NCBI TaxIDs")
+    pt = sub.add_parser("taxonomy", help="resolve sample taxa to NCBI TaxIDs + WoRMS AphiaIDs")
     tsub = pt.add_subparsers(dest="action", required=True)
     tr = tsub.add_parser("resolve",
-                         help="download/index taxdump, resolve taxa, write review CSV")
-    tr.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
+                         help="resolve taxa (NCBI taxdump and/or WoRMS), write review CSV")
+    tr.add_argument("--source", choices=("ncbi", "worms", "both"), default="ncbi",
+                    help="taxonomy source: ncbi (default, local taxdump), worms "
+                         "(WoRMS REST API), or both")
+    tr.add_argument("--taxdir", help="taxdump/cache dir (default: <db dir>/.taxonomy)")
     tr.add_argument("--force-download", action="store_true", help="re-download the taxdump")
     tr.add_argument("--rebuild-index", action="store_true", help="rebuild the taxdump index")
     tr.add_argument("--refresh-unconfirmed", action="store_true",
                     help="also re-resolve taxa resolved before but not yet confirmed "
-                         "(default: only taxa never checked against NCBI)")
+                         "(default: only taxa never checked against the source)")
     tr.add_argument("--redo", action="store_true",
                     help="re-resolve every taxon, including confirmed ones")
-    ta = tsub.add_parser("apply", help="apply confirmed_taxid overrides from a review CSV")
-    ta.add_argument("--review", required=True, help="edited taxonomy_review.csv")
-    ta.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
+    ta = tsub.add_parser("apply", help="apply confirmed overrides from a review CSV")
+    ta.add_argument("--review", required=True, help="edited review CSV")
+    ta.add_argument("--source", choices=("ncbi", "worms"), default="ncbi",
+                    help="which review CSV this is: ncbi (confirmed_taxid, default) "
+                         "or worms (confirmed_aphia_id)")
+    ta.add_argument("--taxdir", help="taxdump/cache dir (default: <db dir>/.taxonomy)")
     pt.set_defaults(func=cmd_taxonomy)
 
     pg = sub.add_parser("gui", help="launch Streamlit browse GUI (locally, or on lTIO via --qsub)")

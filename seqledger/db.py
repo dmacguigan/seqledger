@@ -114,6 +114,25 @@ _MIGRATIONS = [
     ("files", "gz_ok", "INTEGER"),
     ("files", "n_reads", "INTEGER"),
     ("files", "integrity_date", "TEXT"),
+    # WoRMS resolution columns on `taxa` (parallel to the NCBI columns), added by
+    # `taxonomy resolve --source worms`. Existing catalogs pick these up on init-db.
+    ("taxa", "aphia_id", "INTEGER"),
+    ("taxa", "worms_sci_name", "TEXT"),
+    ("taxa", "worms_status", "TEXT"),
+    ("taxa", "worms_match_type", "TEXT"),
+    ("taxa", "worms_rank", "TEXT"),
+    ("taxa", "worms_kingdom", "TEXT"),
+    ("taxa", "worms_phylum", "TEXT"),
+    ("taxa", "worms_class", "TEXT"),
+    ("taxa", "worms_order", "TEXT"),
+    ("taxa", "worms_family", "TEXT"),
+    ("taxa", "worms_genus", "TEXT"),
+    ("taxa", "worms_species", "TEXT"),
+    ("taxa", "worms_lineage", "TEXT"),
+    ("taxa", "worms_alternatives", "TEXT"),
+    ("taxa", "worms_is_marine", "INTEGER"),
+    ("taxa", "worms_confirmed", "INTEGER DEFAULT 0"),
+    ("taxa", "worms_date_resolved", "TEXT"),
 ]
 
 

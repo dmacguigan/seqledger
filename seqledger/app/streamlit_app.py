@@ -7,7 +7,7 @@ Views:
   Projects     one row per sequencing project, with summary stats + owner
   Samples      one row per sample (CSV export carries full R1/R2 paths + owner)
   Files        one row per FASTQ, full absolute path, size, owner, backup status
-  Taxonomy     interactive breadth of NCBI-resolved sample taxonomy
+  Taxonomy     interactive breadth of sample taxonomy (NCBI or WoRMS)
   Grab & Go    search + collect samples; export CSV + an rclone copy job for them
 """
 
@@ -42,6 +42,39 @@ MATCH_LABELS = {"confirmed": "confirmed", "exact": "exact",
 MATCH_COLORS = {"confirmed": "#0B7268", "exact": "#3C8A57",
                 "fuzzy_species": "#C9A227", "fuzzy_genus": "#C77D11",
                 "fuzzy_higher": "#B5532A", "unresolved": "#7A8A86"}
+
+# WoRMS (World Register of Marine Species) resolution, populated by
+# `taxonomy resolve --source worms`. WoRMS's top rank is Kingdom (no domain), so its
+# lineage is one level shorter than the NCBI one.
+WORMS_TAX_URL = "https://www.marinespecies.org/aphia.php?p=taxdetails&id="
+WORMS_RANK_COLS = ["worms_kingdom", "worms_phylum", "worms_class", "worms_order",
+                   "worms_family", "worms_genus", "worms_species"]
+WORMS_RANK_LABELS = ["kingdom", "phylum", "class", "order",
+                     "family", "genus", "species"]
+# WoRMS TAXAMATCH match types, best -> worst.
+WORMS_MATCH_ORDER = ["confirmed", "exact", "phonetic", "near_1", "near_2", "near_3",
+                     "match_quarantine", "unresolved"]
+WORMS_MATCH_LABELS = {"confirmed": "confirmed", "exact": "exact",
+                      "phonetic": "phonetic (sounds-like)", "near_1": "near (1 edit)",
+                      "near_2": "near (2 edits)", "near_3": "near (3 edits)",
+                      "match_quarantine": "quarantined", "unresolved": "unresolved"}
+WORMS_MATCH_COLORS = {"confirmed": "#0B7268", "exact": "#3C8A57",
+                      "phonetic": "#C9A227", "near_1": "#C9A227", "near_2": "#C77D11",
+                      "near_3": "#B5532A", "match_quarantine": "#B5532A",
+                      "unresolved": "#7A8A86"}
+
+# Registry the Taxonomy view switches between with its source toggle. Each entry is
+# self-contained so the chart/quality/composition helpers are source-agnostic.
+SOURCES = {
+    "NCBI": {"rank_cols": RANK_COLS, "rank_labels": RANK_LABELS,
+             "match_col": "match_type", "match_order": MATCH_ORDER,
+             "match_labels": MATCH_LABELS, "match_colors": MATCH_COLORS,
+             "blurb": "against NCBI"},
+    "WoRMS": {"rank_cols": WORMS_RANK_COLS, "rank_labels": WORMS_RANK_LABELS,
+              "match_col": "worms_match_type", "match_order": WORMS_MATCH_ORDER,
+              "match_labels": WORMS_MATCH_LABELS, "match_colors": WORMS_MATCH_COLORS,
+              "blurb": "against WoRMS (World Register of Marine Species)"},
+}
 
 DB_PATH = os.environ.get("SEQLEDGER_DB", "catalog.db")
 
@@ -161,6 +194,12 @@ def load_samples(db_path, mtime):
     # Tolerate a catalog copy that predates the samples.flags migration (the GUI
     # opens read-only and never migrates -- e.g. an older synced Scratch copy).
     flags = "s.flags" if "flags" in _table_columns(db_path, "samples") else "NULL"
+    # Tolerate a catalog copy predating the WoRMS columns (older read-only replica).
+    worms_sel = (
+        "t.worms_sci_name AS worms_name, t.worms_status AS worms_status, "
+        f"CASE WHEN t.aphia_id IS NOT NULL THEN '{WORMS_TAX_URL}' || t.aphia_id END AS worms_url"
+        if "aphia_id" in _table_columns(db_path, "taxa")
+        else "NULL AS worms_name, NULL AS worms_status, NULL AS worms_url")
     return _with_uniqid_url(_sql(db_path, f"""
         SELECT s.project_id, s.sample_id, s.taxon, s.uniq_id, {flags} AS flags,
                p.source, p.seq_data_relpath AS data_dir,
@@ -170,6 +209,7 @@ def load_samples(db_path, mtime):
                CASE WHEN t.taxid IS NOT NULL
                     THEN '{NCBI_TAX_URL}' || t.taxid || '/#'
                          || COALESCE(t.sci_name, s.taxon) END AS ncbi_url,
+               {worms_sel},
                (SELECT {_FULL_PATH} FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
                     AND f.direction = 'R1') AS r1_path,
@@ -191,9 +231,16 @@ def load_samples(db_path, mtime):
 
 @st.cache_data(ttl=60)
 def load_taxonomy(db_path, mtime):
+    # Select both the NCBI and WoRMS rank/match columns so the view's source toggle
+    # can switch client-side. Guard each column for an older copy that predates the
+    # WoRMS migration (missing -> NULL), so the query never hits 'no such column'.
+    taxa_cols = _table_columns(db_path, "taxa")
+    def col(c):
+        return f"t.{c}" if c in taxa_cols else f"NULL AS {c}"
+    extra = ", ".join(col(c) for c in RANK_COLS + ["worms_match_type"] + WORMS_RANK_COLS)
     return _sql(db_path, f"""
         SELECT s.project_id, s.sample_id, s.taxon, t.taxid, t.match_type,
-               {', '.join('t.' + c for c in RANK_COLS)}
+               {extra}
         FROM samples s
         LEFT JOIN taxa t ON t.taxon = s.taxon
         ORDER BY s.project_id, s.sample_id""")
@@ -394,12 +441,13 @@ def samples_view(df, files_df):
     if search:
         s = search.lower()
         mask = (_contains(view["sample_id"], s) | _contains(view["taxon"], s)
-                | _contains(view["uniq_id"], s))
+                | _contains(view["uniq_id"], s) | _contains(view["worms_name"], s))
         view = view[mask]
 
     show = view.copy()
     show["backup"] = show["backup_verified"].map(backup_label)
     on_screen = ["project_id", "sample_id", "taxon", "ncbi_url", "tax_match",
+                 "worms_name", "worms_status", "worms_url",
                  "uniq_id", "uniq_id_url", "flags", "backup"]
     show = _column_filters(show, on_screen, "samples")
     st.caption(f"{len(show)} of {len(df)} samples (full R1/R2 paths, taxid + "
@@ -413,6 +461,9 @@ def samples_view(df, files_df):
             # linking to its NCBI datasets taxonomy page.
             "ncbi_url": st.column_config.LinkColumn(
                 "NCBI taxon match", display_text=r"#(.+)$"),
+            "worms_name": "WoRMS name",
+            "worms_status": "WoRMS status",
+            "worms_url": st.column_config.LinkColumn("WoRMS", display_text="open ↗"),
             "uniq_id_url": _uniqid_link_col()})
     _download(show, f"{_config(DB_PATH, 'catalog_slug')}_samples.csv")
 
@@ -546,7 +597,8 @@ def files_view(df, samples_df):
         ssub = ssub.copy()
         ssub["backup"] = ssub["backup_verified"].map(backup_label)
         cols = [c for c in ["sample_id", "taxon", "ncbi_url", "tax_match",
-                            "taxid", "lineage", "uniq_id", "uniq_id_url",
+                            "taxid", "lineage", "worms_name", "worms_status",
+                            "worms_url", "uniq_id", "uniq_id_url",
                             "backup", "r1_path", "r2_path"] if c in ssub.columns]
         st.dataframe(
             ssub[cols], width="stretch", hide_index=True,
@@ -554,6 +606,9 @@ def files_view(df, samples_df):
                 "tax_match": "match type",
                 "ncbi_url": st.column_config.LinkColumn(
                     "NCBI taxon match", display_text=r"#(.+)$"),
+                "worms_name": "WoRMS name",
+                "worms_status": "WoRMS status",
+                "worms_url": st.column_config.LinkColumn("WoRMS", display_text="open ↗"),
                 "uniq_id_url": _uniqid_link_col()})
         _download(ssub, f"{sid}_sample.csv")
     else:
@@ -562,15 +617,15 @@ def files_view(df, samples_df):
 
 
 @st.cache_data(ttl=60)
-def _taxonomy_counts(db_path, mtime, chosen, depth, include_unknown):
+def _taxonomy_counts(db_path, mtime, source, chosen, depth, include_unknown):
     """Per-lineage sample counts for the sunburst, cached across reruns.
 
     Grouping ~6k samples over up to 8 rank columns is the per-interaction cost;
-    caching on (projects, depth, include_unknown) keeps filter/slider changes
-    from re-grouping every rerun. Returns (counts_df, n_samples, n_projects).
+    caching on (source, projects, depth, include_unknown) keeps filter/slider
+    changes from re-grouping every rerun. Returns (counts_df, n_samples, n_projects).
     """
     df = load_taxonomy(db_path, mtime)
-    cols = RANK_COLS[:depth]
+    cols = SOURCES[source]["rank_cols"][:depth]
     v = df if not chosen else df[df["project_id"].isin(list(chosen))]
     v = v[["project_id"] + cols].copy()
     for c in cols:
@@ -582,15 +637,16 @@ def _taxonomy_counts(db_path, mtime, chosen, depth, include_unknown):
 
 
 @st.cache_data(ttl=60)
-def _matchtype_counts(db_path, mtime, chosen):
+def _matchtype_counts(db_path, mtime, source, chosen):
     """Sample counts by taxonomy match_type (resolution confidence)."""
     df = load_taxonomy(db_path, mtime)
+    s = SOURCES[source]
     v = df if not chosen else df[df["project_id"].isin(list(chosen))]
-    mt = v["match_type"].replace("", pd.NA).fillna("unresolved")
+    mt = v[s["match_col"]].replace("", pd.NA).fillna("unresolved")
     counts = mt.value_counts().rename_axis("match_type").reset_index(name="samples")
     counts["order"] = counts["match_type"].map(
-        {m: i for i, m in enumerate(MATCH_ORDER)}).fillna(len(MATCH_ORDER))
-    counts["label"] = counts["match_type"].map(MATCH_LABELS).fillna(counts["match_type"])
+        {m: i for i, m in enumerate(s["match_order"])}).fillna(len(s["match_order"]))
+    counts["label"] = counts["match_type"].map(s["match_labels"]).fillna(counts["match_type"])
     return counts.sort_values("order")
 
 
@@ -610,29 +666,36 @@ def taxonomy_view(db_path, mtime):
     df = load_taxonomy(db_path, mtime)  # cached; used only for the project list
     with st.sidebar:
         st.header("Filters")
+        source = st.radio("Taxonomy source", list(SOURCES), horizontal=True,
+                          help="NCBI (local taxdump) or WoRMS (World Register of "
+                               "Marine Species). Populate WoRMS with "
+                               "`taxonomy resolve --source worms`.")
+        rank_labels = SOURCES[source]["rank_labels"]
+        rank_cols = SOURCES[source]["rank_cols"]
         projects = sorted(df["project_id"].unique())
         chosen = st.multiselect("Project", projects)
         chart_type = st.radio("Hierarchy chart", ["Sunburst", "Treemap"], horizontal=True)
-        depth_label = st.selectbox("Deepest rank", RANK_LABELS,
-                                   index=RANK_LABELS.index("order"))
+        depth_label = st.selectbox("Deepest rank", rank_labels,
+                                   index=rank_labels.index("order"))
         include_unknown = st.checkbox("Include 'unknown'", value=True)
         ring_cap = st.slider(
-            "Levels shown", 2, len(RANK_COLS), 4,
+            "Levels shown", 2, len(rank_cols), min(4, len(rank_cols)),
             help="Rank levels drawn per step (fewer = faster). Both charts drill on "
                  "click: Sunburst zooms client-side; Treemap re-roots deeper. Clicking "
                  "also scopes the bar below.")
-        comp_label = st.selectbox("Composition rank (stacked bar)", RANK_LABELS,
-                                  index=RANK_LABELS.index("phylum"))
+        comp_label = st.selectbox("Composition rank (stacked bar)", rank_labels,
+                                  index=rank_labels.index("phylum"))
 
-    depth = RANK_LABELS.index(depth_label) + 1
-    cols = RANK_COLS[:depth]
+    depth = rank_labels.index(depth_label) + 1
+    cols = rank_cols[:depth]
     counts, n_samples, n_proj = _taxonomy_counts(
-        db_path, mtime, tuple(chosen), depth, include_unknown)
+        db_path, mtime, source, tuple(chosen), depth, include_unknown)
 
-    st.caption(f"{n_samples} samples across {n_proj} project(s); "
-               "run `taxonomy resolve` to (re)populate. Unranked -> 'unknown'.")
+    resolve_cmd = "taxonomy resolve" + (" --source worms" if source == "WoRMS" else "")
+    st.caption(f"{source}: {n_samples} samples across {n_proj} project(s); "
+               f"run `{resolve_cmd}` to (re)populate. Unranked -> 'unknown'.")
     if not n_samples:
-        st.info("No resolved taxonomy yet. Run `seqledger taxonomy resolve`.")
+        st.info(f"No resolved {source} taxonomy yet. Run `seqledger {resolve_cmd}`.")
         return
 
     # --- Hierarchy chart: sunburst or treemap ---
@@ -671,11 +734,12 @@ def taxonomy_view(db_path, mtime):
     # --- Resolution quality: how confidently taxa were identified ---
     st.divider()
     st.subheader("Resolution quality")
-    st.caption("How each sample's taxon resolved against NCBI: confirmed/exact are "
-               "reliable; fuzzy is a best-guess correction; unresolved had no match.")
-    mt = _matchtype_counts(db_path, mtime, tuple(chosen))
+    st.caption(f"How each sample's taxon resolved {SOURCES[source]['blurb']}: "
+               "confirmed/exact are reliable; the rest are best-guess matches; "
+               "unresolved had no match.")
+    mt = _matchtype_counts(db_path, mtime, source, tuple(chosen))
     fig_mt = px.bar(mt, x="samples", y="label", orientation="h",
-                    color="match_type", color_discrete_map=MATCH_COLORS,
+                    color="match_type", color_discrete_map=SOURCES[source]["match_colors"],
                     category_orders={"label": list(mt["label"])[::-1]})
     fig_mt.update_layout(showlegend=False, yaxis_title=None, xaxis_title="samples",
                          margin=dict(t=6, l=6, r=6, b=6), height=max(160, 34 * len(mt)))
@@ -684,7 +748,7 @@ def taxonomy_view(db_path, mtime):
     # --- Composition by project: stacked sample counts within a coarse rank ---
     st.divider()
     st.subheader(f"Composition by project ({comp_label})")
-    rank_col = RANK_COLS[RANK_LABELS.index(comp_label)]
+    rank_col = rank_cols[rank_labels.index(comp_label)]
     comp = _composition_counts(db_path, mtime, tuple(chosen), rank_col)
     n_cat = comp[rank_col].nunique()
     st.caption(f"Sample counts per project, colored by {comp_label} "

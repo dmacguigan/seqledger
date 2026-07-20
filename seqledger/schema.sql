@@ -96,7 +96,27 @@ CREATE TABLE IF NOT EXISTS taxa (
     lineage      TEXT,               -- '; '-joined ranked lineage, for display
     alternatives TEXT,               -- top fuzzy candidates
     confirmed    INTEGER DEFAULT 0,  -- 1 once a user confirms/overrides via apply
-    date_resolved TEXT
+    date_resolved TEXT,
+    -- WoRMS (World Register of Marine Species) resolution, populated by
+    -- `taxonomy resolve --source worms`. Parallel to the NCBI columns above and
+    -- keyed on the same raw `taxon`. WoRMS's top rank is Kingdom (no domain).
+    aphia_id           INTEGER,           -- WoRMS AphiaID of the accepted taxon
+    worms_sci_name     TEXT,              -- accepted scientific name (valid_name)
+    worms_status       TEXT,              -- accepted | unaccepted | ... (matched-name status)
+    worms_match_type   TEXT,              -- exact | phonetic | near_1 | near_2 | ... | unresolved
+    worms_rank         TEXT,              -- finest resolved rank
+    worms_kingdom      TEXT,
+    worms_phylum       TEXT,
+    worms_class        TEXT,
+    worms_order        TEXT,
+    worms_family       TEXT,
+    worms_genus        TEXT,
+    worms_species      TEXT,
+    worms_lineage      TEXT,              -- '; '-joined ranked lineage, for display
+    worms_alternatives TEXT,             -- top candidate names
+    worms_is_marine    INTEGER,           -- 1 if WoRMS flags the taxon as marine
+    worms_confirmed    INTEGER DEFAULT 0, -- 1 once a user confirms/overrides via apply
+    worms_date_resolved TEXT
 );
 
 -- One row per project backup location, summarizing verification state.

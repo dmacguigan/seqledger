@@ -308,6 +308,18 @@ seqledger --db oceandna_catalog.db taxonomy resolve
 #    rows, then fold the overrides back in:
 seqledger --db oceandna_catalog.db taxonomy apply --review taxonomy_review.csv
 
+#    WoRMS (World Register of Marine Species) -- the authoritative marine register --
+#    can be resolved alongside NCBI with --source. It queries the WoRMS REST API
+#    (needs network; caches responses in <db dir>/.taxonomy/worms_cache.sqlite),
+#    filling the parallel worms_* columns of the `taxa` table (AphiaID, accepted
+#    name, synonym status, kingdom..species lineage -- WoRMS has no domain rank).
+#    Synonyms are followed to their accepted name. `both` runs NCBI + WoRMS; if
+#    WoRMS is unreachable it warns and leaves the NCBI side intact. Ingest's
+#    auto-taxonomy stays NCBI-only (offline/fast) -- run WoRMS explicitly:
+seqledger --db oceandna_catalog.db taxonomy resolve --source worms   # or: --source both
+#    review + edit confirmed_aphia_id in worms_review.csv, then apply:
+seqledger --db oceandna_catalog.db taxonomy apply --source worms --review worms_review.csv
+
 # 6. lookups
 seqledger --db oceandna_catalog.db query summary
 seqledger --db oceandna_catalog.db query uniq-id "USNM 477715"
@@ -367,11 +379,14 @@ build-your-own selection view (sidebar):
   export carries the full absolute R1/R2 paths + owner.
 - **Files** - one row per FASTQ: full absolute path, size, owner, backup status.
 - **Taxonomy** - interactive view of the catalog's taxonomic breadth (filter by
-  project, pick the deepest rank, toggle the `unknown` bucket), with an
+  project, pick the deepest rank, toggle the `unknown` bucket), with a **source
+  toggle** to switch the whole view between **NCBI** and **WoRMS** taxonomy, an
   interactive hierarchy chart you can switch between **sunburst and treemap**,
   a click-scoped per-rank sample-count bar, a **resolution-quality** breakdown
   (confirmed / exact / fuzzy / unresolved), and a **composition-by-project**
-  stacked bar (colored by a chosen rank). Populated by `taxonomy resolve`.
+  stacked bar (colored by a chosen rank). Populated by `taxonomy resolve`
+  (WoRMS by `--source worms`). The Samples view also shows each sample's WoRMS
+  accepted name, status, and a clickable AphiaID link.
 - **Grab & Go** - build a hand-picked set of samples. Search by project,
   taxonomy (taxon / NCBI name / lineage), sample ID, and UniqID, with a **regex
   toggle**; add matches (selected rows or all) to a running table that persists as
@@ -435,14 +450,21 @@ sample, extra map-file columns kept as JSON; `flags` records any NA-fill/skip re
 -> `files` (R1/R2, with `store_md5` /
 `pdrive_md5` / `md5_match`; `rel_path` may be nested when FASTQ live in subdirs).
 `backups` summarizes per-project verification; `validation_log` records
-validation runs. `taxa` holds the NCBI resolution per distinct raw Taxon
-string (taxid, ranked lineage columns `tax_domain`..`tax_species`, `match_type`,
-`confirmed`), joined to `samples.taxon`. See `schema.sql`.
+validation runs. `taxa` holds the per distinct raw Taxon string resolution against
+**two** sources, joined to `samples.taxon`: the NCBI columns (taxid, ranked lineage
+`tax_domain`..`tax_species`, `match_type`, `confirmed`) and the parallel WoRMS
+columns (`aphia_id`, `worms_sci_name`, `worms_status`, `worms_match_type`, lineage
+`worms_kingdom`..`worms_species` -- no domain rank in WoRMS -- and `worms_confirmed`).
+See `schema.sql`.
 
 Taxonomy resolution is pure-Python (stdlib): the NCBI taxdump is parsed once into
 `<db dir>/.taxonomy/taxdump.sqlite` (git-ignored), then exact `name -> taxid` with
 a genus-anchored fuzzy fallback. Mirrors RiboPilot's `R/taxonomy.R` approach
-without the `taxonkit` binary.
+without the `taxonkit` binary. WoRMS resolution (`--source worms`) instead queries
+the WoRMS REST API (stdlib urllib + json, no dependencies, no API key) with its
+batch TAXAMATCH matcher, following synonyms to their accepted name; responses are
+cached in `<db dir>/.taxonomy/worms_cache.sqlite` (git-ignored) so re-runs are cheap
+and repeat/offline runs still work.
 
 Ownership + size (`owner_name` / `owner_uid` / `size_bytes` on `files`, plus
 `owner_name` / `seqdata_root` on `projects`) are captured during `ingest` when

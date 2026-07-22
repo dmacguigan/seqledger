@@ -186,7 +186,7 @@ def _with_uniqid_url(df):
 
 # column_config entry to render uniq_id_url as a compact clickable link.
 def _uniqid_link_col():
-    return st.column_config.LinkColumn("UniqID link", display_text="open ↗")
+    return st.column_config.LinkColumn("uniq_id_link", display_text="open ↗")
 
 
 @st.cache_data(ttl=60)
@@ -466,11 +466,11 @@ def samples_view(df, files_df):
             # Each source's matched name is a link (label = the name, carried in the
             # URL '#'-fragment) to its taxonomy page; the "* match" column is that
             # source's match confidence, so NCBI vs WoRMS fuzziness is never conflated.
-            "ncbi_url": st.column_config.LinkColumn("NCBI name", display_text=r"#(.+)$"),
-            "tax_match": "NCBI match",
-            "worms_url": st.column_config.LinkColumn("WoRMS name", display_text=r"#(.+)$"),
-            "worms_match": "WoRMS match",
-            "worms_status": "WoRMS status",
+            "ncbi_url": st.column_config.LinkColumn("NCBI_name", display_text=r"#(.+)$"),
+            "tax_match": "NCBI_match",
+            "worms_url": st.column_config.LinkColumn("WoRMS_name", display_text=r"#(.+)$"),
+            "worms_match": "WoRMS_match",
+            "worms_status": "WoRMS_status",
             "uniq_id_url": _uniqid_link_col()})
     _download(show, f"{_config(DB_PATH, 'catalog_slug')}_samples.csv")
 
@@ -550,7 +550,7 @@ def projects_view(df, issues):
                 sub[["issue", "detail", "filename", "full_path", "sample_id",
                      "direction", "taxon", "uniq_id", "uniq_id_url"]],
                 width="stretch", hide_index=True,
-                column_config={"full_path": "expected path",
+                column_config={"full_path": "expected_path",
                                "uniq_id_url": _uniqid_link_col()})
             _download(sub, f"{pid}_data_issues.csv")
         else:
@@ -610,11 +610,11 @@ def files_view(df, samples_df):
         st.dataframe(
             ssub[cols], width="stretch", hide_index=True,
             column_config={
-                "ncbi_url": st.column_config.LinkColumn("NCBI name", display_text=r"#(.+)$"),
-                "tax_match": "NCBI match",
-                "worms_url": st.column_config.LinkColumn("WoRMS name", display_text=r"#(.+)$"),
-                "worms_match": "WoRMS match",
-                "worms_status": "WoRMS status",
+                "ncbi_url": st.column_config.LinkColumn("NCBI_name", display_text=r"#(.+)$"),
+                "tax_match": "NCBI_match",
+                "worms_url": st.column_config.LinkColumn("WoRMS_name", display_text=r"#(.+)$"),
+                "worms_match": "WoRMS_match",
+                "worms_status": "WoRMS_status",
                 "uniq_id_url": _uniqid_link_col()})
         _download(ssub, f"{sid}_sample.csv")
     else:
@@ -911,7 +911,7 @@ def custom_table_view(samples_df, paths_df):
     event = st.dataframe(
         view[cols], width="stretch", hide_index=True,
         on_select="rerun", selection_mode="multi-row", key="cart_search",
-        column_config={"tax_name": "NCBI name", "uniq_id_url": _uniqid_link_col()})
+        column_config={"tax_name": "NCBI_name", "uniq_id_url": _uniqid_link_col()})
 
     sel = event.selection.rows if event and event.selection else []
     c1, c2, c3 = st.columns(3)
@@ -956,13 +956,13 @@ def custom_table_view(samples_df, paths_df):
         table[tcols], width="stretch", hide_index=True,
         on_select="rerun", selection_mode="multi-row", key="cart_table",
         column_config={
-            "ncbi_url": st.column_config.LinkColumn("NCBI name", display_text=r"#(.+)$"),
-            "taxid": "NCBI taxID",
-            "tax_match": "NCBI match",
-            "worms_url": st.column_config.LinkColumn("WoRMS name", display_text=r"#(.+)$"),
-            "worms_match": "WoRMS match",
-            "worms_status": "WoRMS status",
-            "total_size": "Seq data size",
+            "ncbi_url": st.column_config.LinkColumn("NCBI_name", display_text=r"#(.+)$"),
+            "taxid": "NCBI_taxid",
+            "tax_match": "NCBI_match",
+            "worms_url": st.column_config.LinkColumn("WoRMS_name", display_text=r"#(.+)$"),
+            "worms_match": "WoRMS_match",
+            "worms_status": "WoRMS_status",
+            "total_size": "seq_data_size",
             "uniq_id_url": _uniqid_link_col()})
     tsel = tevent.selection.rows if tevent and tevent.selection else []
     if st.button(f"➖ Remove selected ({len(tsel)})", disabled=not tsel):
@@ -981,11 +981,11 @@ def custom_table_view(samples_df, paths_df):
     # display's link columns; 'taxon' is the sample's raw string (neither source).
     export_map = {
         "project_id": "project_id", "sample_id": "sample_id", "taxon": "taxon",
-        "tax_name": "ncbi_name", "taxid": "ncbi_taxid", "tax_match": "ncbi_match",
-        "lineage": "ncbi_lineage",
-        "worms_name": "worms_name", "aphia_id": "worms_aphia_id",
-        "worms_match": "worms_match", "worms_status": "worms_status",
-        "worms_lineage": "worms_lineage",
+        "tax_name": "NCBI_name", "taxid": "NCBI_taxid", "tax_match": "NCBI_match",
+        "lineage": "NCBI_lineage",
+        "worms_name": "WoRMS_name", "aphia_id": "WoRMS_aphia_id",
+        "worms_match": "WoRMS_match", "worms_status": "WoRMS_status",
+        "worms_lineage": "WoRMS_lineage",
         "total_size": "seq_data_size_gb",
         "uniq_id": "uniq_id", "r1_path": "r1_path", "r2_path": "r2_path"}
     export_cols = [c for c in export_map if c in table.columns]

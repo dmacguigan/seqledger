@@ -257,6 +257,36 @@ def test_emit_json_resume_skips_seeded_files(tmp_path):
     assert res[str(pks["R2"])]["status"] == "ok"          # freshly checked
 
 
+def test_collect_json_skips_orphan_project(tmp_path):
+    # A result file can name a project_id that is not (or no longer) in the catalog.
+    # validation_log.project_id has an FK to projects, so collecting it must skip the
+    # orphan with a warning rather than aborting with 'FOREIGN KEY constraint failed'.
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    pks = _emit_pks(conn)
+    results = str(tmp_path / "results")
+    os.makedirs(results)
+    # Known project -- its file_pks exist in the catalog.
+    good = os.path.join(results, "genohub-1_X.json")
+    with open(good, "w") as f:
+        json.dump({"project_id": "genohub-1_X", "run_date": "2020-01-01",
+                   "results": {str(pks["R1"]): {"status": "ok", "n_reads": 10},
+                               str(pks["R2"]): {"status": "ok", "n_reads": 10}}}, f)
+    open(good + ".done", "w").close()
+    # Orphan project -- not in the projects table.
+    bad = os.path.join(results, "ghost_P.json")
+    with open(bad, "w") as f:
+        json.dump({"project_id": "ghost_P", "run_date": "2020-01-01",
+                   "results": {"999999": {"status": "ok", "n_reads": 5}}}, f)
+    open(bad + ".done", "w").close()
+
+    summaries = oint.collect_json(conn, results, progress=False)  # must not raise
+    assert "genohub-1_X" in summaries       # known project summarized
+    assert "ghost_P" not in summaries        # orphan skipped
+    logged = {r[0] for r in conn.execute("SELECT DISTINCT project_id FROM validation_log")}
+    assert "genohub-1_X" in logged and "ghost_P" not in logged
+
+
 def test_emit_json_recheck_ignores_seed(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
     conn, root = _setup(tmp_path, rows)

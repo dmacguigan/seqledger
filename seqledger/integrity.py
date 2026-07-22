@@ -478,4 +478,15 @@ def collect_json(conn, results_dir, progress=True):
     conn.commit()
     if progress:
         print(f"persisted {n_files} file result(s) from {len(paths)} project file(s)")
-    return aggregate_from_db(conn, sorted(project_ids))
+    # Only summarize/log projects still present in the catalog. A result file can name
+    # a project_id that was never ingested or has since been removed (e.g. a renamed or
+    # duplicate batch folder). validation_log.project_id has a FK to projects, so
+    # logging an orphan would abort the whole collect with 'FOREIGN KEY constraint
+    # failed' -- skip it (its file_pk UPDATEs above were harmless no-ops) and warn.
+    have = {r[0] for r in conn.execute("SELECT project_id FROM projects")}
+    known = sorted(p for p in project_ids if p in have)
+    orphans = sorted(p for p in project_ids if p not in have)
+    if orphans and progress:
+        print(f"  warning: {len(orphans)} result file(s) name project_id(s) not in the "
+              f"catalog -- skipped (no summary/log): {', '.join(orphans)}")
+    return aggregate_from_db(conn, known)

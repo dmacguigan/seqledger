@@ -89,12 +89,20 @@ _ISSUE_LABEL = {
     "missing":              "missing from disk",
     "missing from mapfile": "missing from mapfile",
     "orphan":               "missing from mapfile",
+    # Integrity-check failures (files.integrity_status / n_reads), surfaced in the
+    # same per-project issues table as the disk/mapfile checks.
+    "gzip error":           "gzip error",
+    "format error":         "format error",
+    "empty (0 reads)":      "empty (0 reads)",
 }
 _ISSUE_DETAIL = {
     "missing from disk":    "Sequence file is listed in the mapfile but was not found on disk.",
     "missing":              "Sequence file is listed in the mapfile but was not found on disk.",
     "missing from mapfile": "Sequence file is present on disk but is not referenced by any mapfile row.",
     "orphan":               "Sequence file is present on disk but is not referenced by any mapfile row.",
+    "gzip error":           "File is not valid gzip or is truncated (failed decompression / `gunzip -t`).",
+    "format error":         "File decompresses but is not valid FASTQ (line count not a multiple of 4).",
+    "empty (0 reads)":      "File passed the gzip/FASTQ check but contains 0 reads (empty file or failed transfer?).",
 }
 
 # projects.metadata_status -> (short label, plain-english meaning). The full
@@ -310,6 +318,32 @@ def load_data_issues(db_path, mtime):
         ORDER BY i.project_id, i.kind, i.filename"""))
 
 
+@st.cache_data(ttl=60)
+def load_integrity_issues(db_path, mtime):
+    """Files that failed the integrity check (corrupt or empty), shaped exactly like
+    load_data_issues so both feed the one per-project 'Data-files issues' table.
+
+    'gzip_error'/'format_error' are hard failures; a status of 'ok' with n_reads == 0
+    is an empty file that passed the gzip/FASTQ check but carries no data. Unchecked
+    files are not listed -- 'not yet verified' is a project-level state, not a per-file
+    problem (the project row's integrity column already reports the unchecked count).
+    """
+    return _with_uniqid_url(_sql(db_path, f"""
+        SELECT f.project_id,
+               CASE f.integrity_status
+                    WHEN 'gzip_error' THEN 'gzip error'
+                    WHEN 'format_error' THEN 'format error'
+                    ELSE 'empty (0 reads)' END AS kind,
+               f.filename, {_FULL_PATH} AS full_path,
+               s.sample_id, f.direction, s.taxon, s.uniq_id
+        FROM files f
+        LEFT JOIN projects p ON p.project_id = f.project_id
+        LEFT JOIN samples s ON s.sample_pk = f.sample_pk
+        WHERE f.integrity_status IN ('gzip_error', 'format_error')
+           OR (f.integrity_status = 'ok' AND f.n_reads = 0)
+        ORDER BY f.project_id, kind, f.filename"""))
+
+
 def backup_label(v):
     """Plain-english P-drive backup state from the 1/0 backups.verified flag."""
     return "Verified" if v == 1 else "Not verified"
@@ -494,7 +528,7 @@ def samples_view(df, files_df):
         st.info("No files cataloged for this sample.")
 
 
-def projects_view(df, issues):
+def projects_view(df, issues, integ_issues):
     with st.sidebar:
         st.header("Filters")
         search = st.text_input("Search (project, description)")
@@ -527,7 +561,7 @@ def projects_view(df, issues):
     show = _column_filters(show, cols, "projects")
     st.caption(f"{len(show)} of {len(df)} projects. 'mapfile' flags a folder with no "
                "mapfile, a mapfile with no folder, or a broken mapfile. Select a row for "
-               "its mapfile explanation + data-files issues below.")
+               "its mapfile explanation + data-files & integrity issues below.")
     event = st.dataframe(show[cols], width="stretch", hide_index=True,
                          on_select="rerun", selection_mode="single-row",
                          key="projects_table")
@@ -541,9 +575,18 @@ def projects_view(df, issues):
         if mstatus != "ok":
             detail = prow.get("metadata_detail") or _MAPFILE_DETAIL.get(mstatus, "")
             st.warning(f"**Mapfile issue ({_MAPFILE_LABEL.get(mstatus, mstatus)}):** {detail}")
-        sub = issues[issues["project_id"] == pid].copy()
+        # Disk/mapfile checks (data_check_issues) and integrity-check failures live in
+        # different tables but are the same question to a user ("what's wrong with this
+        # project's files?"), so surface both here instead of hiding integrity errors
+        # behind the Files view. Both frames share columns, so concat + one kind->label
+        # map renders them together.
+        sub = pd.concat([issues[issues["project_id"] == pid],
+                         integ_issues[integ_issues["project_id"] == pid]],
+                        ignore_index=True).sort_values(
+            ["kind", "filename"], kind="stable")
         st.subheader(f"Data-files issues: {pid}")
         if len(sub):
+            sub = sub.copy()
             sub["issue"] = sub["kind"].map(_ISSUE_LABEL).fillna(sub["kind"])
             sub["detail"] = sub["kind"].map(_ISSUE_DETAIL).fillna("")
             st.dataframe(
@@ -554,8 +597,8 @@ def projects_view(df, issues):
                                "uniq_id_url": _uniqid_link_col()})
             _download(sub, f"{pid}_data_issues.csv")
         else:
-            st.info("No recorded data-files issues. "
-                    "Run `validate --seqdata-root` to refresh.")
+            st.info("No recorded data-files or integrity issues. Run "
+                    "`validate --seqdata-root` and `integrity --collect` to refresh.")
 
 
 def files_view(df, samples_df):
@@ -1078,7 +1121,8 @@ def main():
         samples_view(load_samples(DB_PATH, mtime), load_files(DB_PATH, mtime))
     elif view_name == "Projects":
         projects_view(load_projects(DB_PATH, mtime),
-                      load_data_issues(DB_PATH, mtime))
+                      load_data_issues(DB_PATH, mtime),
+                      load_integrity_issues(DB_PATH, mtime))
     elif view_name == "Files":
         files_view(load_files(DB_PATH, mtime), load_samples(DB_PATH, mtime))
     elif view_name == "Taxonomy":

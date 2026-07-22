@@ -200,12 +200,13 @@ def load_samples(db_path, mtime):
     # ncbi_url -- no separate name/link columns. worms_name is kept for search + CSV.
     worms_sel = (
         "t.worms_sci_name AS worms_name, t.worms_status AS worms_status, "
-        "t.worms_match_type AS worms_match, "
+        "t.worms_match_type AS worms_match, t.aphia_id AS aphia_id, "
+        "t.worms_lineage AS worms_lineage, "
         f"CASE WHEN t.aphia_id IS NOT NULL THEN '{WORMS_TAX_URL}' || t.aphia_id "
         "|| '#' || COALESCE(t.worms_sci_name, s.taxon) END AS worms_url"
         if "aphia_id" in _table_columns(db_path, "taxa")
         else "NULL AS worms_name, NULL AS worms_status, NULL AS worms_match, "
-             "NULL AS worms_url")
+             "NULL AS aphia_id, NULL AS worms_lineage, NULL AS worms_url")
     return _with_uniqid_url(_sql(db_path, f"""
         SELECT s.project_id, s.sample_id, s.taxon, s.uniq_id, {flags} AS flags,
                p.source, p.seq_data_relpath AS data_dir,
@@ -939,13 +940,30 @@ def custom_table_view(samples_df, paths_df):
     idx = samples_df.set_index(["project_id", "sample_id"]).index
     table = samples_df[idx.isin(keyset)].copy()
 
-    tcols = ["project_id", "sample_id", "taxon", "tax_name", "taxid", "uniq_id",
-             "uniq_id_url", "lineage", "r1_path", "r2_path"]
+    # Combined size of each sample's sequence files (R1 + R2 + any extras), in GB.
+    # min_count=1 keeps samples with no recorded sizes as NaN (blank), not 0.00 GB.
+    sizes = (paths_df.groupby(["project_id", "sample_id"])["size_bytes"]
+             .sum(min_count=1).rename("total_bytes").reset_index())
+    table = table.merge(sizes, on=["project_id", "sample_id"], how="left")
+    table["total_size"] = table["total_bytes"].map(human_size)
+
+    tcols = ["project_id", "sample_id", "taxon",
+             "ncbi_url", "taxid", "tax_match",
+             "worms_url", "worms_match", "worms_status",
+             "total_size", "uniq_id", "uniq_id_url", "r1_path", "r2_path"]
     tcols = [c for c in tcols if c in table.columns]
     tevent = st.dataframe(
         table[tcols], width="stretch", hide_index=True,
         on_select="rerun", selection_mode="multi-row", key="cart_table",
-        column_config={"uniq_id_url": _uniqid_link_col()})
+        column_config={
+            "ncbi_url": st.column_config.LinkColumn("NCBI name", display_text=r"#(.+)$"),
+            "taxid": "NCBI taxID",
+            "tax_match": "NCBI match",
+            "worms_url": st.column_config.LinkColumn("WoRMS name", display_text=r"#(.+)$"),
+            "worms_match": "WoRMS match",
+            "worms_status": "WoRMS status",
+            "total_size": "Seq data size",
+            "uniq_id_url": _uniqid_link_col()})
     tsel = tevent.selection.rows if tevent and tevent.selection else []
     if st.button(f"➖ Remove selected ({len(tsel)})", disabled=not tsel):
         for i in tsel:
@@ -959,8 +977,21 @@ def custom_table_view(samples_df, paths_df):
 
     id_choices = {"Sample ID": "sample_id", "UniqID": "uniq_id"}
 
+    # Export uses plain, source-labeled headers (NCBI vs WoRMS) instead of the
+    # display's link columns; 'taxon' is the sample's raw string (neither source).
+    export_map = {
+        "project_id": "project_id", "sample_id": "sample_id", "taxon": "taxon",
+        "tax_name": "ncbi_name", "taxid": "ncbi_taxid", "tax_match": "ncbi_match",
+        "lineage": "ncbi_lineage",
+        "worms_name": "worms_name", "aphia_id": "worms_aphia_id",
+        "worms_match": "worms_match", "worms_status": "worms_status",
+        "worms_lineage": "worms_lineage",
+        "total_size": "seq_data_size_gb",
+        "uniq_id": "uniq_id", "r1_path": "r1_path", "r2_path": "r2_path"}
+    export_cols = [c for c in export_map if c in table.columns]
+    export_df = table[export_cols].rename(columns=export_map)
     st.download_button("Download table CSV",
-                       table[tcols].to_csv(index=False).encode(),
+                       export_df.to_csv(index=False).encode(),
                        f"{_config(DB_PATH, 'catalog_slug')}_grab_and_go.csv", "text/csv")
 
     c1, c2 = st.columns(2, vertical_alignment="bottom")

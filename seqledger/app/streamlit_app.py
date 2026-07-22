@@ -1042,9 +1042,10 @@ def custom_table_view(samples_df, paths_df):
         "worms_name": "WoRMS_name", "aphia_id": "WoRMS_aphia_id",
         "worms_match": "WoRMS_match", "worms_status": "WoRMS_status",
         "worms_lineage": "WoRMS_lineage",
-        "total_size": "seq_data_size_gb",
+        "uniq_id": "uniq_id",
         "r1_reads": "r1_reads", "r2_reads": "r2_reads",
-        "uniq_id": "uniq_id", "r1_path": "r1_path", "r2_path": "r2_path"}
+        "total_size": "seq_data_size_gb",
+        "r1_path": "r1_path", "r2_path": "r2_path"}
     export_cols = [c for c in export_map if c in table.columns]
     export_df = table[export_cols].rename(columns=export_map)
     st.download_button("Download table CSV",

@@ -414,7 +414,8 @@ def load_file_paths(db_path, mtime):
     """One row per file with its source root + rel_path, for cart export/rclone."""
     return _sql(db_path, f"""
         SELECT f.project_id, s.sample_id, f.direction, f.filename,
-               p.seqdata_root, f.rel_path, {_FULL_PATH} AS full_path, f.size_bytes
+               p.seqdata_root, f.rel_path, {_FULL_PATH} AS full_path,
+               f.size_bytes, f.n_reads
         FROM files f
         JOIN projects p ON p.project_id = f.project_id
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
@@ -990,10 +991,22 @@ def custom_table_view(samples_df, paths_df):
     table = table.merge(sizes, on=["project_id", "sample_id"], how="left")
     table["total_size"] = table["total_bytes"].map(human_size)
 
+    # R1 and R2 read counts per sample (summed across lane-split files), reported as
+    # separate columns so any R1/R2 parity mismatch is visible. A NULL n_reads (an
+    # unchecked file) keeps that direction's total blank rather than undercounting;
+    # nullable Int64 renders whole counts without a trailing .0.
+    for _dir, _col in (("R1", "r1_reads"), ("R2", "r2_reads")):
+        counts = (paths_df[paths_df["direction"] == _dir]
+                  .groupby(["project_id", "sample_id"])["n_reads"]
+                  .sum(min_count=1).rename(_col).reset_index())
+        table = table.merge(counts, on=["project_id", "sample_id"], how="left")
+        table[_col] = table[_col].astype("Int64")
+
     tcols = ["project_id", "sample_id", "taxon",
              "ncbi_url", "taxid", "tax_match",
              "worms_url", "worms_match", "worms_status",
-             "total_size", "uniq_id", "uniq_id_url", "r1_path", "r2_path"]
+             "total_size", "r1_reads", "r2_reads",
+             "uniq_id", "uniq_id_url", "r1_path", "r2_path"]
     tcols = [c for c in tcols if c in table.columns]
     tevent = st.dataframe(
         table[tcols], width="stretch", hide_index=True,
@@ -1030,6 +1043,7 @@ def custom_table_view(samples_df, paths_df):
         "worms_match": "WoRMS_match", "worms_status": "WoRMS_status",
         "worms_lineage": "WoRMS_lineage",
         "total_size": "seq_data_size_gb",
+        "r1_reads": "r1_reads", "r2_reads": "r2_reads",
         "uniq_id": "uniq_id", "r1_path": "r1_path", "r2_path": "r2_path"}
     export_cols = [c for c in export_map if c in table.columns]
     export_df = table[export_cols].rename(columns=export_map)

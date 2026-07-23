@@ -36,6 +36,8 @@ from .db import (METADATA_SUFFIX, REQUIRED_COLUMNS, fastq_globs, get_config,
 
 # Fallback FASTQ globs when no config is available (direct callers / tests).
 _DEFAULT_FASTQ_GLOBS = ("*.fastq.gz", "*.fq.gz")
+# Chunk size for batched DELETEs so a big project can't exceed SQLITE_MAX_VARIABLE_NUMBER.
+_DELETE_CHUNK = 500
 from .validate import (Finding, FAIL, WARN, NA_VALUE, FLAG_MESSAGES,
                        plan_rows, validate_metadata, overall_status)
 
@@ -260,9 +262,12 @@ def _upsert_sample(conn, project_id, sample_id, taxon, uniq_id, extra_json, flag
 
 
 def _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
-                 size_bytes=None, owner_uid=None, owner_name=None):
+                 size_bytes=None, owner_uid=None, owner_name=None, disk_confirmed=False):
     # Do not clobber md5 columns on re-ingest. Refresh size/owner only when known
-    # (COALESCE keeps prior values if the file was unreachable this run).
+    # (COALESCE keeps prior values if the file was unreachable this run). rel_path is
+    # overwritten only when the file was actually seen on disk this run (disk_confirmed);
+    # a metadata-only re-ingest passes the flat guess but must not clobber a correct
+    # nested rel_path recorded by an earlier disk-backed run.
     was_new = conn.execute(
         "SELECT 1 FROM files WHERE project_id=? AND filename=?",
         (project_id, filename)).fetchone() is None
@@ -272,12 +277,13 @@ def _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
               size_bytes, owner_uid, owner_name)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, filename) DO UPDATE SET
-             sample_pk=excluded.sample_pk, direction=excluded.direction, rel_path=excluded.rel_path,
+             sample_pk=excluded.sample_pk, direction=excluded.direction,
+             rel_path=CASE WHEN ? THEN excluded.rel_path ELSE files.rel_path END,
              size_bytes=COALESCE(excluded.size_bytes, files.size_bytes),
              owner_uid=COALESCE(excluded.owner_uid, files.owner_uid),
              owner_name=COALESCE(excluded.owner_name, files.owner_name)""",
         (project_id, sample_pk, direction, filename, rel_path,
-         size_bytes, owner_uid, owner_name))
+         size_bytes, owner_uid, owner_name, 1 if disk_confirmed else 0))
     return was_new
 
 
@@ -373,7 +379,10 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
     csv_ids = set()
     csv_files = set()
 
-    core = set(["ID", "R1", "R2", "Taxon", uniqid_col])
+    # Exclude the core columns by their verbatim header cells (header validated
+    # positionally, case-insensitively), so extra_json doesn't re-capture ID/R1/R2/
+    # Taxon when the mapfile header uses non-canonical casing.
+    core = {header[0], header[1], header[2], header[3], uniqid_col}
     seen_files = {}  # filename -> "sample_id/direction" it was first claimed by
     for p in usable:
         sample_id = p["sample_id"]
@@ -415,7 +424,8 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
             uid = info["uid"] if info else None
             name = info["name"] if info else None
             if _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
-                            size_bytes=size, owner_uid=uid, owner_name=name):
+                            size_bytes=size, owner_uid=uid, owner_name=name,
+                            disk_confirmed=info is not None):
                 stats["new_files"] += 1
 
     stats["orphan_samples"] = sorted(set(existing) - csv_ids)
@@ -429,15 +439,25 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
             [(project_id, sid) for sid in stats["orphan_samples"]])
         stats["pruned_samples"] = list(stats["orphan_samples"])
         if csv_files:
-            placeholders = ",".join("?" * len(csv_files))
-            cur = conn.execute(
-                f"DELETE FROM files WHERE project_id=? AND filename NOT IN ({placeholders})",
-                (project_id, *csv_files))
+            # Compute stale filenames in Python (a "filename NOT IN (?,?,...)" over a
+            # big project can exceed SQLITE_MAX_VARIABLE_NUMBER) and delete in chunks.
+            existing_files = {r["filename"] for r in conn.execute(
+                "SELECT filename FROM files WHERE project_id=?", (project_id,))}
+            to_delete = sorted(existing_files - csv_files)
+            for i in range(0, len(to_delete), _DELETE_CHUNK):
+                conn.executemany(
+                    "DELETE FROM files WHERE project_id=? AND filename=?",
+                    [(project_id, fn) for fn in to_delete[i:i + _DELETE_CHUNK]])
+            # filename is UNIQUE per project, so one row deleted per name.
+            stats["pruned_files"] = len(to_delete)
         else:
-            # Empty CSV: `filename NOT IN (NULL)` matches nothing (SQL 3-valued logic),
-            # so delete all this project's file rows explicitly instead.
-            cur = conn.execute("DELETE FROM files WHERE project_id=?", (project_id,))
-        stats["pruned_files"] = cur.rowcount
+            # An empty/all-missing mapfile references no files -- likely a transiently
+            # broken mapfile rather than every file genuinely gone. Do NOT wipe the
+            # project's file rows (that would be catastrophic); keep them and warn.
+            findings.append(Finding(WARN,
+                "prune deleted no files because the mapfile referenced none; "
+                "existing file rows were kept to avoid a catastrophic wipe"))
+            stats["pruned_files"] = 0
 
     conn.commit()
     return project_id, findings, status, stats
@@ -471,7 +491,8 @@ def _ingest_diskonly(conn, project_id, data_dir, seqdata_root, metadata_status, 
     for fn, info in sorted(disk.items()):
         if _upsert_file(conn, project_id_, None, _infer_direction(fn), fn,
                         info["rel_path"], size_bytes=info["size"],
-                        owner_uid=info["uid"], owner_name=info["name"]):
+                        owner_uid=info["uid"], owner_name=info["name"],
+                        disk_confirmed=True):
             stats["new_files"] += 1
     conn.commit()
     return stats
@@ -561,23 +582,43 @@ def ingest_tree(conn, seqdata_root, metadata_root, prune=False):
     return results
 
 
-def prune_missing_projects(conn, seqdata_root, metadata_root):
+def prune_missing_projects(conn, seqdata_root, metadata_root, force=False):
     """Delete catalog projects that vanished from BOTH roots (folder + mapfile gone).
 
     Only for auto-discovery. Cascades to the project's samples/files/backups/etc.
-    Safety: if discovery turns up nothing (roots empty / unmounted / unreadable),
-    this refuses to prune and returns skipped=True, so a missing mount can't wipe
-    the catalog. Only projects whose stored seqdata_root matches this run's root are
-    eligible, so projects ingested from a different root are never touched.
-    Returns {"pruned": [project_id, ...], "skipped": bool}.
+    Safety (each refuses with skipped=True and a human-readable "reason", so a
+    partial/broken mount can't wipe the catalog):
+      - either root is not an existing directory (can't tell "unmounted" from "empty");
+      - discovery turns up nothing at all;
+      - the prune would remove more than half of this root's projects (blast-radius
+        cap) -- unless force=True is passed to override.
+    Only projects whose stored seqdata_root matches this run's root are eligible, so
+    projects ingested from a different root are never touched.
+    Returns {"pruned": [project_id, ...], "skipped": bool[, "reason": str]}.
     """
+    # A missing/unmounted root reads as "empty" from a plain listdir, so refuse
+    # rather than treat everything under it as vanished.
+    if not (seqdata_root and os.path.isdir(seqdata_root)):
+        return {"pruned": [], "skipped": True,
+                "reason": f"seqdata_root is not an existing directory: {seqdata_root!r}"}
+    if not (metadata_root and os.path.isdir(metadata_root)):
+        return {"pruned": [], "skipped": True,
+                "reason": f"metadata_root is not an existing directory: {metadata_root!r}"}
     discovered = {p["project_id"] for p in discover_projects(seqdata_root, metadata_root)}
     if not discovered:
-        return {"pruned": [], "skipped": True}
+        return {"pruned": [], "skipped": True,
+                "reason": "discovery found no projects under these roots (empty or unmounted)"}
     abs_root = os.path.abspath(seqdata_root)
     in_db = [r["project_id"] for r in conn.execute(
         "SELECT project_id FROM projects WHERE seqdata_root=?", (abs_root,))]
     gone = sorted(pid for pid in in_db if pid not in discovered)
+    # Blast-radius cap: removing more than half of this root's projects (or all of
+    # them) likely signals a partial/broken mount, not a real cleanup. Refuse unless
+    # the caller explicitly forces it.
+    if not force and gone and len(gone) > len(in_db) / 2:
+        return {"pruned": [], "skipped": True,
+                "reason": (f"refusing to prune {len(gone)} of {len(in_db)} projects "
+                           "under this root (>50%); pass force=True to override")}
     conn.executemany("DELETE FROM projects WHERE project_id=?", [(p,) for p in gone])
     conn.commit()
     return {"pruned": gone, "skipped": False}

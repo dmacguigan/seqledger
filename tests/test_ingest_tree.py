@@ -246,6 +246,70 @@ def test_prune_missing_projects_ignores_other_roots(tmp_path):
         "SELECT COUNT(*) FROM projects WHERE project_id='other-proj'").fetchone()[0] == 1
 
 
+def test_reingest_metadata_only_keeps_nested_rel_path(tmp_path):
+    # First ingest sees the fastq nested on disk -> a nested rel_path is recorded.
+    seq, meta = _roots(tmp_path)
+    make_project(seq, "genohub-1_X", "genohub-1_X_mapfile.csv",
+                 [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")], disk_files=[])
+    _gz(os.path.join(seq, "genohub-1_X", "lane1", "s1_1.fastq.gz"))
+    _gz(os.path.join(seq, "genohub-1_X", "lane1", "s1_2.fastq.gz"))
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, seq, meta)
+    nested = os.path.join("genohub-1_X", "lane1", "s1_1.fastq.gz")
+    assert conn.execute(
+        "SELECT rel_path FROM files WHERE filename='s1_1.fastq.gz'").fetchone()["rel_path"] == nested
+
+    # Re-ingest metadata-only (disk unreachable -> flat guess). The correct nested
+    # rel_path must be preserved, not clobbered by the flat guess (#3).
+    oingest.ingest_project(conn, os.path.join(meta, "genohub-1_X_mapfile.csv"),
+                           "genohub-1_X")  # no seqdata_root
+    assert conn.execute(
+        "SELECT rel_path FROM files WHERE filename='s1_1.fastq.gz'").fetchone()["rel_path"] == nested
+
+
+def test_prune_refuses_when_root_missing(tmp_path):
+    # An unmounted / nonexistent root reads as "empty"; prune must refuse, not wipe (#1).
+    seq, meta = _roots(tmp_path)
+    make_project(seq, "genohub-1_A", "genohub-1_A_mapfile.csv",
+                 [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, seq, meta)
+
+    missing = str(tmp_path / "not_mounted")  # never created
+    res = oingest.prune_missing_projects(conn, missing, missing)
+    assert res["skipped"] is True and res["pruned"] == []
+    assert "reason" in res
+    assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1  # kept
+
+
+def test_prune_blast_radius_cap_refuses_without_force(tmp_path):
+    # Removing >50% of a root's projects likely means a partial mount; refuse unless
+    # force=True is passed (#1).
+    seq, meta = _roots(tmp_path)
+    for n in (1, 2, 3):
+        make_project(seq, f"genohub-{n}_P", f"genohub-{n}_P_mapfile.csv",
+                     [(f"s{n}", f"s{n}_1.fastq.gz", f"s{n}_2.fastq.gz", "Gadus", f"U{n}")])
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, seq, meta)
+    assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 3
+
+    import shutil
+    for n in (2, 3):  # two of three vanish (>50%)
+        shutil.rmtree(os.path.join(seq, f"genohub-{n}_P"))
+        os.remove(os.path.join(meta, f"genohub-{n}_P_mapfile.csv"))
+
+    res = oingest.prune_missing_projects(conn, seq, meta)
+    assert res["skipped"] is True and res["pruned"] == []
+    assert "reason" in res
+    assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 3  # kept
+
+    # force=True overrides the cap.
+    res = oingest.prune_missing_projects(conn, seq, meta, force=True)
+    assert res["skipped"] is False
+    assert sorted(res["pruned"]) == ["genohub-2_P", "genohub-3_P"]
+    assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
+
+
 def test_tree_reingest_upgrades_missing_mapfile_to_ok(tmp_path):
     seq, meta = _roots(tmp_path)
     _gz(os.path.join(seq, "genohub-1_X", "s1_1.fastq.gz"))
@@ -267,3 +331,22 @@ def test_tree_reingest_upgrades_missing_mapfile_to_ok(tmp_path):
     linked = conn.execute(
         "SELECT COUNT(*) FROM files WHERE sample_pk IS NOT NULL").fetchone()[0]
     assert linked == 2
+
+
+def test_reingest_case_insensitive_header_loads_samples(tmp_path):
+    # A mapfile with a lowercase header (id,r1,r2,taxon,uniqid) is accepted
+    # case-insensitively AND its rows load -- not silently dropped as invalid.
+    root, meta = _roots(tmp_path)
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "USNM 1")]
+    make_project(root, "genohub-9_CI", "genohub-9_CI_mapfile.csv", rows,
+                 header=["id", "r1", "r2", "taxon", "uniqid"])
+    conn = _fresh_db(tmp_path)
+    res = oingest.ingest_tree(conn, root, meta)
+    pid, findings, status, stats = res[0]
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1, findings
+    mstatus = conn.execute(
+        "SELECT metadata_status FROM projects WHERE project_id=?", (pid,)).fetchone()[0]
+    assert mstatus == "ok", (mstatus, findings)
+    # core columns are not re-captured into extra_json despite lowercase header
+    extra = conn.execute("SELECT extra_json FROM samples").fetchone()[0]
+    assert extra is None

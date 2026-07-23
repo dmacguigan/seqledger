@@ -41,6 +41,15 @@ def test_missing_config_table_falls_back(tmp_path):
     assert odb.resolve_config(con)["io_queue"] == "lTIO.sq"
 
 
+def test_fresh_schema_loads_and_resolves_defaults(tmp_path):
+    # Guard for #15: the new CHECK constraints in schema.sql must not break a fresh
+    # init_db, and every config default still resolves on the resulting catalog.
+    conn = _fresh(tmp_path)
+    cfg = odb.resolve_config(conn)
+    for key, default in odb.CONFIG_DEFAULTS.items():
+        assert cfg[key] == default
+
+
 def test_fastq_globs():
     assert odb.fastq_globs("fastq.gz,fq.gz") == ["*.fastq.gz", "*.fq.gz"]
     assert odb.fastq_globs(".fastq.gz") == ["*.fastq.gz"]

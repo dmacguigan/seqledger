@@ -27,10 +27,42 @@ def _print_tunnel(node, port, login_host):
     print(f"Then open http://localhost:{port} in your browser.\n")
 
 
+def _free_port(preferred=None):
+    """A TCP port we've just confirmed is bindable.
+
+    Uses `preferred` when it's free, else asks the OS for any open port (bind to
+    port 0). Closing the probe socket releases the port for Streamlit to claim;
+    the tiny race window (port taken between here and Streamlit's bind) is
+    unavoidable but far less likely than blindly reusing a default that may be busy.
+    """
+    for want in ([preferred] if preferred else []) + [0]:
+        s = socket.socket()
+        try:
+            s.bind(("", want))
+            return s.getsockname()[1]
+        except OSError:
+            continue
+        finally:
+            s.close()
+
+
 def launch(db_path, port=8501, login_host=LOGIN_HOST):
     """Run Streamlit headless on THIS node and print the tunnel command to reach it."""
+    # Resolve to a port we've confirmed is free BEFORE printing the tunnel, so the
+    # localhost:PORT we print matches what Streamlit actually binds (otherwise, if
+    # the requested port were busy, Streamlit would silently pick another and the
+    # printed tunnel would point at the wrong port).
+    port = _free_port(port)
     _print_tunnel(socket.gethostname(), port, login_host)
     env = dict(os.environ, SEQLEDGER_DB=os.path.abspath(db_path))
+    # DEFERRED (bind exposure): the documented tunnel is
+    #   ssh -N -L <port>:<NODE>:<port> <user>@<login-host>
+    # so the login host reaches this server at <NODE>:<port> over the cluster
+    # network. Binding 127.0.0.1 would make the server reachable only from this
+    # node itself and BREAK that login->node hop, so we keep 0.0.0.0. Tradeoff:
+    # the app is exposed on all interfaces with no auth -- rely on an HPC
+    # firewall/ACL (compute nodes are not internet-reachable), or add Streamlit
+    # auth, rather than switching the bind.
     cmd = [sys.executable, "-m", "streamlit", "run", APP_PATH,
            "--server.address", "0.0.0.0", "--server.port", str(port),
            "--server.headless", "true"]
@@ -80,6 +112,12 @@ export SEQLEDGER_DB={shlex.quote(db_abs)}
 # Pick a free port on this node (fall back to the requested one).
 PORT=$(python -c 'import socket;s=socket.socket();s.bind(("",0));print(s.getsockname()[1]);s.close()' 2>/dev/null || echo {port})
 
+# DEFERRED (bind exposure): the tunnel is `ssh -L <port>:<NODE>:<port> ...`, so the
+# login host reaches this GUI at <NODE>:<port> over the cluster network. Binding
+# 127.0.0.1 here would make it reachable only from this compute node and BREAK the
+# login->node hop, so we keep 0.0.0.0. Tradeoff: no-auth exposure on all interfaces
+# -- mitigate with the HPC firewall/ACL (compute nodes aren't internet-reachable)
+# or Streamlit auth, not by changing the bind.
 streamlit run {shlex.quote(APP_PATH)} --server.address 0.0.0.0 --server.port "$PORT" --server.headless true &
 SPID=$!
 
@@ -133,7 +171,8 @@ def launch_qsub(db_path, port=8501, login_host=LOGIN_HOST, queue="lTIO.sq",
     last_beat = 0.0
     while time.monotonic() - start < wait:
         if os.path.exists(ready):
-            parts = open(ready).read().split()
+            with open(ready) as fh:
+                parts = fh.read().split()
             if len(parts) >= 3 and parts[0] == "READY":
                 node, srvport = parts[1], parts[2]
                 break

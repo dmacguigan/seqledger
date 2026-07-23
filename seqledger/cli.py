@@ -126,6 +126,29 @@ def _has_unresolved_taxa(conn):
              AND t.taxon IS NULL LIMIT 1""").fetchone() is not None
 
 
+def _prune_guard(prune, prune_projects, yes, isatty, ask=input):
+    """Gate a destructive --prune / --prune-projects run.
+
+    Returns None to proceed; returns an error message (caller prints + exits
+    nonzero) to stop. --yes always proceeds. Interactively (a TTY) the user is
+    prompted and a non-yes answer aborts. Non-interactively (cron / pipe) the run
+    is REFUSED outright -- isatty() is False there, so without this it would delete
+    rows with no confirmation at all.
+    """
+    if not (prune or prune_projects) or yes:
+        return None
+    flags = " + ".join(f for f, on in
+                       (("--prune", prune), ("--prune-projects", prune_projects)) if on)
+    if not isatty:
+        return (f"refusing destructive {flags} in a non-interactive run; "
+                "pass --yes to confirm")
+    resp = ask(f"{flags} will DELETE catalog rows the source(s) no longer list "
+               "(check for a truncated CSV first). Continue? [y/N] ")
+    if resp.strip().lower() not in ("y", "yes"):
+        return "aborted."
+    return None
+
+
 def cmd_ingest(args):
     """Ingest metadata, then auto-run taxonomy resolve and refresh the data-files check.
 
@@ -152,15 +175,12 @@ def cmd_ingest(args):
     args.metadata_root = _resolve_root(conn, args.metadata_root, "metadata_root", "metadata-root")
 
     # Destructive: confirm before deleting rows a (possibly truncated) source no
-    # longer lists. Bypass with --yes for scripts / non-interactive runs.
-    if (args.prune or args.prune_projects) and not args.yes and sys.stdin.isatty():
-        flags = " + ".join(f for f, on in
-                           (("--prune", args.prune), ("--prune-projects", args.prune_projects)) if on)
-        resp = input(f"{flags} will DELETE catalog rows the source(s) no longer list "
-                     "(check for a truncated CSV first). Continue? [y/N] ")
-        if resp.strip().lower() not in ("y", "yes"):
-            conn.close()
-            sys.exit("aborted.")
+    # longer lists. Bypass with --yes for scripts / non-interactive runs; a
+    # non-interactive run WITHOUT --yes is refused (never silently deletes).
+    guard = _prune_guard(args.prune, args.prune_projects, args.yes, sys.stdin.isatty())
+    if guard:
+        conn.close()
+        sys.exit(guard)
 
     # Fail loudly (not silently-empty) when a root is missing/unmounted/mistyped --
     # the most likely first-run mistake, which otherwise reports "ingest complete"
@@ -629,7 +649,9 @@ def cmd_gui(args):
     # CLI flag > catalog config > built-in default.
     cfg = {}
     if os.path.exists(args.db):
-        conn = odb.connect(args.db)
+        # Read-only: this path only reads config to build the qsub/tunnel command
+        # (no init_db/migrate/write), so it must not open the shared DB read/write.
+        conn = odb.connect_ro(args.db)
         cfg = {k: odb.get_config(conn, k) for k in ("login_host", "conda_env", "io_queue")}
         conn.close()
     login_host = args.login_host or cfg.get("login_host") or ogui.LOGIN_HOST
@@ -644,7 +666,11 @@ def cmd_gui(args):
 
 def build_parser():
     p = argparse.ArgumentParser(prog="seqledger", description="seqledger: sequence-data catalog CLI")
-    p.add_argument("--db", default="catalog.db", help="path to catalog SQLite DB")
+    # $SEQLEDGER_DB lets users drop --db (as the README suggests); the flag still
+    # wins, and catalog.db in the cwd remains the last-resort default. Read here so
+    # the env value overrides the hardcoded default instead of being ignored.
+    p.add_argument("--db", default=os.environ.get("SEQLEDGER_DB") or "catalog.db",
+                   help="path to catalog SQLite DB (default: $SEQLEDGER_DB, else catalog.db)")
     p.add_argument("--debug", action="store_true",
                    help="show the full traceback on error instead of a one-line message")
     sub = p.add_subparsers(dest="cmd", required=True)

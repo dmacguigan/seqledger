@@ -137,3 +137,82 @@ def test_prune_drops_file_renamed_in_place(tmp_path):
     assert res[0][3]["pruned_files"] == 1
     got = {r["filename"] for r in conn.execute("SELECT filename FROM files")}
     assert got == {"s1_1.fastq.gz", "s1_2.fastq.gz"}
+
+
+def _add_project(conn, project_id, uniq_ids):
+    """Insert a bare project + one sample per uniq_id (no disk data)."""
+    conn.execute("INSERT INTO projects(project_id, seqdata_root) VALUES (?, '')",
+                 (project_id,))
+    for i, uid in enumerate(uniq_ids):
+        conn.execute(
+            "INSERT INTO samples(project_id, sample_id, taxon, uniq_id) VALUES (?,?,?,?)",
+            (project_id, f"s{i}", "Gadus", uid))
+    conn.commit()
+
+
+def _shared_notes(res, project_id):
+    return [f.message for f in res[project_id]["notes"]
+            if "shared across projects" in f.message]
+
+
+def test_na_uniqid_not_reported_as_shared(tmp_path):
+    # #16: two projects whose only common uniq_id is the 'NA' placeholder must NOT
+    # be flagged as sharing a UniqID.
+    conn = odb.connect(str(tmp_path / "cat.db"))
+    odb.init_db(conn)
+    _add_project(conn, "projA", ["NA"])
+    _add_project(conn, "projB", ["NA"])
+    res = oval.validate_catalog(conn)
+    assert _shared_notes(res, "projA") == []
+    assert _shared_notes(res, "projB") == []
+
+
+def test_real_shared_uniqid_reported(tmp_path):
+    # #16: a genuine cross-project UniqID is still flagged for both projects.
+    conn = odb.connect(str(tmp_path / "cat.db"))
+    odb.init_db(conn)
+    _add_project(conn, "projA", ["V1", "NA"])
+    _add_project(conn, "projB", ["V1", "NA"])
+    res = oval.validate_catalog(conn)
+    for pid in ("projA", "projB"):
+        notes = _shared_notes(res, pid)
+        assert any("V1" in m for m in notes)
+        # the NA placeholder shared by both must not appear as a shared UniqID
+        assert not any("'NA'" in m for m in notes)
+
+
+def test_comma_project_id_shared_uniqid_attribution(tmp_path):
+    # #17: a project_id containing a comma sharing a real UniqID must be attributed
+    # to the correct full project_ids, not to split fragments.
+    conn = odb.connect(str(tmp_path / "cat.db"))
+    odb.init_db(conn)
+    _add_project(conn, "proj,A", ["V1"])
+    _add_project(conn, "projB", ["V1"])
+    res = oval.validate_catalog(conn)
+    a_notes = _shared_notes(res, "proj,A")
+    b_notes = _shared_notes(res, "projB")
+    # both real projects are flagged (the old split(',') dropped "proj,A" entirely)
+    assert a_notes and b_notes
+    # the shared list names both full project_ids
+    assert "proj,A" in a_notes[0] and "projB" in a_notes[0]
+
+
+def test_per_project_stored_root_used_without_global_root(tmp_path):
+    # #39: with no global --seqdata-root, the disk scan must fall back to each
+    # project's stored root (like integrity), not silently skip scanning.
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    res = oval.validate_catalog(conn)["genohub-1_X"]
+    assert res["data"]["status"] == "ok"
+    # remove a file: a genuine scan (not a stored read-back) catches it
+    os.remove(os.path.join(root, "genohub-1_X", "s1_2.fastq.gz"))
+    res = oval.validate_catalog(conn)["genohub-1_X"]
+    assert res["data"]["status"] == "issues" and res["data"]["n_missing"] == 1
+
+
+def test_check_data_files_falls_back_to_stored_root(tmp_path):
+    # #39: check_data_files(seqdata_root=None) resolves the project's stored root.
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    data = oval.check_data_files(conn, "genohub-1_X", "genohub-1_X", None)
+    assert data["status"] == "ok"

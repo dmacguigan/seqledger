@@ -9,12 +9,16 @@ low-memory. Stdlib only, no external binaries.
 import csv
 import os
 import re
+import shutil
+import socket
 import sqlite3
 import tarfile
+import urllib.error
 import urllib.request
 from datetime import date, datetime
 
 TAXDUMP_URL = "https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz"
+_DOWNLOAD_TIMEOUT = 60  # seconds; a stalled connection must not hang the run forever
 
 # Target ranks captured into per-rank columns. NCBI 'superkingdom' -> domain.
 RANKS = ["domain", "kingdom", "phylum", "class", "order", "family", "genus", "species"]
@@ -85,6 +89,24 @@ def _index_path(taxdir):
     return os.path.join(taxdir, "taxdump.sqlite")
 
 
+def _download(url, dest, timeout=_DOWNLOAD_TIMEOUT):
+    """Stream `url` to `dest` with a socket timeout so a stall can't hang forever.
+
+    urllib.request.urlretrieve takes no timeout, so a mid-stream stall would block
+    the whole run indefinitely. urlopen(..., timeout=) bounds each socket read
+    instead; timeout/HTTP/URL errors are re-raised with a clear, actionable message.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp, \
+                open(dest, "wb") as out:
+            shutil.copyfileobj(resp, out)
+    except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+        raise RuntimeError(
+            f"Failed to download NCBI taxdump from {url}: {e}. "
+            f"Check your network connection (or increase the timeout) and retry."
+        ) from e
+
+
 def ensure_taxdump(taxdir, force=False):
     """Download + extract names.dmp / nodes.dmp into taxdir (once)."""
     os.makedirs(taxdir, exist_ok=True)
@@ -94,7 +116,7 @@ def ensure_taxdump(taxdir, force=False):
         return taxdir
     tgz = os.path.join(taxdir, "taxdump.tar.gz")
     print(f"Downloading NCBI taxdump (~72 MB) to {taxdir} ...")
-    urllib.request.urlretrieve(TAXDUMP_URL, tgz)
+    _download(TAXDUMP_URL, tgz)
     with tarfile.open(tgz) as tf:
         for member in ("names.dmp", "nodes.dmp"):
             tf.extract(member, taxdir)
@@ -160,6 +182,68 @@ def name_to_taxid(idx, name):
         if cls == "scientific name":
             return taxid
     return rows[0][0]
+
+
+def scientific_name_taxids(idx, name):
+    """All taxids whose *scientific name* equals `name` (case-insensitive).
+
+    A scientific name is normally unique, but genuine cross-kingdom homonyms exist
+    (e.g. a plant genus and an animal genus sharing a spelling). Returning every
+    candidate lets the caller detect the homonym instead of silently committing to
+    the first (lowest-taxid) one.
+    """
+    return [r[0] for r in idx.execute(
+        "SELECT taxid FROM tax_names WHERE name_lower=? AND name_class='scientific name'",
+        (name.lower(),)).fetchall()]
+
+
+def disambiguate_homonym(candidates, context=None):
+    """Choose among homonymous exact-name matches, or flag the match ambiguous.
+
+    Silently taking the lowest taxid can drop a fish into the plant kingdom, so a
+    single taxon is only committed to when the sample's own context names it;
+    otherwise the match is reported ambiguous and the competing taxids left as
+    alternatives (no fabricated choice). Pure so the rule is unit-testable.
+
+    candidates: list of (taxid, sci_name, lineage_names) where lineage_names is an
+        iterable of the scientific names on that candidate's lineage.
+    context: iterable of other name tokens from the raw sample (e.g. a family or
+        genus stated alongside) that could disambiguate.
+
+    Returns (taxid, ambiguous, alternatives):
+      - exactly one candidate         -> (taxid, False, None)
+      - context selects exactly one   -> (that taxid, False, None)
+      - zero / many after context     -> (None, True, "sci_name [taxid] | ...")
+    """
+    if not candidates:
+        return None, False, None
+    if len(candidates) == 1:
+        return candidates[0][0], False, None
+    ctx = {c.lower() for c in (context or []) if c}
+    if ctx:
+        hits = [c for c in candidates
+                if ctx & {str(n).lower() for n in c[2] if n}]
+        if len(hits) == 1:
+            return hits[0][0], False, None
+    alts = " | ".join(f"{sci} [{tx}]" for tx, sci, _ in candidates)
+    return None, True, alts
+
+
+def bare_epithet(toks):
+    """The lowercase species epithet trailing the genus token, if any (else None).
+
+    Identifies the token that the genus-anchored 'Genus epithet' match targets, so
+    the standalone-name path can refuse to resolve it on its own when the genus is
+    unknown: a bare epithet matched alone is a false positive (it can collide with
+    an unrelated genus in another kingdom). Pure so the guard is unit-testable.
+    """
+    caps = [t for t in toks if t[:1].isupper()]
+    if not caps:
+        return None
+    gi = toks.index(caps[-1])
+    if gi + 1 < len(toks) and not toks[gi + 1][:1].isupper():
+        return toks[gi + 1]
+    return None
 
 
 # Ranks indexed for fuzzy name correction: genus plus the higher ranks, so a
@@ -301,6 +385,38 @@ def _exact(idx, d, cand, taxid):
     return d
 
 
+def _try_exact(idx, d, cand, context=None):
+    """Attempt a homonym-aware exact resolution of `cand`.
+
+    Returns the filled dict on success (exact) or ambiguity, or None so the caller
+    can try the next candidate. A scientific name with a single taxid is exact;
+    multiple taxids (a cross-kingdom homonym) are disambiguated by `context` if
+    possible, else recorded as an ambiguous match without committing to one taxon.
+    """
+    taxids = scientific_name_taxids(idx, cand)
+    if not taxids:  # no scientific-name row: informal/common name -> old behaviour
+        tx = name_to_taxid(idx, cand)
+        return _exact(idx, d, cand, tx) if tx is not None else None
+    if len(taxids) == 1:
+        return _exact(idx, d, cand, taxids[0])
+    # Cross-kingdom homonym (rare): build each candidate's lineage names only now
+    # so the common single-match path pays no extra lineage walk.
+    cands = []
+    for tx in taxids:
+        sci, _rank, ranks = ranked_lineage(idx, tx)
+        names = {v for v in ranks.values() if v}
+        if sci:
+            names.add(sci)
+        cands.append((tx, sci or cand, names))
+    taxid, ambiguous, alts = disambiguate_homonym(cands, context)
+    if ambiguous:
+        d["match_type"] = "ambiguous"
+        d["clean"] = cand
+        d["alternatives"] = alts  # deliberately no lineage: we refuse to pick one
+        return d
+    return _exact(idx, d, cand, taxid)
+
+
 def _resolve_one(idx, taxon, name_index=None):
     """Resolve one raw Taxon string across the many real-world formats.
 
@@ -316,6 +432,8 @@ def _resolve_one(idx, taxon, name_index=None):
     if not toks:
         return d
 
+    caps = [t for t in toks if t[:1].isupper()]
+
     # 1. exact binomial: capitalized pairs (most specific first), then leading two.
     cands = list(reversed(_binomials(toks)))
     if len(toks) >= 2:
@@ -323,11 +441,9 @@ def _resolve_one(idx, taxon, name_index=None):
         if first_two not in cands:
             cands.append(first_two)
     for cand in cands:
-        tx = name_to_taxid(idx, cand)
-        if tx is not None:
-            return _exact(idx, d, cand, tx)
-
-    caps = [t for t in toks if t[:1].isupper()]
+        res = _try_exact(idx, d, cand, context=caps)
+        if res is not None:
+            return res
 
     # 2. genus + epithet -> fuzzy species within the genus, else fall to the genus.
     if caps:
@@ -363,11 +479,20 @@ def _resolve_one(idx, taxon, name_index=None):
                 _fill_lineage(idx, d, gtx)
                 return d
 
-    # 3. exact single name: capitalized (most specific first), then any token.
+    # 3. exact single name: capitalized names first (genus / higher / informal
+    #    group), then any lowercase token -- EXCEPT a bare species epithet whose
+    #    (unknown) genus we could not anchor above. Matching that epithet on its
+    #    own is a false positive (an epithet can collide with an unrelated genus in
+    #    another kingdom); it already had its genus-anchored shot in step 2, so it
+    #    is skipped and the taxon is left unresolved. Homonym-aware via _try_exact.
+    skip = bare_epithet(toks)
     for cand in list(reversed(caps)) + toks:
-        tx = name_to_taxid(idx, cand)
-        if tx is not None:
-            return _exact(idx, d, cand, tx)
+        if cand == skip:
+            continue
+        context = [c for c in caps if c != cand]
+        res = _try_exact(idx, d, cand, context)
+        if res is not None:
+            return res
 
     # 4. last resort: fuzzy-correct a lone capitalized token (genus or higher).
     #    Distance 1 only: this path is unconstrained (no epithet to corroborate),
@@ -494,6 +619,11 @@ def _apply_confirmed(conn, d, today):
     cols = _TAXA_COLS[1:] + ["date_resolved"]
     updates = ",".join(f"{c}=?" for c in cols) + ", confirmed=1"
     vals = [d.get(c) for c in _TAXA_COLS[1:]] + [today, d["taxon"]]
+    # The taxa row may not exist if the taxon was never auto-resolved (e.g. a
+    # confirmed_taxid hand-entered for a brand-new taxon); ensure it does so the
+    # UPDATE actually writes rather than silently matching zero rows -- otherwise
+    # apply_review would report it applied while persisting nothing.
+    conn.execute("INSERT OR IGNORE INTO taxa (taxon) VALUES (?)", (d["taxon"],))
     conn.execute(f"UPDATE taxa SET {updates} WHERE taxon=?", vals)
 
 

@@ -225,3 +225,46 @@ def test_apply_review_skips_bad_aphia_id(tmp_path, monkeypatch):
     assert len(skipped) == 2
     assert any("not a number" in s for s in skipped)
     assert any("not found in WoRMS" in s for s in skipped)
+
+
+# --- #14: only high-confidence WoRMS matches are auto-accepted ----------------
+
+# A loose (phonetic / near_2+) candidate that must NOT be written as authoritative.
+BLOBFISH_PHONETIC = {"AphiaID": 555555, "scientificname": "Psychrolutes marcidus",
+                     "rank": "Species", "status": "accepted", "valid_AphiaID": 555555,
+                     "valid_name": "Psychrolutes marcidus", "kingdom": "Animalia",
+                     "phylum": "Chordata", "class": "Teleostei", "order": "Perciformes",
+                     "family": "Psychrolutidae", "genus": "Psychrolutes",
+                     "isMarine": 1, "match_type": "phonetic"}
+
+
+def test_is_high_confidence_pure():
+    assert oworms.is_high_confidence("exact") is True
+    assert oworms.is_high_confidence("near_1") is True
+    assert oworms.is_high_confidence("EXACT") is True          # case-insensitive
+    assert oworms.is_high_confidence("phonetic") is False
+    assert oworms.is_high_confidence("near_2") is False
+    assert oworms.is_high_confidence("near_3") is False
+    assert oworms.is_high_confidence(None) is False
+    assert oworms.is_high_confidence("") is False
+
+
+def test_low_quality_match_flagged_not_accepted(tmp_path, monkeypatch):
+    _patch(monkeypatch)
+    # Inject the phonetic candidate under a query name (auto-restored after test).
+    monkeypatch.setitem(_BY_NAME, "Blobbyfish", [BLOBFISH_PHONETIC])
+    d = oworms.resolve_taxa_worms(["Blobbyfish"], str(tmp_path / "tax"))[0]
+    # A phonetic match is NOT stored as an accepted AphiaID...
+    assert d["aphia_id"] is None
+    assert d["worms_lineage"] is None
+    # ...it is flagged for review and its candidate names recorded as alternatives.
+    assert d["worms_match_type"] == "review_phonetic"
+    assert d["worms_alternatives"] == "Psychrolutes marcidus"
+
+
+def test_high_quality_match_still_accepted(tmp_path, monkeypatch):
+    _patch(monkeypatch)
+    # near_1 remains high-confidence and is written as before.
+    d = oworms.resolve_taxa_worms(["Gadus"], str(tmp_path / "tax"))[0]
+    assert d["worms_match_type"] == "near_1"
+    assert d["aphia_id"] == 125732

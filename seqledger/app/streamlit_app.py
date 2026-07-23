@@ -11,10 +11,12 @@ Views:
   Grab & Go    search + collect samples; export CSV + an rclone copy job for them
 """
 
+import datetime
 import os
 import re
 import sqlite3
 import sys
+import time
 
 import pandas as pd
 import streamlit as st
@@ -148,15 +150,52 @@ def _ro_connect(db_path):
     """
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
+    # The GUI may read the live master while the CLI writes (gui --qsub). A generous
+    # busy_timeout lets SQLite wait out a transient write lock instead of raising.
+    con.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
     return con
 
 
+# Lock-contention handling for reads against the live master. busy_timeout (above)
+# waits out a short write lock inside SQLite; this adds a small app-level retry on top
+# so a stubborn lock surfaces a friendly notice rather than a raw traceback.
+_BUSY_TIMEOUT_MS = 15000
+_LOCK_RETRIES = 3
+_LOCK_BACKOFF = 0.5  # seconds; grows linearly per attempt
+
+
+class _CatalogLocked(Exception):
+    """Raised when the catalog stays locked past the retry budget (caught in main)."""
+
+
+def _is_locked_error(exc):
+    """True for a transient 'database is locked'/'busy' contention worth retrying,
+    vs. a genuine operational error (bad SQL, missing column) that should propagate."""
+    return (isinstance(exc, sqlite3.OperationalError)
+            and ("locked" in str(exc).lower() or "busy" in str(exc).lower()))
+
+
+def _with_retry(fn):
+    """Run a read, retrying briefly on a lock/busy error. Raises _CatalogLocked once
+    the retry budget is spent so the caller can show a friendly message."""
+    for attempt in range(_LOCK_RETRIES):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if not _is_locked_error(e):
+                raise
+            time.sleep(_LOCK_BACKOFF * (attempt + 1))
+    raise _CatalogLocked()
+
+
 def _sql(db_path, query):
-    con = _ro_connect(db_path)
-    try:
-        return pd.read_sql_query(query, con)
-    finally:
-        con.close()
+    def run():
+        con = _ro_connect(db_path)
+        try:
+            return pd.read_sql_query(query, con)
+        finally:
+            con.close()
+    return _with_retry(run)
 
 
 def _config(db_path, key):
@@ -262,11 +301,13 @@ def load_taxonomy(db_path, mtime):
 
 
 def _table_columns(db_path, table):
-    con = _ro_connect(db_path)
-    try:
-        return {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
-    finally:
-        con.close()
+    def run():
+        con = _ro_connect(db_path)
+        try:
+            return {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+        finally:
+            con.close()
+    return _with_retry(run)
 
 
 @st.cache_data(ttl=60)
@@ -295,6 +336,9 @@ def load_projects(db_path, mtime):
                (SELECT COUNT(*) FROM files f
                   WHERE f.project_id = p.project_id
                     AND f.integrity_status IN ('gzip_error', 'format_error')) AS n_integrity_bad,
+               (SELECT COUNT(*) FROM files f
+                  WHERE f.project_id = p.project_id
+                    AND f.integrity_status = 'ok' AND f.n_reads = 0) AS n_integrity_empty,
                (SELECT MAX(f.integrity_date) FROM files f
                   WHERE f.project_id = p.project_id) AS integrity_date,
                p.owner_name, p.seq_data_relpath AS data_dir,
@@ -383,8 +427,17 @@ def integrity_label(row):
         return "no files"
     ok = int(row["n_integrity_ok"] or 0)
     bad = int(row["n_integrity_bad"] or 0)
+    # Files with status 'ok' but 0 reads passed the gzip/FASTQ check yet carry no
+    # data; they count within `ok` but are a real problem, so flag them here instead
+    # of letting them read as healthy (they're also listed in the drill-down).
+    empty = int(row.get("n_integrity_empty") or 0)
+    problems = []
     if bad:
-        return f"{bad} corrupt"
+        problems.append(f"{bad} corrupt")
+    if empty:
+        problems.append(f"{empty} empty")
+    if problems:
+        return ", ".join(problems)
     if ok == 0:
         return "unchecked"
     rest = n - ok - bad
@@ -438,31 +491,77 @@ def _contains(series, s):
     return series.fillna("").astype(str).str.lower().str.contains(s, na=False)
 
 
+# Characters that make Excel/Sheets treat a cell as a formula (or a new cell); a
+# leading one on an exported value could run code when the CSV is opened.
+_CSV_FORMULA_LEADERS = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+
+def _csv_safe_cell(v):
+    """Neutralize CSV formula injection: prefix a leading apostrophe to any string
+    value that would start a spreadsheet formula. Non-strings (ints, floats, NaN,
+    None) pass through unchanged so numeric columns keep their type."""
+    if isinstance(v, str) and v[:1] in _CSV_FORMULA_LEADERS:
+        return "'" + v
+    return v
+
+
+def _csv_safe_df(df):
+    """Copy of df with string cells sanitized against CSV formula injection. Only
+    object-dtype columns are scanned, so numeric/Int64 columns are untouched."""
+    out = df.copy()
+    for c in out.columns:
+        if out[c].dtype == object:
+            out[c] = out[c].map(_csv_safe_cell)
+    return out
+
+
 def _download(df, name):
-    st.download_button("Download CSV", df.to_csv(index=False).encode(), name, "text/csv")
+    st.download_button("Download CSV", _csv_safe_df(df).to_csv(index=False).encode(),
+                       name, "text/csv")
 
 
-def _column_filters(df, cols, key):
+def _link_text(series):
+    """Visible label of a LinkColumn(display_text=r'#(.+)$'): the text after the URL's
+    '#'. Lets a per-column filter match what the user sees (e.g. 'Gadus morhua'), not
+    the raw URL. Rows with no '#' become NaN (blank)."""
+    return series.fillna("").astype(str).str.extract(r"#(.+)$", expand=False)
+
+
+def _filter_by_columns(df, active, display=None):
+    """Keep rows where every (col -> query) in `active` appears (case-insensitive
+    substring) in that column's DISPLAYED value. `display` maps a column to the Series
+    of shown values (e.g. a link label) searched instead of the raw column. All columns
+    are preserved so downstream row selection still works."""
+    display = display or {}
+    mask = pd.Series(True, index=df.index)
+    for c, val in active.items():
+        ser = display[c] if c in display else df[c]
+        mask &= ser.fillna("").astype(str).str.contains(val, case=False, na=False, regex=False)
+    return df[mask]
+
+
+def _column_filters(df, cols, key, labels=None, display=None):
     """Per-column substring filters shown as a row of boxes above a table.
 
     Streamlit can't put inputs inside a dataframe header, so this renders a row of
-    small text boxes (one per column, column name as placeholder) in a collapsible
-    'Filter columns' bar just above the table. Returns df with rows kept only where
-    every non-empty box's text appears (case-insensitive) in that column. All
-    columns are preserved, so downstream row selection still works.
+    small text boxes (one per column) in a collapsible 'Filter columns' bar just above
+    the table. Each box is labeled with the column's DISPLAYED header (`labels`, falling
+    back to the column name) and filters against its DISPLAYED value (`display`, falling
+    back to the raw column) -- so a box over a link column matches the shown name, not
+    the hidden URL. Returns df with rows kept only where every non-empty box's text
+    appears (case-insensitive); all columns are preserved for downstream row selection.
     """
+    labels = labels or {}
     with st.expander("🔍 Filter columns", expanded=False):
         boxes = st.columns(len(cols))
         active = {}
         for box, c in zip(boxes, cols):
-            val = box.text_input(c, key=f"colf_{key}_{c}", placeholder=c,
+            lab = labels.get(c, c)
+            val = box.text_input(lab, key=f"colf_{key}_{c}", placeholder=lab,
                                  label_visibility="collapsed")
             if val.strip():
                 active[c] = val.strip()
-    out = df
-    for c, val in active.items():
-        out = out[out[c].fillna("").astype(str).str.contains(val, case=False, na=False, regex=False)]
-    return out
+    return _filter_by_columns(df, active, display)
 
 
 def samples_view(df, files_df):
@@ -491,7 +590,17 @@ def samples_view(df, files_df):
     on_screen = ["project_id", "sample_id", "taxon",
                  "ncbi_url", "tax_match", "worms_url", "worms_match", "worms_status",
                  "uniq_id", "uniq_id_url", "flags", "backup"]
-    show = _column_filters(show, on_screen, "samples")
+    # Label each filter box with the header the user sees, and search the DISPLAYED
+    # value: the link columns show a name (after the URL '#'), not the raw URL; the
+    # UniqID link icon has no text, so filter it by the adjacent UniqID value.
+    show = _column_filters(
+        show, on_screen, "samples",
+        labels={"ncbi_url": "NCBI_name", "tax_match": "NCBI_match",
+                "worms_url": "WoRMS_name", "worms_match": "WoRMS_match",
+                "worms_status": "WoRMS_status", "uniq_id_url": "uniq_id_link"},
+        display={"ncbi_url": _link_text(show["ncbi_url"]),
+                 "worms_url": _link_text(show["worms_url"]),
+                 "uniq_id_url": show["uniq_id"]})
     st.caption(f"{len(show)} of {len(df)} samples (full R1/R2 paths, taxid + "
                "lineage are in the CSV export). Select a row to list its files below.")
     event = st.dataframe(
@@ -549,7 +658,8 @@ def projects_view(df, issues, integ_issues):
     if cs_only:
         view = view[(view["n_mismatch"] > 0) | (view["n_uncompared"] > 0)]
     if integ_only:
-        view = view[view["n_integrity_bad"] > 0]
+        # Corrupt (gzip/format) OR empty (ok status but 0 reads) both count as issues.
+        view = view[(view["n_integrity_bad"] > 0) | (view["n_integrity_empty"] > 0)]
 
     show = view.copy()
     show["mapfile"] = show.apply(mapfile_label, axis=1) if len(show) else []
@@ -562,7 +672,8 @@ def projects_view(df, issues, integ_issues):
     show = _column_filters(show, cols, "projects")
     st.caption(f"{len(show)} of {len(df)} projects. 'mapfile' flags a folder with no "
                "mapfile, a mapfile with no folder, or a broken mapfile. Select a row for "
-               "its mapfile explanation + data-files & integrity issues below.")
+               "its mapfile explanation + data-files & integrity issues below. "
+               "'owner_name' is the filesystem owner (a personal identifier).")
     event = st.dataframe(show[cols], width="stretch", hide_index=True,
                          on_select="rerun", selection_mode="single-row",
                          key="projects_table")
@@ -627,9 +738,11 @@ def files_view(df, samples_df):
     on_screen = ["project_id", "sample_id", "direction", "filename", "full_path",
                  "size", "owner_name", "backup", "integrity", "n_reads",
                  "integrity_date"]
-    show = _column_filters(show, on_screen, "files")
+    show = _column_filters(show, on_screen, "files",
+                           labels={"n_reads": "reads", "integrity_date": "checked"})
     st.caption(f"{len(show)} of {len(df)} files. "
-               "Select a row to show its sample info below.")
+               "Select a row to show its sample info below. "
+               "'owner_name' is the filesystem owner (a personal identifier).")
     event = st.dataframe(
         show[on_screen], width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row", key="files_table",
@@ -666,6 +779,18 @@ def files_view(df, samples_df):
                 "(it may be an orphan not tied to a cataloged sample).")
 
 
+def _drop_unknown(v, rank_cols, depth):
+    """Exclude samples whose deepest selected rank is unranked ('unknown').
+
+    Shared by all three taxonomy charts so clearing 'Include unknown' removes the SAME
+    sample population from each: the sunburst always filtered on this, but the
+    resolution-quality and composition charts used to count everyone. Empty/NULL at the
+    deepest rank normalizes to 'unknown', matching how the sunburst labels the wedge.
+    """
+    kept = v[rank_cols[depth - 1]].replace("", pd.NA).fillna("unknown")
+    return v[kept != "unknown"]
+
+
 @st.cache_data(ttl=60)
 def _taxonomy_counts(db_path, mtime, source, chosen, depth, include_unknown):
     """Per-lineage sample counts for the sunburst, cached across reruns.
@@ -687,11 +812,13 @@ def _taxonomy_counts(db_path, mtime, source, chosen, depth, include_unknown):
 
 
 @st.cache_data(ttl=60)
-def _matchtype_counts(db_path, mtime, source, chosen):
+def _matchtype_counts(db_path, mtime, source, chosen, depth, include_unknown):
     """Sample counts by taxonomy match_type (resolution confidence)."""
     df = load_taxonomy(db_path, mtime)
     s = SOURCES[source]
     v = df if not chosen else df[df["project_id"].isin(list(chosen))]
+    if not include_unknown:
+        v = _drop_unknown(v, s["rank_cols"], depth)
     mt = v[s["match_col"]].replace("", pd.NA).fillna("unresolved")
     counts = mt.value_counts().rename_axis("match_type").reset_index(name="samples")
     counts["order"] = counts["match_type"].map(
@@ -701,10 +828,12 @@ def _matchtype_counts(db_path, mtime, source, chosen):
 
 
 @st.cache_data(ttl=60)
-def _composition_counts(db_path, mtime, chosen, rank_col):
+def _composition_counts(db_path, mtime, chosen, rank_col, source, depth, include_unknown):
     """Per-project sample counts within one rank (for the stacked composition bar)."""
     df = load_taxonomy(db_path, mtime)
     v = df if not chosen else df[df["project_id"].isin(list(chosen))]
+    if not include_unknown:
+        v = _drop_unknown(v, SOURCES[source]["rank_cols"], depth)
     v = v[["project_id", rank_col]].copy()
     v[rank_col] = v[rank_col].replace("", pd.NA).fillna("unknown")
     return v.groupby(["project_id", rank_col], sort=False).size().reset_index(name="samples")
@@ -787,7 +916,7 @@ def taxonomy_view(db_path, mtime):
     st.caption(f"How each sample's taxon resolved {SOURCES[source]['blurb']}: "
                "confirmed/exact are reliable; the rest are best-guess matches; "
                "unresolved had no match.")
-    mt = _matchtype_counts(db_path, mtime, source, tuple(chosen))
+    mt = _matchtype_counts(db_path, mtime, source, tuple(chosen), depth, include_unknown)
     fig_mt = px.bar(mt, x="samples", y="label", orientation="h",
                     color="match_type", color_discrete_map=SOURCES[source]["match_colors"],
                     category_orders={"label": list(mt["label"])[::-1]})
@@ -799,7 +928,8 @@ def taxonomy_view(db_path, mtime):
     st.divider()
     st.subheader(f"Composition by project ({comp_label})")
     rank_col = rank_cols[rank_labels.index(comp_label)]
-    comp = _composition_counts(db_path, mtime, tuple(chosen), rank_col)
+    comp = _composition_counts(db_path, mtime, tuple(chosen), rank_col,
+                               source, depth, include_unknown)
     n_cat = comp[rank_col].nunique()
     st.caption(f"Sample counts per project, colored by {comp_label} "
                f"({n_cat} group(s)). Pick a coarser rank if the legend is too busy.")
@@ -907,6 +1037,29 @@ def _match(series, query, use_regex):
     return series.fillna("").str.contains(query, case=False, regex=use_regex, na=False)
 
 
+# Best-effort guards for user-supplied regex on the shared, tunneled process. stdlib
+# `re` has no match timeout, so true ReDoS immunity isn't possible; capping the pattern
+# length and rows scanned bounds the blast radius of a catastrophic-backtracking pattern.
+_MAX_REGEX_LEN = 250
+_MAX_REGEX_ROWS = 5000
+
+
+def _validate_regex(pattern):
+    """Validate a user regex before it filters the Grab & Go table.
+
+    Returns (ok, error): rejects an over-long pattern and one that won't compile.
+    This is a best-effort guard, NOT ReDoS-proof -- a short pattern can still
+    backtrack pathologically; the row cap in the caller bounds that exposure.
+    """
+    if len(pattern) > _MAX_REGEX_LEN:
+        return False, f"pattern too long (max {_MAX_REGEX_LEN} characters)"
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        return False, f"invalid regex: {e}"
+    return True, None
+
+
 def _cart_key(project_id, sample_id):
     return f"{project_id}\t{sample_id}"
 
@@ -935,6 +1088,20 @@ def custom_table_view(samples_df, paths_df):
     view = samples_df
     if f_projects:
         view = view[view["project_id"].isin(f_projects)]
+    if use_regex:
+        # Validate each pattern up front, and cap the rows a regex ever scans so a
+        # catastrophic pattern can't freeze the shared process for all tunneled users.
+        for label, q in (("Taxonomy", f_taxon), ("Sample ID", f_sample),
+                         ("UniqID", f_uniq)):
+            if q:
+                ok, err = _validate_regex(q)
+                if not ok:
+                    st.error(f"{label} search — {err}")
+                    return
+        if len(view) > _MAX_REGEX_ROWS:
+            st.warning(f"Regex search is limited to the first {_MAX_REGEX_ROWS} rows "
+                       "for responsiveness — add a Project filter to narrow the set.")
+            view = view.head(_MAX_REGEX_ROWS)
     try:
         if f_taxon:
             view = view[_match(view["taxon"], f_taxon, use_regex)
@@ -946,6 +1113,9 @@ def custom_table_view(samples_df, paths_df):
             view = view[_match(view["uniq_id"], f_uniq, use_regex)]
     except re.error as e:
         st.error(f"Invalid regex: {e}")
+        return
+    except Exception as e:  # a pattern re accepts but chokes on at match time
+        st.error(f"Search failed: {e}")
         return
 
     st.subheader("Search results")
@@ -1049,7 +1219,7 @@ def custom_table_view(samples_df, paths_df):
     export_cols = [c for c in export_map if c in table.columns]
     export_df = table[export_cols].rename(columns=export_map)
     st.download_button("Download table CSV",
-                       export_df.to_csv(index=False).encode(),
+                       _csv_safe_df(export_df).to_csv(index=False).encode(),
                        f"{_config(DB_PATH, 'catalog_slug')}_grab_and_go.csv", "text/csv")
 
     c1, c2 = st.columns(2, vertical_alignment="bottom")
@@ -1120,6 +1290,13 @@ def custom_table_view(samples_df, paths_df):
                        "seqledger_rclone_copy.job", "text/x-shellscript")
 
 
+def _catalog_caption(db_path, mtime):
+    """Identity/staleness banner: which catalog file this is and when it was last
+    written. Lets a user reading a synced Scratch copy notice a stale timestamp."""
+    when = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+    return f"Catalog: {os.path.abspath(db_path)} — last updated {when}"
+
+
 def main():
     name = _config(DB_PATH, "catalog_name") if os.path.exists(DB_PATH) else "Sequence data catalog"
     st.set_page_config(page_title=name, layout="wide")
@@ -1129,21 +1306,29 @@ def main():
         st.error(f"Catalog database not found: {DB_PATH}")
         return
 
+    mtime = os.path.getmtime(DB_PATH)
+    st.caption(_catalog_caption(DB_PATH, mtime))
+
     view_name = st.sidebar.radio(
         "View", ["Projects", "Samples", "Files", "Taxonomy", "Grab & Go"])
-    mtime = os.path.getmtime(DB_PATH)
-    if view_name == "Samples":
-        samples_view(load_samples(DB_PATH, mtime), load_files(DB_PATH, mtime))
-    elif view_name == "Projects":
-        projects_view(load_projects(DB_PATH, mtime),
-                      load_data_issues(DB_PATH, mtime),
-                      load_integrity_issues(DB_PATH, mtime))
-    elif view_name == "Files":
-        files_view(load_files(DB_PATH, mtime), load_samples(DB_PATH, mtime))
-    elif view_name == "Taxonomy":
-        taxonomy_view(DB_PATH, mtime)
-    else:
-        custom_table_view(load_samples(DB_PATH, mtime), load_file_paths(DB_PATH, mtime))
+    try:
+        if view_name == "Samples":
+            samples_view(load_samples(DB_PATH, mtime), load_files(DB_PATH, mtime))
+        elif view_name == "Projects":
+            projects_view(load_projects(DB_PATH, mtime),
+                          load_data_issues(DB_PATH, mtime),
+                          load_integrity_issues(DB_PATH, mtime))
+        elif view_name == "Files":
+            files_view(load_files(DB_PATH, mtime), load_samples(DB_PATH, mtime))
+        elif view_name == "Taxonomy":
+            taxonomy_view(DB_PATH, mtime)
+        else:
+            custom_table_view(load_samples(DB_PATH, mtime), load_file_paths(DB_PATH, mtime))
+    except _CatalogLocked:
+        # A concurrent CLI write held the lock past our retry budget; show a friendly
+        # notice and stop rather than surfacing a raw 'database is locked' traceback.
+        st.warning("Catalog is being updated — retry shortly.")
+        st.stop()
 
 
 if __name__ == "__main__":

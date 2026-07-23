@@ -1,5 +1,9 @@
 -- Ocean DNA raw sequence data catalog
 -- SQLite schema. Source of truth for the catalog structure.
+--
+-- NOTE: the CHECK constraints below apply to NEW catalogs only. init_db runs this
+-- with CREATE TABLE IF NOT EXISTS, and SQLite cannot ALTER-ADD a CHECK to an
+-- existing table, so pre-existing catalogs keep their (unchecked) tables unchanged.
 
 PRAGMA foreign_keys = ON;
 
@@ -55,7 +59,7 @@ CREATE TABLE IF NOT EXISTS files (
     file_pk      INTEGER PRIMARY KEY,
     project_id   TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
     sample_pk    INTEGER REFERENCES samples(sample_pk) ON DELETE CASCADE,
-    direction    TEXT,                   -- 'R1' | 'R2'
+    direction    TEXT CHECK(direction IN ('R1','R2')),  -- 'R1' | 'R2' (NULL ok: diskonly files)
     filename     TEXT NOT NULL,          -- basename, e.g. sample_1.fastq.gz
     rel_path     TEXT,                   -- path relative to raw_sequence_data root
     size_bytes   INTEGER,
@@ -65,11 +69,11 @@ CREATE TABLE IF NOT EXISTS files (
     md5_source   TEXT,                   -- 'ingest' | 'backfill'
     store_md5    TEXT,                   -- md5 from Store side
     pdrive_md5   TEXT,                   -- md5 from P-drive side
-    md5_match    INTEGER,                -- 1 match, 0 mismatch, NULL not compared
+    md5_match    INTEGER CHECK(md5_match IN (0,1)),  -- 1 match, 0 mismatch, NULL not compared
     date_hashed  TEXT,
     -- gzip/FASTQ integrity check, refreshed by `integrity`
     integrity_status TEXT,               -- 'ok' | 'gzip_error' | 'format_error' | 'unchecked'
-    gz_ok            INTEGER,            -- 1 ok, 0 corrupt, NULL unchecked
+    gz_ok            INTEGER CHECK(gz_ok IN (0,1)),  -- 1 ok, 0 corrupt, NULL unchecked
     n_reads          INTEGER,            -- FASTQ read count (lines/4) when readable
     integrity_date   TEXT,              -- ISO date of the last integrity check
     UNIQUE (project_id, filename)
@@ -95,7 +99,7 @@ CREATE TABLE IF NOT EXISTS taxa (
     tax_species  TEXT,
     lineage      TEXT,               -- '; '-joined ranked lineage, for display
     alternatives TEXT,               -- top fuzzy candidates
-    confirmed    INTEGER DEFAULT 0,  -- 1 once a user confirms/overrides via apply
+    confirmed    INTEGER DEFAULT 0 CHECK(confirmed IN (0,1)),  -- 1 once a user confirms/overrides via apply
     date_resolved TEXT,
     -- WoRMS (World Register of Marine Species) resolution, populated by
     -- `taxonomy resolve --source worms`. Parallel to the NCBI columns above and
@@ -115,7 +119,7 @@ CREATE TABLE IF NOT EXISTS taxa (
     worms_lineage      TEXT,              -- '; '-joined ranked lineage, for display
     worms_alternatives TEXT,             -- top candidate names
     worms_is_marine    INTEGER,           -- 1 if WoRMS flags the taxon as marine
-    worms_confirmed    INTEGER DEFAULT 0, -- 1 once a user confirms/overrides via apply
+    worms_confirmed    INTEGER DEFAULT 0 CHECK(worms_confirmed IN (0,1)), -- 1 once a user confirms/overrides via apply
     worms_date_resolved TEXT
 );
 
@@ -125,7 +129,7 @@ CREATE TABLE IF NOT EXISTS backups (
     project_id   TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
     location     TEXT NOT NULL,          -- e.g. 'pdrive'
     backup_date  TEXT,
-    verified     INTEGER,                -- 1 all files matched, 0 otherwise
+    verified     INTEGER CHECK(verified IN (0,1)),  -- 1 all files matched, 0 otherwise
     n_files      INTEGER,
     n_mismatch   INTEGER,
     notes        TEXT,

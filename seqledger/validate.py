@@ -58,13 +58,19 @@ def plan_rows(header, rows):
     if uniqid_col is None:
         return None, []
 
+    # Header is validated positionally (case/space-insensitive) as ID,R1,R2,Taxon
+    # then the UniqID column; rows are keyed by the verbatim header cells, so resolve
+    # each logical column to its real header key instead of assuming canonical casing
+    # (a lowercase 'id,r1,...' header would otherwise load zero rows).
+    id_k, r1_k, r2_k, taxon_k = header[0], header[1], header[2], header[3]
+
     seen = set()
     plans = []
     for i, row in enumerate(rows, start=2):  # line 2 = first data row
-        sample_id = (row.get("ID") or "").strip()
-        r1 = (row.get("R1") or "").strip()
-        r2 = (row.get("R2") or "").strip()
-        taxon = (row.get("Taxon") or "").strip()
+        sample_id = (row.get(id_k) or "").strip()
+        r1 = (row.get(r1_k) or "").strip()
+        r2 = (row.get(r2_k) or "").strip()
+        taxon = (row.get(taxon_k) or "").strip()
         uniq_id = (row.get(uniqid_col) or "").strip()
 
         if not sample_id:
@@ -162,10 +168,19 @@ def check_data_files(conn, project_id, seq_data_relpath, seqdata_root):
 
     Returns dict: status ('ok'|'issues'|'unchecked'), n_missing, n_orphan,
     missing (mapfile R1/R2 not on disk), orphan (disk fastq.gz not in mapfile).
-    'unchecked' when the data dir is unreachable.
+    'unchecked' when the data dir is unreachable. When seqdata_root is None it
+    falls back to the project's stored projects.seqdata_root (matching integrity),
+    so each project scans under the root it was ingested from.
     """
+    if seqdata_root is None:
+        row = conn.execute(
+            "SELECT seqdata_root FROM projects WHERE project_id=?", (project_id,)).fetchone()
+        seqdata_root = row["seqdata_root"] if row else None
     db_files = {r["filename"] for r in conn.execute(
         "SELECT filename FROM files WHERE project_id=?", (project_id,))}
+    if not seqdata_root or not seq_data_relpath:
+        return {"status": "unchecked", "n_missing": None, "n_orphan": None,
+                "missing": [], "orphan": []}
     data_dir = os.path.join(seqdata_root, seq_data_relpath)
     if not os.path.isdir(data_dir):
         return {"status": "unchecked", "n_missing": None, "n_orphan": None,
@@ -230,31 +245,43 @@ def validate_catalog(conn, seqdata_root=None):
     Returns {project_id: {"data": {...}, "checksum": {...}, "notes": [Finding]}}.
     """
     projects = conn.execute(
-        "SELECT project_id, seq_data_relpath FROM projects ORDER BY project_id"
+        "SELECT project_id, seq_data_relpath, seqdata_root FROM projects ORDER BY project_id"
     ).fetchall()
 
-    shared = {}
+    # UniqIDs used in more than one distinct project (excluding NULL/''/'NA'
+    # placeholders). Aggregate the (uniq_id, project_id) rows in Python rather than
+    # GROUP_CONCAT + split(',') -- the comma separator is ambiguous when a project_id
+    # itself contains a comma, which would mis-attribute the shared IDs.
+    uniq_projects = {}
     for r in conn.execute(
-        """SELECT uniq_id, GROUP_CONCAT(DISTINCT project_id) AS projects,
-                  COUNT(DISTINCT project_id) AS n
-           FROM samples WHERE uniq_id IS NOT NULL AND uniq_id != ''
-           GROUP BY uniq_id HAVING n > 1"""):
-        for project_id in r["projects"].split(","):
-            shared.setdefault(project_id, []).append((r["uniq_id"], r["projects"]))
+        """SELECT DISTINCT uniq_id, project_id FROM samples
+           WHERE uniq_id IS NOT NULL AND uniq_id != '' AND uniq_id != ?
+           ORDER BY uniq_id, project_id""", (NA_VALUE,)):
+        uniq_projects.setdefault(r["uniq_id"], []).append(r["project_id"])
+    shared = {}
+    for uniq_id, projs in uniq_projects.items():
+        if len(projs) < 2:
+            continue
+        joined = ",".join(projs)
+        for project_id in projs:
+            shared.setdefault(project_id, []).append((uniq_id, joined))
 
+    # Phase 1 -- read only. Do every project's disk scan / checksum read / notes with
+    # no write transaction open, so the (network) recursive globs never run while a
+    # write lock is held. Scanned results to persist are collected for phase 2.
     today = date.today().isoformat()
     results = {}
+    to_persist = []
     for p in projects:
         project_id = p["project_id"]
 
-        if seqdata_root:
-            data = check_data_files(conn, project_id, p["seq_data_relpath"], seqdata_root)
+        # One --seqdata-root overrides all; otherwise each project scans under the
+        # root it was ingested from (consistent with integrity.py).
+        root = seqdata_root or p["seqdata_root"]
+        if root:
+            data = check_data_files(conn, project_id, p["seq_data_relpath"], root)
             if data["status"] != "unchecked":
-                conn.execute(
-                    """UPDATE projects SET data_check_status=?, data_check_n_missing=?,
-                         data_check_n_orphan=?, data_check_date=? WHERE project_id=?""",
-                    (data["status"], data["n_missing"], data["n_orphan"], today, project_id))
-                _persist_data_check_issues(conn, project_id, data["missing"], data["orphan"])
+                to_persist.append((project_id, data))
         else:
             row = conn.execute(
                 """SELECT data_check_status, data_check_n_missing, data_check_n_orphan
@@ -275,5 +302,14 @@ def validate_catalog(conn, seqdata_root=None):
 
         results[project_id] = {"data": data, "checksum": checksum, "notes": notes}
 
-    conn.commit()
+    # Phase 2 -- write. Persist each scanned project and commit per project, so the
+    # write lock is only ever held briefly, never across the disk scans above.
+    for project_id, data in to_persist:
+        conn.execute(
+            """UPDATE projects SET data_check_status=?, data_check_n_missing=?,
+                 data_check_n_orphan=?, data_check_date=? WHERE project_id=?""",
+            (data["status"], data["n_missing"], data["n_orphan"], today, project_id))
+        _persist_data_check_issues(conn, project_id, data["missing"], data["orphan"])
+        conn.commit()
+
     return results

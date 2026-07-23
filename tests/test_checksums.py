@@ -75,3 +75,58 @@ def test_orphan_in_md5_listing_warns(tmp_path):
 
     summary = ochecksums.load_checksums(conn, store, pdrive)
     assert any("orphan" in w and "stray.fastq.gz" in w for w in summary["warnings"])
+
+
+def test_file_absent_from_both_listings_unverifies_backup(tmp_path):
+    # #5 regression: a cataloged file that vanishes from BOTH md5 listings used
+    # to keep its stale md5_match=1, leaving the backup wrongly 'verified'.
+    conn, _ = _setup_project(tmp_path)
+
+    # First, a complete pair verifies the backup.
+    store = write_md5(str(tmp_path / "store.md5"), _md5_entries())
+    pdrive = write_md5(str(tmp_path / "pdrive.md5"), _md5_entries())
+    ochecksums.load_checksums(conn, store, pdrive)
+    backup = conn.execute(
+        "SELECT verified FROM backups WHERE project_id='genohub-1_X'").fetchone()
+    assert backup["verified"] == 1
+
+    # Now one file is absent from both listings (e.g. deleted before re-hashing).
+    present = [e for e in _md5_entries() if not e[1].endswith("i2_2.fastq.gz")]
+    store2 = write_md5(str(tmp_path / "store2.md5"), present)
+    pdrive2 = write_md5(str(tmp_path / "pdrive2.md5"), present)
+    summary = ochecksums.load_checksums(conn, store2, pdrive2)
+
+    # The vanished file is reset to uncompared and flagged.
+    row = conn.execute(
+        "SELECT md5_match, store_md5, pdrive_md5 FROM files "
+        "WHERE filename='i2_2.fastq.gz'").fetchone()
+    assert row["md5_match"] is None
+    assert row["store_md5"] is None and row["pdrive_md5"] is None
+    assert summary["absent"] == 1
+    assert any("i2_2.fastq.gz" in w and "absent from both" in w
+               for w in summary["warnings"])
+
+    # ...so the backup is no longer verified.
+    backup = conn.execute(
+        "SELECT verified FROM backups WHERE project_id='genohub-1_X'").fetchone()
+    assert backup["verified"] != 1
+
+
+def test_empty_store_listing_warns_and_leaves_status_incomplete(tmp_path):
+    # #21 regression: an empty/truncated listing must not pass silently.
+    conn, _ = _setup_project(tmp_path)
+    store = write_md5(str(tmp_path / "store.md5"), [])  # truncated to nothing
+    pdrive = write_md5(str(tmp_path / "pdrive.md5"), _md5_entries())
+
+    summary = ochecksums.load_checksums(conn, store, pdrive)
+
+    assert any("Store md5 listing is empty" in w for w in summary["warnings"])
+    # No file can be verified with the store side missing; all stay uncompared.
+    n_null = conn.execute(
+        "SELECT COUNT(*) FROM files WHERE md5_match IS NULL").fetchone()[0]
+    assert n_null == 4
+    assert conn.execute(
+        "SELECT COUNT(*) FROM files WHERE md5_match=1").fetchone()[0] == 0
+    backup = conn.execute(
+        "SELECT verified FROM backups WHERE project_id='genohub-1_X'").fetchone()
+    assert backup["verified"] != 1

@@ -38,6 +38,21 @@ _TIMEOUT = 60          # seconds per request
 _RETRY_CODES = (429, 500, 502, 503, 504)
 _MISS = object()       # cache sentinel: key absent (vs. a cached empty/None value)
 
+# WoRMS TAXAMATCH quality gate: an exact hit or a single-edit near-match is
+# trustworthy enough to auto-accept as an AphiaID; phonetic / near_2+ matches are
+# too loose to store as authoritative unreviewed, so they are flagged for review.
+_ACCEPT_MATCH_TYPES = ("exact", "near_1")
+
+
+def is_high_confidence(match_type):
+    """Whether a WoRMS TAXAMATCH match_type is trustworthy enough to auto-accept.
+
+    Exact and near_1 (single-edit) matches are accepted; phonetic and near_2+
+    matches are flagged for human review rather than written as an accepted
+    AphiaID. Pure + tiny so the accept/reject rule is unit-testable in isolation.
+    """
+    return (match_type or "").lower() in _ACCEPT_MATCH_TYPES
+
 
 # ---- HTTP + cache -----------------------------------------------------------
 
@@ -216,6 +231,16 @@ def _resolve_one(taxon, records, cache):
         return d
     matched = records[0]
     match_type = (matched.get("match_type") or "exact").lower()
+    # Record the candidate names regardless of quality so a reviewer can see them.
+    alts = _dedup([r.get("scientificname") for r in records[:5]])
+    d["worms_alternatives"] = " | ".join(alts) if alts else None
+    # Quality gate: only a high-confidence match is written as an accepted AphiaID.
+    # A loose phonetic / near_2+ match is left unwritten (aphia_id/lineage blank,
+    # worms_confirmed stays 0) and flagged for review, since committing it as
+    # authoritative would silently mis-assign the taxon.
+    if not is_high_confidence(match_type):
+        d["worms_match_type"] = ("review_" + match_type) if match_type else "review"
+        return d
     status = matched.get("status")
     rec = matched
     if status and status.lower() != "accepted" and matched.get("valid_AphiaID"):
@@ -225,8 +250,6 @@ def _resolve_one(taxon, records, cache):
     _fill_fields(d, rec)
     d["worms_status"] = status
     d["worms_match_type"] = match_type
-    alts = _dedup([r.get("scientificname") for r in records[:5]])
-    d["worms_alternatives"] = " | ".join(alts) if alts else None
     return d
 
 

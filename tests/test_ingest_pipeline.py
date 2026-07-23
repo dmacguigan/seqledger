@@ -190,12 +190,13 @@ def test_ingest_prune_refreshes_data_files_report(tmp_path, capsys):
         "SELECT data_check_n_missing FROM projects").fetchone()[0] == 2
     conn.close()
 
-    # user drops bad1 from the CSV, re-ingests with --prune
+    # user drops bad1 from the CSV, re-ingests with --prune (--yes: pytest runs
+    # non-interactively, and destructive --prune now refuses a no-TTY run without it)
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows[:1],
                  disk_files=["s1_1.fastq.gz", "s1_2.fastq.gz"])
     capsys.readouterr()
     cli.main(["--db", db, "ingest", mf, "--seqdata-root", root,
-              "--skip-taxonomy", "--prune"])
+              "--skip-taxonomy", "--prune", "--yes"])
 
     conn = odb.connect(db)
     # stale rows cleared and status recomputed clean, no manual validate needed

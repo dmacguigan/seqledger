@@ -93,6 +93,9 @@ def connect_ro(db_path):
     """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    # Defense in depth on top of mode=ro: refuse any write attempt outright.
+    # (foreign_keys is irrelevant on a pure-read connection, so it stays off.)
+    conn.execute("PRAGMA query_only = ON")
     return conn
 
 
@@ -138,6 +141,9 @@ _MIGRATIONS = [
 
 def _migrate(conn):
     """Add any columns missing from an older DB (idempotent)."""
+    # The table/column/decl identifiers interpolated into the f-string DDL below all
+    # come from the hardcoded _MIGRATIONS constant (never user input), so building the
+    # statements with f-strings is safe -- SQLite has no parameter binding for DDL.
     for table, column, decl in _MIGRATIONS:
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if not cols:
@@ -173,13 +179,21 @@ def init_db(conn, schema_path=SCHEMA_PATH):
 
 
 def header_uniqid_column(header):
-    """Return the name of the fifth (UniqID) column if the header is valid, else None."""
+    """Return the name of the fifth (UniqID) column if the header is valid, else None.
+
+    Matching is case-insensitive and whitespace-tolerant so the tool retargets to a
+    second lab's mapfiles (per the README) that differ only in case/spacing. The name
+    returned is the header cell verbatim (not normalized): callers use it as a dict key
+    against the parsed row, whose keys are the original header cells.
+    """
     if len(header) < 5:
         return None
-    if [h.strip() for h in header[:4]] != REQUIRED_COLUMNS:
+    required_lower = [c.lower() for c in REQUIRED_COLUMNS]
+    if [h.strip().lower() for h in header[:4]] != required_lower:
         return None
-    fifth = header[4].strip()
-    return fifth if fifth in UNIQID_ALIASES else None
+    fifth = header[4]
+    aliases_lower = {a.lower() for a in UNIQID_ALIASES}
+    return fifth if fifth.strip().lower() in aliases_lower else None
 
 
 def parse_project_id(seq_data_relpath):

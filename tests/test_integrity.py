@@ -1,3 +1,4 @@
+import errno
 import gzip
 import json
 import os
@@ -179,6 +180,45 @@ def test_catalog_unchecked_missing_file(tmp_path):
     row = conn.execute(
         "SELECT integrity_status, gz_ok FROM files WHERE direction='R2'").fetchone()
     assert row["integrity_status"] == "unchecked" and row["gz_ok"] is None
+
+
+def test_deleted_file_after_ok_becomes_unchecked(tmp_path):
+    # Catalog + check a valid file (-> ok), then delete it on disk and re-run
+    # without --force: a real deletion (ENOENT) must surface as 'unchecked', not
+    # stay masked as the previously-cached 'ok' forever.
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
+    assert conn.execute(
+        "SELECT integrity_status FROM files WHERE direction='R2'").fetchone()[0] == "ok"
+
+    os.remove(os.path.join(root, "genohub-1_X", "s1_2.fastq.gz"))
+    oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)  # no force
+    row = conn.execute(
+        "SELECT integrity_status, gz_ok FROM files WHERE direction='R2'").fetchone()
+    assert row["integrity_status"] == "unchecked" and row["gz_ok"] is None
+
+
+def test_check_path_enoent_ignores_cached_ok(tmp_path):
+    # Direct unit check: a genuinely-missing path (ENOENT) is 'unchecked' even
+    # with a cached passing result -- a deletion must never be reported as 'ok'.
+    cached = {"gz_ok": 1, "n_reads": 5, "integrity_date": "2020-01-01",
+              "size_bytes": 100}
+    res = oint._check_path(str(tmp_path / "gone.fastq.gz"), cached=cached)
+    assert res["status"] == oint.UNCHECKED and res["cached"] is False
+
+
+def test_check_path_transient_error_keeps_cached_ok(monkeypatch):
+    # A transient stat failure (EIO/ESTALE, not ENOENT) on a previously-passed
+    # file keeps the cached OK rather than downgrading a verified file.
+    def boom(path):
+        raise OSError(errno.EIO, "temporary i/o error")
+
+    monkeypatch.setattr(oint.os, "stat", boom)
+    cached = {"gz_ok": 1, "n_reads": 5, "integrity_date": "2020-01-01",
+              "size_bytes": 100}
+    res = oint._check_path("/whatever/does-not-matter.fastq.gz", cached=cached)
+    assert res["status"] == oint.OK and res["cached"] is True and res["n_reads"] == 5
 
 
 def test_catalog_uses_stored_root(tmp_path):

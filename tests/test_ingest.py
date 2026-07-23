@@ -114,6 +114,51 @@ def test_ingest_skips_duplicate_id_row_loads_the_rest(tmp_path):
     assert results[0][3]["metadata_status"] == "flagged"
 
 
+def test_prune_deletes_stale_file_rows(tmp_path):
+    # Prune should drop file rows whose filename the corrected mapfile no longer lists
+    # (the in-place typo-fix case), via the chunked per-filename delete path (#22).
+    root = str(tmp_path / "raw_sequence_data")
+    os.makedirs(root, exist_ok=True)
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
+    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_map_file(conn, map_file, seqdata_root=root)
+    assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 2
+
+    # Fix R2's filename in place; the old s1_2 name is now stale and must be pruned.
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv",
+                 [("s1", "s1_1.fastq.gz", "s1_2b.fastq.gz", "Gadus", "U1")])
+    results = oingest.ingest_map_file(conn, map_file, seqdata_root=root, prune=True)
+    assert results[0][3]["pruned_files"] == 1
+    assert {r["filename"] for r in conn.execute("SELECT filename FROM files")} == \
+        {"s1_1.fastq.gz", "s1_2b.fastq.gz"}
+
+
+def test_prune_empty_csv_does_not_wipe_files(tmp_path):
+    # A transiently-broken mapfile that references NO files must not cause prune to
+    # wipe every existing file row; it keeps them and appends a WARN instead (#1b).
+    root = str(tmp_path / "raw_sequence_data")
+    os.makedirs(root, exist_ok=True)
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
+    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_map_file(conn, map_file, seqdata_root=root)
+    assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 2
+
+    # Same sample loads, but R1/R2 are empty -> csv references no files at all.
+    with open(os.path.join(root, "genohub-1_X_mapfile.csv"), "w") as f:
+        f.write("ID,R1,R2,Taxon,UniqID\n")
+        f.write("s1,,,Gadus,U1\n")
+    results = oingest.ingest_map_file(conn, map_file, seqdata_root=root, prune=True)
+    findings, stats = results[0][1], results[0][3]
+    assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 2  # NOT wiped
+    assert stats["pruned_files"] == 0
+    assert any("catastrophic wipe" in f.message for f in findings), \
+        [str(f) for f in findings]
+
+
 def test_ingest_flags_filename_listed_twice(tmp_path):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)

@@ -66,19 +66,51 @@ def load_checksums(conn, store_md5_path, pdrive_md5_path, source="backfill",
     pdrive = parse_md5sum(pdrive_md5_path)
 
     # Index DB files by (project_id, filename).
-    cur = conn.execute("SELECT file_pk, project_id, filename FROM files")
-    by_key = {(r["project_id"], r["filename"]): r["file_pk"] for r in cur.fetchall()}
+    db_files = conn.execute(
+        "SELECT file_pk, project_id, filename FROM files").fetchall()
+    by_key = {(r["project_id"], r["filename"]): r["file_pk"] for r in db_files}
 
     today = date.today().isoformat()
     matched = 0
     warnings = []
     touched_projects = set()
+    touched_pks = set()
+
+    def _in_scope(project_id):
+        return not only_project or project_id == only_project
+
+    # Guard against a truncated/empty md5 file being loaded as if it were complete:
+    # far fewer entries in scope than the catalog has cataloged files is a red flag.
+    n_scope_files = sum(1 for r in db_files if _in_scope(r["project_id"]))
+    for label, listing in (("Store", store), ("P-drive", pdrive)):
+        n_scope_entries = sum(1 for rp in listing if _in_scope(_project_of(rp)))
+        if n_scope_files > 0 and (n_scope_entries == 0
+                                  or n_scope_entries * 2 < n_scope_files):
+            warnings.append(
+                f"{label} md5 listing is empty or much smaller than the catalog "
+                f"({n_scope_entries} vs {n_scope_files}) -- truncated file?")
+
+    # Surface the deferred basename-collision issue: two different relpaths in one
+    # listing that reduce to the same (project_id, basename) fold onto one DB row.
+    for label, listing in (("Store", store), ("P-drive", pdrive)):
+        seen = {}
+        for relpath in listing:
+            project_id = _project_of(relpath)
+            if not _in_scope(project_id):
+                continue
+            key = (project_id, os.path.basename(relpath))
+            if key in seen:
+                warnings.append(
+                    f"{label} md5 listing: '{relpath}' and '{seen[key]}' share "
+                    f"basename '{key[1]}' in project {project_id} (collision)")
+            else:
+                seen[key] = relpath
 
     # Build a per-key view combining both sides.
     all_relpaths = set(store) | set(pdrive)
     for relpath in all_relpaths:
         project_id = _project_of(relpath)
-        if only_project and project_id != only_project:
+        if not _in_scope(project_id):
             continue
         filename = os.path.basename(relpath)
         key = (project_id, filename)
@@ -109,12 +141,31 @@ def load_checksums(conn, store_md5_path, pdrive_md5_path, source="backfill",
             (s_md5, p_md5, s_md5, match, source, today, file_pk))
         matched += 1
         touched_projects.add(project_id)
+        touched_pks.add(file_pk)
+
+    # A cataloged file absent from BOTH listings is never visited above, so a
+    # stale md5_match would persist and keep a backup wrongly 'verified'. Reset
+    # those files to uncompared (NULL) and flag them, so _update_backup recounts.
+    absent = 0
+    for r in db_files:
+        if not _in_scope(r["project_id"]) or r["file_pk"] in touched_pks:
+            continue
+        warnings.append(
+            f"cataloged file '{r['filename']}' absent from both md5 listings "
+            f"(backup unverified)")
+        conn.execute(
+            "UPDATE files SET store_md5=NULL, pdrive_md5=NULL, md5_match=NULL "
+            "WHERE file_pk=?",
+            (r["file_pk"],))
+        touched_projects.add(r["project_id"])
+        absent += 1
 
     for project_id in touched_projects:
         _update_backup(conn, project_id, today)
 
     conn.commit()
-    return {"matched": matched, "warnings": warnings, "projects": sorted(touched_projects)}
+    return {"matched": matched, "warnings": warnings,
+            "projects": sorted(touched_projects), "absent": absent}
 
 
 def _update_backup(conn, project_id, backup_date):

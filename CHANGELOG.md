@@ -18,6 +18,14 @@ by an adversarial review. Highlights (specifics may still shift):
 
 ### Changed
 
+- **File identity is now the relative path, not the basename.** The `files`
+  table is keyed on `UNIQUE(project_id, rel_path)` (was `project_id, filename`),
+  so two FASTQ files that share a basename in different subdirectories of one
+  project (lane/run splits) are both cataloged, and md5 verification joins on the
+  full path instead of cross-contaminating same-named files. Existing catalogs
+  are rebuilt to the new key automatically on the next `init-db` (the file table
+  is recreated in place, preserving all rows; **back up the catalog first**, as
+  the README already advises for `init-db`).
 - Documentation corrected to describe the integrity check accurately: it
   decompresses every byte (equivalent to `gzip -t`, catching truncation, CRC
   errors, and bit-rot) and verifies the total line count is a multiple of 4, but

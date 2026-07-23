@@ -140,23 +140,32 @@ def _discover_disk_files(data_dir, seqdata_root, uid_cache, globs=_DEFAULT_FASTQ
     """Find FASTQ files under data_dir (recursively; files may be nested in subdirs).
 
     globs is the set of shell patterns to match (from the catalog's configured
-    fastq_extensions, e.g. *.fastq.gz + *.fq.gz). Returns
-    ({basename: {"rel_path", "size", "uid", "name"}}, collisions), where rel_path is
-    relative to seqdata_root and collisions lists basenames found in >1 subdir.
+    fastq_extensions, e.g. *.fastq.gz + *.fq.gz). Returns (by_basename, all_files,
+    collisions), where each info is {"filename","rel_path","size","uid","name"} and
+    rel_path is relative to seqdata_root:
+      by_basename -- {basename: info} for mapfile R1/R2 lookup (a colliding basename
+                     keeps the last found and is listed in `collisions`).
+      all_files   -- one info per file (keyed physically by rel_path), so a caller
+                     that catalogs everything (diskonly projects) keeps BOTH files
+                     when two share a basename in different subdirs.
+      collisions  -- basenames found in more than one subdir.
     """
     paths = set()
     for pat in globs:
         paths.update(glob.glob(os.path.join(data_dir, "**", pat), recursive=True))
-    found = {}
+    by_basename = {}
+    all_files = []
     collisions = []
     for p in sorted(paths):
         fn = os.path.basename(p)
-        if fn in found:
-            collisions.append(fn)
         uid, name, size = _stat_owner(p, uid_cache)
-        found[fn] = {"rel_path": os.path.relpath(p, seqdata_root),
-                     "size": size, "uid": uid, "name": name}
-    return found, collisions
+        info = {"filename": fn, "rel_path": os.path.relpath(p, seqdata_root),
+                "size": size, "uid": uid, "name": name}
+        if fn in by_basename:
+            collisions.append(fn)
+        by_basename[fn] = info
+        all_files.append(info)
+    return by_basename, all_files, collisions
 
 
 def _cfg_fastq_globs(conn):
@@ -262,28 +271,52 @@ def _upsert_sample(conn, project_id, sample_id, taxon, uniq_id, extra_json, flag
 
 
 def _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
-                 size_bytes=None, owner_uid=None, owner_name=None, disk_confirmed=False):
-    # Do not clobber md5 columns on re-ingest. Refresh size/owner only when known
-    # (COALESCE keeps prior values if the file was unreachable this run). rel_path is
-    # overwritten only when the file was actually seen on disk this run (disk_confirmed);
-    # a metadata-only re-ingest passes the flat guess but must not clobber a correct
-    # nested rel_path recorded by an earlier disk-backed run.
+                 size_bytes=None, owner_uid=None, owner_name=None, disk_confirmed=False,
+                 proj_relpath=None):
+    # A file's identity is its relative path (project_id, rel_path), not its basename:
+    # two files can share a basename in different subdirs. Resolve the target rel_path
+    # so a re-ingest updates the same row instead of creating a duplicate:
+    #  - disk_confirmed (path came from a real disk scan): authoritative. If a single
+    #    existing row for this basename still sits at the FLAT GUESS (proj_relpath/
+    #    filename) recorded by a prior metadata-only run, move it onto the real disk
+    #    path. A row already at a real, different path is a distinct physical file that
+    #    merely shares a basename -- leave it, so both files are kept.
+    #  - not disk_confirmed (rel_path is only a flat guess): reuse the existing row's
+    #    recorded path when there's exactly one, so the guess never forks a new row.
+    target_rel = rel_path
+    rows = conn.execute(
+        "SELECT file_pk, rel_path FROM files WHERE project_id=? AND filename=?",
+        (project_id, filename)).fetchall()
+    if disk_confirmed:
+        flat_guess = os.path.join(proj_relpath, filename) if proj_relpath else None
+        if (len(rows) == 1 and flat_guess is not None
+                and rows[0]["rel_path"] == flat_guess and rel_path != flat_guess):
+            taken = conn.execute(
+                "SELECT 1 FROM files WHERE project_id=? AND rel_path=?",
+                (project_id, rel_path)).fetchone()
+            if not taken:
+                conn.execute("UPDATE files SET rel_path=? WHERE file_pk=?",
+                             (rel_path, rows[0]["file_pk"]))
+    elif len(rows) == 1 and rows[0]["rel_path"]:
+        target_rel = rows[0]["rel_path"]
     was_new = conn.execute(
-        "SELECT 1 FROM files WHERE project_id=? AND filename=?",
-        (project_id, filename)).fetchone() is None
+        "SELECT 1 FROM files WHERE project_id=? AND rel_path=?",
+        (project_id, target_rel)).fetchone() is None
+    # Do not clobber md5 columns on re-ingest; refresh size/owner only when known
+    # (COALESCE keeps prior values if the file was unreachable this run).
     conn.execute(
         """INSERT INTO files
              (project_id, sample_pk, direction, filename, rel_path,
               size_bytes, owner_uid, owner_name)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(project_id, filename) DO UPDATE SET
+           ON CONFLICT(project_id, rel_path) DO UPDATE SET
              sample_pk=excluded.sample_pk, direction=excluded.direction,
-             rel_path=CASE WHEN ? THEN excluded.rel_path ELSE files.rel_path END,
+             filename=excluded.filename,
              size_bytes=COALESCE(excluded.size_bytes, files.size_bytes),
              owner_uid=COALESCE(excluded.owner_uid, files.owner_uid),
              owner_name=COALESCE(excluded.owner_name, files.owner_name)""",
-        (project_id, sample_pk, direction, filename, rel_path,
-         size_bytes, owner_uid, owner_name, 1 if disk_confirmed else 0))
+        (project_id, sample_pk, direction, filename, target_rel,
+         size_bytes, owner_uid, owner_name))
     return was_new
 
 
@@ -329,7 +362,7 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
     if seqdata_root:
         data_dir = os.path.join(seqdata_root, seq_data_relpath)
         proj_owner_uid, proj_owner_name, _ = _stat_owner(data_dir, uid_cache)
-        disk, collisions = _discover_disk_files(
+        disk, _all_disk, collisions = _discover_disk_files(
             data_dir, seqdata_root, uid_cache, _cfg_fastq_globs(conn))
 
     disk_filenames = set(disk) if disk is not None else None
@@ -425,7 +458,7 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
             name = info["name"] if info else None
             if _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
                             size_bytes=size, owner_uid=uid, owner_name=name,
-                            disk_confirmed=info is not None):
+                            disk_confirmed=info is not None, proj_relpath=seq_data_relpath):
                 stats["new_files"] += 1
 
     stats["orphan_samples"] = sorted(set(existing) - csv_ids)
@@ -475,10 +508,10 @@ def _ingest_diskonly(conn, project_id, data_dir, seqdata_root, metadata_status, 
     project_id_, source, number, description = parse_project_id(project_id)
     abs_root = os.path.abspath(seqdata_root) if seqdata_root else None
     proj_uid = proj_name = None
-    disk = {}
+    all_files = []
     if data_dir:
         proj_uid, proj_name, _ = _stat_owner(data_dir, uid_cache)
-        disk, _coll = _discover_disk_files(
+        _by_basename, all_files, _coll = _discover_disk_files(
             data_dir, seqdata_root, uid_cache, _cfg_fastq_globs(conn))
 
     _upsert_project(conn, project_id_, source, number, description, None, project_id,
@@ -488,11 +521,13 @@ def _ingest_diskonly(conn, project_id, data_dir, seqdata_root, metadata_status, 
     stats = _empty_stats()
     stats["metadata_status"] = metadata_status
     stats["metadata_detail"] = detail
-    for fn, info in sorted(disk.items()):
-        if _upsert_file(conn, project_id_, None, _infer_direction(fn), fn,
-                        info["rel_path"], size_bytes=info["size"],
+    # Catalog every physical file (keyed by rel_path), so two files sharing a basename
+    # in different subdirs are BOTH kept, not collapsed to one row.
+    for info in sorted(all_files, key=lambda i: i["rel_path"]):
+        if _upsert_file(conn, project_id_, None, _infer_direction(info["filename"]),
+                        info["filename"], info["rel_path"], size_bytes=info["size"],
                         owner_uid=info["uid"], owner_name=info["name"],
-                        disk_confirmed=True):
+                        disk_confirmed=True, proj_relpath=project_id):
             stats["new_files"] += 1
     conn.commit()
     return stats

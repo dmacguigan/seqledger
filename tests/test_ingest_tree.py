@@ -350,3 +350,42 @@ def test_reingest_case_insensitive_header_loads_samples(tmp_path):
     # core columns are not re-captured into extra_json despite lowercase header
     extra = conn.execute("SELECT extra_json FROM samples").fetchone()[0]
     assert extra is None
+
+
+def test_diskonly_same_basename_both_cataloged(tmp_path):
+    # A project folder with NO mapfile and two files sharing a basename in different
+    # subdirs -> BOTH cataloged as distinct rows keyed by rel_path (not collapsed).
+    root, meta = _roots(tmp_path)
+    pid = "genohub-9_COLL"
+    _gz(os.path.join(root, pid, "laneA", "x_1.fastq.gz"))
+    _gz(os.path.join(root, pid, "laneB", "x_1.fastq.gz"))
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, root, meta)  # no mapfile -> diskonly cataloging
+    relpaths = {r["rel_path"] for r in conn.execute(
+        "SELECT rel_path FROM files WHERE project_id=?", (pid,))}
+    assert relpaths == {f"{pid}/laneA/x_1.fastq.gz", f"{pid}/laneB/x_1.fastq.gz"}
+
+
+def test_reingest_flatguess_moves_to_nested_no_dup(tmp_path):
+    # Metadata-only ingest records a flat-guess rel_path; when the file later arrives
+    # nested on disk, a disk-backed re-ingest MOVES that row to the real path instead
+    # of forking a duplicate (and does not collapse genuinely distinct files).
+    from helpers import make_project
+    root, meta = _roots(tmp_path)
+    pid = "genohub-8_FG"
+    rows = [("s1", "x_1.fastq.gz", "x_2.fastq.gz", "Gadus", "U1")]
+    make_project(root, pid, f"{pid}_mapfile.csv", rows, disk_files=[])  # mapfile, no files yet
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, root, meta)
+    rp = {r["rel_path"] for r in conn.execute(
+        "SELECT rel_path FROM files WHERE project_id=?", (pid,))}
+    assert rp == {f"{pid}/x_1.fastq.gz", f"{pid}/x_2.fastq.gz"}  # flat guesses
+
+    _gz(os.path.join(root, pid, "run1", "x_1.fastq.gz"))
+    _gz(os.path.join(root, pid, "run1", "x_2.fastq.gz"))
+    oingest.ingest_tree(conn, root, meta)  # disk-backed re-ingest
+    rp2 = {r["rel_path"] for r in conn.execute(
+        "SELECT rel_path FROM files WHERE project_id=?", (pid,))}
+    assert rp2 == {f"{pid}/run1/x_1.fastq.gz", f"{pid}/run1/x_2.fastq.gz"}  # moved
+    assert conn.execute(
+        "SELECT COUNT(*) FROM files WHERE project_id=?", (pid,)).fetchone()[0] == 2  # no dup

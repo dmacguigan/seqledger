@@ -139,6 +139,82 @@ _MIGRATIONS = [
 ]
 
 
+# New `files` table body used to rebuild an older catalog whose UNIQUE key is the
+# basename (project_id, filename) into the current (project_id, rel_path). KEEP IN
+# SYNC with the files table in schema.sql (same columns/CHECKs; only the table name
+# and the UNIQUE differ). SQLite cannot ALTER a constraint, so we create-copy-swap.
+_FILES_REBUILD_DDL = """
+DROP TABLE IF EXISTS files_new;
+CREATE TABLE files_new (
+    file_pk      INTEGER PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+    sample_pk    INTEGER REFERENCES samples(sample_pk) ON DELETE CASCADE,
+    direction    TEXT CHECK(direction IN ('R1','R2')),
+    filename     TEXT NOT NULL,
+    rel_path     TEXT NOT NULL,
+    size_bytes   INTEGER,
+    owner_uid    INTEGER,
+    owner_name   TEXT,
+    md5          TEXT,
+    md5_source   TEXT,
+    store_md5    TEXT,
+    pdrive_md5   TEXT,
+    md5_match    INTEGER CHECK(md5_match IN (0,1)),
+    date_hashed  TEXT,
+    integrity_status TEXT,
+    gz_ok            INTEGER CHECK(gz_ok IN (0,1)),
+    n_reads          INTEGER,
+    integrity_date   TEXT,
+    UNIQUE (project_id, rel_path)
+);
+"""
+
+
+def _files_unique_keys(conn):
+    """Column lists of every UNIQUE constraint on `files` (origin='u' indexes)."""
+    keys = []
+    for idx in conn.execute("PRAGMA index_list(files)"):
+        if idx["origin"] == "u":
+            keys.append([r["name"] for r in
+                         conn.execute(f"PRAGMA index_info('{idx['name']}')")])
+    return keys
+
+
+def _rebuild_files_relpath_unique(conn):
+    """Re-key `files` from UNIQUE(project_id, filename) to UNIQUE(project_id, rel_path).
+
+    A file's identity is its relative path, not its basename: two files can share a
+    basename in different subdirs of one project, and md5/integrity matching joins on
+    rel_path. Nothing references `files`, so a create-copy-drop-rename is safe; file_pk
+    (and thus samples' file linkage) is preserved. Idempotent: callers only invoke this
+    when the rel_path UNIQUE is absent. Legacy NULL rel_path is backfilled from filename.
+    """
+    # Refuse rather than hit a mid-rebuild IntegrityError: surface any rows that would
+    # collide on the new key so the operator can resolve them (then re-run init-db).
+    dup = conn.execute(
+        """SELECT project_id, COALESCE(rel_path, filename) AS rp, COUNT(*) AS c
+           FROM files GROUP BY project_id, rp HAVING c > 1 LIMIT 1""").fetchone()
+    if dup is not None:
+        raise RuntimeError(
+            "cannot migrate files to UNIQUE(project_id, rel_path): a duplicate "
+            f"(project_id, rel_path) already exists, e.g. project {dup['project_id']!r} / "
+            f"path {dup['rp']!r}. Remove the duplicate file row(s) and re-run init-db.")
+    old_cols = [r["name"] for r in conn.execute("PRAGMA table_info(files)")]
+    conn.executescript(_FILES_REBUILD_DDL)
+    new_cols = {r["name"] for r in conn.execute("PRAGMA table_info(files_new)")}
+    copy = [c for c in old_cols if c in new_cols]
+    select_list = ", ".join(
+        "COALESCE(rel_path, filename)" if c == "rel_path" else c for c in copy)
+    conn.execute(
+        f"INSERT INTO files_new ({', '.join(copy)}) SELECT {select_list} FROM files")
+    conn.execute("DROP TABLE files")
+    conn.execute("ALTER TABLE files_new RENAME TO files")
+    # Recreate the indexes that lived on the old table (schema.sql versions).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_sample ON files(sample_pk)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_proj_filename "
+                 "ON files(project_id, filename)")
+
+
 def _migrate(conn):
     """Add any columns missing from an older DB (idempotent)."""
     # The table/column/decl identifiers interpolated into the f-string DDL below all
@@ -161,6 +237,12 @@ def _migrate(conn):
             # No known legacy name to rename; add the column so downstream queries
             # (which all reference files.direction) never hit 'no such column'.
             conn.execute("ALTER TABLE files ADD COLUMN direction TEXT")
+
+    # Re-key files to UNIQUE(project_id, rel_path) if it still uses the old basename
+    # key. Runs after the ADD COLUMN / rename steps so the copied table is complete.
+    fcols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
+    if fcols and "rel_path" in fcols and ["project_id", "rel_path"] not in _files_unique_keys(conn):
+        _rebuild_files_relpath_unique(conn)
 
     # Partial index for `query mismatches`; created here (not in schema.sql) and
     # guarded, because it references md5_match, which a partial/older `files` table

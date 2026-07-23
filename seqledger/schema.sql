@@ -60,8 +60,8 @@ CREATE TABLE IF NOT EXISTS files (
     project_id   TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
     sample_pk    INTEGER REFERENCES samples(sample_pk) ON DELETE CASCADE,
     direction    TEXT CHECK(direction IN ('R1','R2')),  -- 'R1' | 'R2' (NULL ok: diskonly files)
-    filename     TEXT NOT NULL,          -- basename, e.g. sample_1.fastq.gz
-    rel_path     TEXT,                   -- path relative to raw_sequence_data root
+    filename     TEXT NOT NULL,          -- basename, e.g. sample_1.fastq.gz (may repeat across subdirs)
+    rel_path     TEXT NOT NULL,          -- path relative to raw_sequence_data root; the physical file identity
     size_bytes   INTEGER,
     owner_uid    INTEGER,                -- OS uid owning the file
     owner_name   TEXT,                   -- resolved username for owner_uid
@@ -76,9 +76,15 @@ CREATE TABLE IF NOT EXISTS files (
     gz_ok            INTEGER CHECK(gz_ok IN (0,1)),  -- 1 ok, 0 corrupt, NULL unchecked
     n_reads          INTEGER,            -- FASTQ read count (lines/4) when readable
     integrity_date   TEXT,              -- ISO date of the last integrity check
-    UNIQUE (project_id, filename)
+    -- Physical identity is the relative path, NOT the basename: two files can share
+    -- a basename in different subdirs of one project (lane/run splits), and md5/
+    -- integrity matching joins on rel_path. (Was UNIQUE(project_id, filename); older
+    -- catalogs are rebuilt to this by db._migrate.)
+    UNIQUE (project_id, rel_path)
 );
 CREATE INDEX IF NOT EXISTS idx_files_sample ON files(sample_pk);
+-- Basename lookups (mapfile R1/R2 matching, display) are non-unique now.
+CREATE INDEX IF NOT EXISTS idx_files_proj_filename ON files(project_id, filename);
 
 -- Controlled taxonomy per distinct raw Taxon string (shared across samples).
 -- Populated by `seqledger.py taxonomy resolve` against a local NCBI taxdump.

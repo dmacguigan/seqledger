@@ -37,7 +37,8 @@ def test_data_check_missing_file(tmp_path):
     res = oval.validate_catalog(conn, seqdata_root=root)["genohub-1_X"]
     assert res["data"]["status"] == "issues"
     assert res["data"]["n_missing"] == 1 and res["data"]["n_orphan"] == 0
-    assert "s1_2.fastq.gz" in res["data"]["missing"]
+    # missing/orphan are rel_paths (physical identity), not bare basenames
+    assert "genohub-1_X/s1_2.fastq.gz" in res["data"]["missing"]
 
 
 def test_data_check_orphan_file(tmp_path):
@@ -47,7 +48,7 @@ def test_data_check_orphan_file(tmp_path):
         f.write(b"x")
     res = oval.validate_catalog(conn, seqdata_root=root)["genohub-1_X"]
     assert res["data"]["status"] == "issues"
-    assert res["data"]["n_orphan"] == 1 and "extra.fastq.gz" in res["data"]["orphan"]
+    assert res["data"]["n_orphan"] == 1 and "genohub-1_X/extra.fastq.gz" in res["data"]["orphan"]
 
 
 def test_data_check_issues_persisted(tmp_path):
@@ -59,8 +60,8 @@ def test_data_check_issues_persisted(tmp_path):
     oval.validate_catalog(conn, seqdata_root=root)
     got = {(r["kind"], r["filename"]) for r in conn.execute(
         "SELECT kind, filename FROM data_check_issues WHERE project_id='genohub-1_X'")}
-    assert got == {("missing from disk", "s1_2.fastq.gz"),
-                   ("missing from mapfile", "extra.fastq.gz")}
+    assert got == {("missing from disk", "genohub-1_X/s1_2.fastq.gz"),
+                   ("missing from mapfile", "genohub-1_X/extra.fastq.gz")}
 
     # re-run after fixing -> issue rows cleared
     with gzip.open(os.path.join(root, "genohub-1_X", "s1_2.fastq.gz"), "wb") as f:

@@ -355,8 +355,9 @@ def load_data_issues(db_path, mtime):
         SELECT i.project_id, i.kind, i.filename,
                {_FULL_PATH} AS full_path,
                s.sample_id, f.direction, s.taxon, s.uniq_id
+        -- i.filename holds the file's rel_path (physical identity); join on rel_path.
         FROM data_check_issues i
-        LEFT JOIN files f ON f.project_id = i.project_id AND f.filename = i.filename
+        LEFT JOIN files f ON f.project_id = i.project_id AND f.rel_path = i.filename
         LEFT JOIN projects p ON p.project_id = i.project_id
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
         ORDER BY i.project_id, i.kind, i.filename"""))

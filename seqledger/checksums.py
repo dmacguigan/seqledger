@@ -1,6 +1,5 @@
 """Load and compare md5 checksums from `rclone md5sum` output (both sides)."""
 
-import os
 from datetime import date
 
 
@@ -65,10 +64,12 @@ def load_checksums(conn, store_md5_path, pdrive_md5_path, source="backfill",
     store = parse_md5sum(store_md5_path)
     pdrive = parse_md5sum(pdrive_md5_path)
 
-    # Index DB files by (project_id, filename).
+    # Index DB files by (project_id, rel_path) -- the physical identity. Matching on
+    # the full relative path (not the basename) stops two files that share a basename
+    # in different subdirs from cross-contaminating each other's md5.
     db_files = conn.execute(
-        "SELECT file_pk, project_id, filename FROM files").fetchall()
-    by_key = {(r["project_id"], r["filename"]): r["file_pk"] for r in db_files}
+        "SELECT file_pk, project_id, filename, rel_path FROM files").fetchall()
+    by_key = {(r["project_id"], r["rel_path"]): r["file_pk"] for r in db_files}
 
     today = date.today().isoformat()
     matched = 0
@@ -90,31 +91,13 @@ def load_checksums(conn, store_md5_path, pdrive_md5_path, source="backfill",
                 f"{label} md5 listing is empty or much smaller than the catalog "
                 f"({n_scope_entries} vs {n_scope_files}) -- truncated file?")
 
-    # Surface the deferred basename-collision issue: two different relpaths in one
-    # listing that reduce to the same (project_id, basename) fold onto one DB row.
-    for label, listing in (("Store", store), ("P-drive", pdrive)):
-        seen = {}
-        for relpath in listing:
-            project_id = _project_of(relpath)
-            if not _in_scope(project_id):
-                continue
-            key = (project_id, os.path.basename(relpath))
-            if key in seen:
-                warnings.append(
-                    f"{label} md5 listing: '{relpath}' and '{seen[key]}' share "
-                    f"basename '{key[1]}' in project {project_id} (collision)")
-            else:
-                seen[key] = relpath
-
-    # Build a per-key view combining both sides.
+    # Build a per-key view combining both sides, joined to files by rel_path.
     all_relpaths = set(store) | set(pdrive)
     for relpath in all_relpaths:
         project_id = _project_of(relpath)
         if not _in_scope(project_id):
             continue
-        filename = os.path.basename(relpath)
-        key = (project_id, filename)
-        file_pk = by_key.get(key)
+        file_pk = by_key.get((project_id, relpath))
         s_md5 = store.get(relpath)
         p_md5 = pdrive.get(relpath)
 
@@ -151,8 +134,8 @@ def load_checksums(conn, store_md5_path, pdrive_md5_path, source="backfill",
         if not _in_scope(r["project_id"]) or r["file_pk"] in touched_pks:
             continue
         warnings.append(
-            f"cataloged file '{r['filename']}' absent from both md5 listings "
-            f"(backup unverified)")
+            f"cataloged file '{r['rel_path'] or r['filename']}' absent from both "
+            f"md5 listings (backup unverified)")
         conn.execute(
             "UPDATE files SET store_md5=NULL, pdrive_md5=NULL, md5_match=NULL "
             "WHERE file_pk=?",

@@ -56,13 +56,13 @@ def test_check_rejects_bad_files_flags(tmp_path):
 def test_check_allows_valid_and_null_files_flags(tmp_path):
     conn = _fresh_db(tmp_path)
     conn.execute("INSERT INTO projects(project_id) VALUES ('p1')")
-    # R1/R2/NULL directions and 0/1/NULL flags are all accepted
-    conn.execute("INSERT INTO files(project_id, filename, direction, md5_match, gz_ok) "
-                 "VALUES ('p1','r1.fastq.gz','R1',1,1)")
-    conn.execute("INSERT INTO files(project_id, filename, direction, md5_match, gz_ok) "
-                 "VALUES ('p1','r2.fastq.gz','R2',0,0)")
-    conn.execute("INSERT INTO files(project_id, filename, direction, md5_match, gz_ok) "
-                 "VALUES ('p1','x.fastq.gz',NULL,NULL,NULL)")
+    # R1/R2/NULL directions and 0/1/NULL flags are all accepted (rel_path is NOT NULL)
+    conn.execute("INSERT INTO files(project_id, filename, rel_path, direction, md5_match, gz_ok) "
+                 "VALUES ('p1','r1.fastq.gz','p1/r1.fastq.gz','R1',1,1)")
+    conn.execute("INSERT INTO files(project_id, filename, rel_path, direction, md5_match, gz_ok) "
+                 "VALUES ('p1','r2.fastq.gz','p1/r2.fastq.gz','R2',0,0)")
+    conn.execute("INSERT INTO files(project_id, filename, rel_path, direction, md5_match, gz_ok) "
+                 "VALUES ('p1','x.fastq.gz','p1/x.fastq.gz',NULL,NULL,NULL)")
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 3
 
 
@@ -111,3 +111,63 @@ def test_connect_ro_refuses_writes(tmp_path):
     # writes are refused (query_only=ON on top of mode=ro)
     with pytest.raises(sqlite3.OperationalError):
         ro.execute("INSERT INTO projects(project_id) VALUES ('p2')")
+
+
+_OLD_FILES_DDL = """
+DROP TABLE files;
+CREATE TABLE files (
+  file_pk INTEGER PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+  sample_pk INTEGER REFERENCES samples(sample_pk) ON DELETE CASCADE,
+  direction TEXT, filename TEXT NOT NULL, rel_path TEXT, size_bytes INTEGER,
+  owner_uid INTEGER, owner_name TEXT, md5 TEXT, md5_source TEXT, store_md5 TEXT,
+  pdrive_md5 TEXT, md5_match INTEGER, date_hashed TEXT, integrity_status TEXT,
+  gz_ok INTEGER, n_reads INTEGER, integrity_date TEXT,
+  UNIQUE (project_id, filename));
+"""
+
+
+def test_migrate_files_relpath_unique_rebuild(tmp_path):
+    import sqlite3
+    import pytest
+    conn = _fresh_db(tmp_path)          # current schema (rel_path UNIQUE)
+    conn.executescript(_OLD_FILES_DDL)  # downgrade files to the legacy basename key
+    conn.execute("INSERT INTO projects(project_id) VALUES ('p')")
+    conn.execute("INSERT INTO samples(sample_pk, project_id, sample_id) VALUES (5,'p','s1')")
+    conn.execute("INSERT INTO files(file_pk, project_id, sample_pk, filename, rel_path, md5_match) "
+                 "VALUES (50,'p',5,'x.fastq.gz','p/sub/x.fastq.gz',1)")
+    conn.execute("INSERT INTO files(file_pk, project_id, sample_pk, filename, rel_path) "
+                 "VALUES (51,'p',5,'y.fastq.gz',NULL)")  # legacy NULL rel_path
+    conn.commit()
+    assert ["project_id", "filename"] in odb._files_unique_keys(conn)
+
+    odb.init_db(conn)  # triggers the table rebuild
+
+    keys = odb._files_unique_keys(conn)
+    assert ["project_id", "rel_path"] in keys
+    assert ["project_id", "filename"] not in keys
+    got = {r["file_pk"]: (r["filename"], r["rel_path"], r["md5_match"])
+           for r in conn.execute("SELECT file_pk, filename, rel_path, md5_match FROM files")}
+    assert got[50] == ("x.fastq.gz", "p/sub/x.fastq.gz", 1)   # data + file_pk preserved
+    assert got[51][1] == "y.fastq.gz"                          # NULL rel_path backfilled
+    # same-basename / different rel_path now coexist; duplicate rel_path rejected
+    conn.execute("INSERT INTO files(project_id, sample_pk, filename, rel_path) "
+                 "VALUES ('p',5,'x.fastq.gz','p/other/x.fastq.gz')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO files(project_id, filename, rel_path) "
+                     "VALUES ('p','z.fastq.gz','p/sub/x.fastq.gz')")
+    # idempotent: a second init-db is a no-op
+    odb.init_db(conn)
+    assert ["project_id", "rel_path"] in odb._files_unique_keys(conn)
+
+
+def test_migrate_files_relpath_refuses_on_duplicate(tmp_path):
+    import pytest
+    conn = _fresh_db(tmp_path)
+    conn.executescript(_OLD_FILES_DDL)
+    conn.execute("INSERT INTO projects(project_id) VALUES ('p')")
+    conn.execute("INSERT INTO files(project_id, filename, rel_path) VALUES ('p','a.gz','p/x.gz')")
+    conn.execute("INSERT INTO files(project_id, filename, rel_path) VALUES ('p','b.gz','p/x.gz')")
+    conn.commit()
+    with pytest.raises(RuntimeError):  # refuses rather than a mid-rebuild IntegrityError
+        odb.init_db(conn)

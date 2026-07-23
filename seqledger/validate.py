@@ -176,8 +176,10 @@ def check_data_files(conn, project_id, seq_data_relpath, seqdata_root):
         row = conn.execute(
             "SELECT seqdata_root FROM projects WHERE project_id=?", (project_id,)).fetchone()
         seqdata_root = row["seqdata_root"] if row else None
-    db_files = {r["filename"] for r in conn.execute(
-        "SELECT filename FROM files WHERE project_id=?", (project_id,))}
+    # Compare by REL_PATH (physical identity), not basename: two files can share a
+    # basename in different subdirs, and the DB now keys files on rel_path.
+    db_files = {r["rel_path"] for r in conn.execute(
+        "SELECT rel_path FROM files WHERE project_id=?", (project_id,))}
     if not seqdata_root or not seq_data_relpath:
         return {"status": "unchecked", "n_missing": None, "n_orphan": None,
                 "missing": [], "orphan": []}
@@ -187,10 +189,11 @@ def check_data_files(conn, project_id, seq_data_relpath, seqdata_root):
                 "missing": [], "orphan": []}
     # Recursive: FASTQ may be nested in subdirs (matches ingest's discovery), and
     # the extension set comes from the catalog config (default fastq.gz + fq.gz).
+    # Disk paths are made relative to seqdata_root, the same convention as files.rel_path.
     globs = fastq_globs(get_config(conn, "fastq_extensions")) or ["*.fastq.gz", "*.fq.gz"]
     disk = set()
     for pat in globs:
-        disk.update(os.path.basename(p)
+        disk.update(os.path.relpath(p, seqdata_root)
                     for p in glob.glob(os.path.join(data_dir, "**", pat), recursive=True))
     missing = sorted(db_files - disk)
     orphan = sorted(disk - db_files)

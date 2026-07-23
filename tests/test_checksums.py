@@ -130,3 +130,30 @@ def test_empty_store_listing_warns_and_leaves_status_incomplete(tmp_path):
     backup = conn.execute(
         "SELECT verified FROM backups WHERE project_id='genohub-1_X'").fetchone()
     assert backup["verified"] != 1
+
+
+def test_checksum_matches_by_relpath_not_basename(tmp_path):
+    # Two files sharing a basename in different subdirs must each get their OWN md5
+    # verdict -- matching on rel_path, not basename, so no cross-contamination.
+    import gzip
+    root = str(tmp_path / "raw_sequence_data")
+    pid = "genohub-2_COLL"
+    for sub in ("laneA", "laneB"):
+        d = os.path.join(root, pid, sub)
+        os.makedirs(d, exist_ok=True)
+        with gzip.open(os.path.join(d, "x_1.fastq.gz"), "wb") as f:
+            f.write(b"@r\nACGT\n+\nIIII\n")
+    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
+    odb.init_db(conn)
+    oingest.ingest_tree(conn, root, root)  # diskonly -> both files cataloged
+    store = write_md5(str(tmp_path / "store.md5"), [
+        ("a" * 32, f"{pid}/laneA/x_1.fastq.gz"),
+        ("b" * 32, f"{pid}/laneB/x_1.fastq.gz")])
+    pdrive = write_md5(str(tmp_path / "pdrive.md5"), [
+        ("a" * 32, f"{pid}/laneA/x_1.fastq.gz"),   # laneA: Store == P-drive
+        ("c" * 32, f"{pid}/laneB/x_1.fastq.gz")])  # laneB: mismatch
+    ochecksums.load_checksums(conn, store, pdrive, source="backfill")
+    got = {r["rel_path"]: r["md5_match"] for r in conn.execute(
+        "SELECT rel_path, md5_match FROM files WHERE project_id=?", (pid,))}
+    assert got[f"{pid}/laneA/x_1.fastq.gz"] == 1
+    assert got[f"{pid}/laneB/x_1.fastq.gz"] == 0   # correctly mismatched, no crosstalk

@@ -18,6 +18,7 @@ The dominant cost is reading every byte over the (often network-mounted) storage
 so skipping unchanged files -- not a faster codec -- is the main speedup.
 """
 
+import errno
 import glob
 import gzip
 import json
@@ -101,16 +102,24 @@ def _check_path(path, cached=None, recheck=False):
     """
     try:
         size = os.stat(path).st_size
-    except OSError:
-        # A stat failure on a network mount is often transient (stale handle, EIO,
-        # a momentary unmount). If the file previously passed, keep that result
+    except OSError as e:
+        # Distinguish a genuinely-missing file (ENOENT) from a transient network
+        # hiccup (stale handle, EIO, a momentary unmount). A deleted file must
+        # surface as 'unchecked' even when it previously passed -- keeping the
+        # cached OK would mask a real deletion as 'ok' forever. For a *transient*
+        # stat failure we keep the prior result if the file previously passed
         # (cached=True leaves the DB row unchanged) rather than downgrading a
         # verified file to 'unchecked' and wiping its read count.
-        if not recheck and cached and cached.get("gz_ok") == 1 and cached.get("integrity_date"):
+        if (e.errno != errno.ENOENT and not recheck and cached
+                and cached.get("gz_ok") == 1 and cached.get("integrity_date")):
             return {"status": OK, "n_reads": cached.get("n_reads"), "detail": None,
                     "cached": True}
         return {"status": UNCHECKED, "n_reads": None, "detail": "not found on disk",
                 "cached": False}
+    # Same-size skip: an already-passed file whose on-disk size is unchanged is
+    # trusted without re-reading. This cannot catch same-size bit-rot -- pass
+    # recheck=True (integrity --force) to force a full re-read when ongoing rot
+    # detection matters.
     if (not recheck and cached and cached.get("gz_ok") == 1
             and cached.get("integrity_date") and cached.get("size_bytes") is not None
             and size == cached["size_bytes"]):

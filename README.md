@@ -83,8 +83,9 @@ Inside the GUI (pick a view in the left sidebar):
 Everything is **read-only** — you can't change or delete catalog data from the GUI.
 The sections below are for **data managers**.
 
-> **Tip:** set `export SEQLEDGER_DB=<CATALOG_PATH>` in your `~/.bashrc` so you can
-> drop `--db` and just run `seqledger gui --qsub`.
+> **Tip:** `export SEQLEDGER_DB=<CATALOG_PATH>` in your `~/.bashrc`, then omit
+> `--db` on any command — e.g. just `seqledger gui --qsub`. An explicit `--db`
+> still overrides it.
 
 ## Requirements
 
@@ -253,10 +254,11 @@ seqledger --db oceandna_catalog.db checksums --store store.md5 --pdrive pdrive.m
 seqledger --db oceandna_catalog.db validate \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 
-# 4b. integrity: gzip + FASTQ structural check of cataloged files.
+# 4b. integrity: gzip + FASTQ line-count check of cataloged files.
 #    Stream-decompresses each *.fastq.gz to EOF (== `gzip -t`, catches truncation
-#    / CRC corruption), validates the FASTQ 4-line record structure, and compares
-#    R1/R2 read counts per sample. Per-file results land in `files`
+#    / CRC corruption / bit-rot), checks the total line count is a multiple of 4
+#    (does NOT validate per-record '@'/'+' framing), and compares R1/R2 read
+#    counts per sample. Per-file results land in `files`
 #    (integrity_status, gz_ok, n_reads); a per-project run status is logged to
 #    `validation_log`. Reads every byte, so it is a separate opt-in step; files
 #    are checked concurrently (--jobs, default min(8, CPU count)).
@@ -429,6 +431,12 @@ seqledger --db catalog.db init-db --set io_queue=sThM.q   # any key
 | `backup_location` | "verified backup" location label | `pdrive` |
 | `fastq_extensions` | FASTQ suffixes discovered on disk | `fastq.gz,fq.gz` |
 
+> **Not (yet) configurable:** the map file's required columns are a **fixed set** —
+> `ID`, `R1`, `R2`, `Taxon`, and a fifth `UniqID`/`UniqueID` column. The header
+> names are matched **case-insensitively**, but the set itself is hard-coded, so
+> retargeting another lab means producing map files with these columns (paths,
+> cluster settings, and catalog name are the configurable parts).
+
 ## Troubleshooting
 
 | you see | it means / what to do |
@@ -478,8 +486,9 @@ auto-migrates older catalogs by adding the new columns.
 ## Open items
 
 - Confirm the fifth map-file column name against a live map file. The guide says
-  `UniqID`; the old script checked `UniqueID`. The validator currently accepts
-  either (`seqledger/db.py: UNIQID_ALIASES`); pin it once confirmed.
+  `UniqID`; the old script checked `UniqueID`. The validator accepts either
+  (`seqledger/db.py: UNIQID_ALIASES`), matched case-insensitively, so both work
+  regardless; pin the canonical name once confirmed.
 - Decide the canonical Store/Scratch paths for the master DB and its GUI copy.
 
 ## Tests

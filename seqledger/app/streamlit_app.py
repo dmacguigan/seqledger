@@ -508,10 +508,11 @@ def _csv_safe_cell(v):
 
 def _csv_safe_df(df):
     """Copy of df with string cells sanitized against CSV formula injection. Only
-    object-dtype columns are scanned, so numeric/Int64 columns are untouched."""
+    string-dtype columns (object or str) are scanned, so numeric/Int64 columns are
+    untouched."""
     out = df.copy()
     for c in out.columns:
-        if out[c].dtype == object:
+        if pd.api.types.is_string_dtype(out[c].dtype):
             out[c] = out[c].map(_csv_safe_cell)
     return out
 
@@ -1230,6 +1231,7 @@ def custom_table_view(samples_df, paths_df):
     mp_rows = omito.build_map_rows(table.to_dict("records"), rows,
                                    id_field=id_choices[id_label])
     mp_df = pd.DataFrame(mp_rows, columns=omito.MITOPILOT_COLUMNS)
+    # Not _csv_safe_df: MitoPilot reads this with read.csv and needs ID/R1/R2 verbatim.
     c2.download_button("Download MitoPilot map file",
                        mp_df.to_csv(index=False).encode(),
                        "mitopilot_mapfile.csv", "text/csv",

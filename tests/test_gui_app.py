@@ -77,6 +77,17 @@ def test_csv_safe_df_only_touches_string_columns_and_does_not_mutate():
     assert list(df["taxon"]) == ["=cmd()", "Gadus"]  # original not mutated
 
 
+def test_csv_safe_df_sanitizes_frame_from_read_sql_query():
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE t (taxon TEXT, n INTEGER)")
+    con.executemany("INSERT INTO t VALUES (?, ?)", [("=cmd()", 1), ("Gadus", 2)])
+    df = pd.read_sql_query("SELECT * FROM t", con)
+    con.close()
+    out = app._csv_safe_df(df)
+    assert list(out["taxon"]) == ["'=cmd()", "Gadus"]
+    assert list(out["n"]) == [1, 2]
+
+
 # --- #26 regex ReDoS guard -----------------------------------------------------
 
 def test_validate_regex_accepts_valid():

@@ -51,8 +51,31 @@ def get_config(conn, key, default=None):
     return CONFIG_DEFAULTS.get(key, default)
 
 
+# Config keys pasted into generated shell/qsub scripts; values must match SCRIPT_SAFE_RE.
+SCRIPT_CONFIG_KEYS = ("conda_env", "io_queue", "rclone_module", "login_host", "catalog_slug")
+SCRIPT_SAFE_RE = re.compile(r"[A-Za-z0-9._@:/-]+")
+
+
+def check_config_value(key, value):
+    """Raise ValueError if a config value is unsafe to store."""
+    value = str(value)
+    if any(c in value for c in "\n\r\0"):
+        raise ValueError(f"config {key}: value must not contain a newline, carriage return, or NUL")
+    if key in SCRIPT_CONFIG_KEYS and not SCRIPT_SAFE_RE.fullmatch(value):
+        raise ValueError(f"config {key}={value!r}: only letters, digits, and . _ @ : / - are allowed")
+
+
+def check_directive(value):
+    """Return value for an SGE '#$' line; raise ValueError on whitespace/newlines."""
+    value = str(value)
+    if not value or re.search(r"\s|\0", value):
+        raise ValueError(f"unsafe value for a qsub directive: {value!r}")
+    return value
+
+
 def set_config(conn, key, value):
     """Upsert one config key (no commit; caller commits)."""
+    check_config_value(key, value)
     conn.execute(
         "INSERT INTO config(key, value, updated_at) VALUES (?, ?, date('now')) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",

@@ -14,6 +14,8 @@ which recreates the same tree under the destination.
 
 import shlex
 
+from .db import check_directive
+
 RCLONE_MODULE = "tools/rclone/1.66.0"
 
 
@@ -81,6 +83,7 @@ def build_copy_script(groups, dest, transfers=4, slots=4, mem=4,
     uses --transfers concurrent transfers (I/O-bound, decoupled from CPU slots).
     lTIO caps: 72h wall, 8G/slot, 6 slots and 2 concurrent jobs per user.
     """
+    job_name, io_queue = check_directive(job_name), check_directive(io_queue)
     dest = dest or "REPLACE_WITH_DESTINATION"
     slots = max(1, min(slots, LTIO_MAX_SLOTS))
     mres = slots * mem
@@ -91,13 +94,12 @@ def build_copy_script(groups, dest, transfers=4, slots=4, mem=4,
 
     blocks = []
     for i, (root, rels) in enumerate(groups, start=1):
-        listing = "\n".join(rels)
-        blocks.append(f"""# --- source {i}: {root} ---
+        listing = " \\\n    ".join(shlex.quote(r) for r in rels)
+        blocks.append(f"""# --- source {i} ---
 SRC={shlex.quote(root)}
 LIST=$(mktemp)
-cat > "$LIST" <<'FILES'
-{listing}
-FILES
+printf '%s\\n' \\
+    {listing} > "$LIST"
 rclone copy "$SRC" "$DEST" --files-from "$LIST" \\
     --transfers {transfers} --checksum --progress
 rm -f "$LIST"
@@ -120,7 +122,7 @@ rm -f "$LIST"
 # -notify sends SIGUSR1/2 before a wall-cap kill; resubmitting the SAME script
 # resumes (rclone --checksum skips files already copied).
 trap 'echo "= `date` notified (approaching the 72h wall) -- stopping; resubmit this script to resume"; exit 2' SIGUSR1 SIGUSR2
-module load {rclone_module}
+module load {shlex.quote(rclone_module)}
 
 DEST={shlex.quote(dest)}
 # Fail early (before touching /store) if the destination is unset or unusable.

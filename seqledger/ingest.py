@@ -136,6 +136,9 @@ def _infer_direction(filename):
     return f"R{m.group(1)}" if m else None
 
 
+_BAD_PATH_RE = re.compile(r"[\n\r\0]")
+
+
 def _discover_disk_files(data_dir, seqdata_root, uid_cache, globs=_DEFAULT_FASTQ_GLOBS):
     """Find FASTQ files under data_dir (recursively; files may be nested in subdirs).
 
@@ -158,6 +161,8 @@ def _discover_disk_files(data_dir, seqdata_root, uid_cache, globs=_DEFAULT_FASTQ
     collisions = []
     for p in sorted(paths):
         fn = os.path.basename(p)
+        if _BAD_PATH_RE.search(p):
+            continue
         uid, name, size = _stat_owner(p, uid_cache)
         info = {"filename": fn, "rel_path": os.path.relpath(p, seqdata_root),
                 "size": size, "uid": uid, "name": name}
@@ -442,6 +447,10 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
                 continue  # empty read filename (missing_r1/r2) -> no file cataloged
             if direction == "R2" and "r1_eq_r2" in p["flags"]:
                 continue  # R1 and R2 name the same file -> catalog it once (as R1)
+            if _BAD_PATH_RE.search(filename):
+                findings.append(Finding(WARN, f"{sample_id}/{direction} filename {filename!r} "
+                                        "contains a control character; not cataloged"))
+                continue
             csv_files.add(filename)
             # A filename can only be one physical file; if the mapfile lists it under
             # two samples/directions the last upsert silently wins, so flag it.

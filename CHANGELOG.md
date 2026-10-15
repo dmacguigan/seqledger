@@ -42,6 +42,13 @@ by an adversarial review. Highlights (specifics may still shift):
 - `--db` is accepted after the subcommand too (e.g. `seqledger query summary --db x.db`).
 - `init-db --show` is read-only: it prints the config without creating, migrating,
   or changing the catalog.
+- Grab & Go: the copy script is shown as a short preview (first 20 files); the
+  full script is in the download. The job log and download names carry a
+  timestamp, rclone no longer floods the log with `--progress`, and the job exits
+  non-zero if any copy fails.
+- Grab & Go: a `files_ok` column flags corrupt, empty, missing, or unchecked
+  files per sample, with a warning and an option (on by default) to leave
+  problem files out of the copy job and MitoPilot map.
 
 ### Fixed
 
@@ -68,6 +75,10 @@ by an adversarial review. Highlights (specifics may still shift):
   a "retrying" message while it waits.
 - `gui --qsub` reports failure (with the job log path) instead of printing a
   tunnel when the Streamlit server never started.
+- MitoPilot map R1/R2 are now paths relative to the copy destination (matching
+  the copied layout), not bare filenames, so `data_path = DEST` works.
+- Lane-split samples are flagged in Grab & Go (MitoPilot gets only the first file
+  per direction), and the Samples R1/R2 path columns list every lane file.
 
 - `ingest --prune` / `--prune-projects` safety guards, so a missing or unmounted
   root cannot wipe the catalog.

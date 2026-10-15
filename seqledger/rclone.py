@@ -12,6 +12,7 @@ so each `rclone copy` uses a --files-from list of paths relative to that root,
 which recreates the same tree under the destination.
 """
 
+import datetime
 import shlex
 
 from .db import check_directive
@@ -66,12 +67,27 @@ def estimate_size(file_rows):
     return total, n, n_unknown
 
 
+def head_groups(groups, n):
+    """First n rel_paths across groups (in order), keeping the group structure."""
+    out = []
+    for root, rels in groups:
+        if n <= 0:
+            break
+        out.append((root, rels[:n]))
+        n -= len(rels)
+    return out
+
+
+def timestamp():
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
 LTIO_MAX_SLOTS = 6  # lTIO caps a user at 6 slots; requesting more never schedules.
 
 
 def build_copy_script(groups, dest, transfers=4, slots=4, mem=4,
                       job_name="seqledger_rclone_copy", est_bytes=None, n_files=None,
-                      rclone_module=RCLONE_MODULE, io_queue="lTIO.sq"):
+                      rclone_module=RCLONE_MODULE, io_queue="lTIO.sq", stamp=None):
     """Return a Hydra qsub script that rclone-copies the grouped files to dest.
 
     groups: list of (src_root, [rel_path, ...]) from group_by_root.
@@ -82,8 +98,11 @@ def build_copy_script(groups, dest, transfers=4, slots=4, mem=4,
     SGE slots are clamped to LTIO_MAX_SLOTS so the job always schedules; rclone still
     uses --transfers concurrent transfers (I/O-bound, decoupled from CPU slots).
     lTIO caps: 72h wall, 8G/slot, 6 slots and 2 concurrent jobs per user.
+    The log is <job_name>_<stamp>.log (stamp defaults to now) so reruns don't
+    overwrite it; the job exits non-zero if any rclone copy fails.
     """
     job_name, io_queue = check_directive(job_name), check_directive(io_queue)
+    log_name = check_directive(f"{job_name}_{stamp or timestamp()}.log")
     dest = dest or "REPLACE_WITH_DESTINATION"
     slots = max(1, min(slots, LTIO_MAX_SLOTS))
     mres = slots * mem
@@ -101,14 +120,14 @@ LIST=$(mktemp)
 printf '%s\\n' \\
     {listing} > "$LIST"
 rclone copy "$SRC" "$DEST" --files-from "$LIST" \\
-    --transfers {transfers} --checksum --progress
+    --transfers {transfers} --checksum || {{ rc=$?; echo "ERROR: copy from $SRC failed (rc=$rc)" >&2; rc_fail=$rc; }}
 rm -f "$LIST"
 """)
     body = "\n".join(blocks) if blocks else "echo 'no files selected'; exit 1\n"
 
     return f"""#!/bin/bash
 #$ -N {job_name}
-#$ -o {job_name}.log
+#$ -o {log_name}
 #$ -j y
 #$ -terse
 #$ -notify
@@ -140,6 +159,8 @@ case "$DEST" in
         fi ;;
 esac
 
+rc_fail=0
 {body}
 echo = `date` $JOB_NAME done
+exit $rc_fail
 """

@@ -38,6 +38,7 @@ by an adversarial review. Highlights (specifics may still shift):
 - `ingest --prune` / `--prune-projects` safety guards, so a missing or unmounted
   root cannot wipe the catalog.
 - SQLite-lock resilience in the GUI when reading a catalog that is being written.
+- GUI CSV exports were not sanitized against spreadsheet formula injection on pandas 3.
 - Checksum and integrity correctness fixes (comparison and per-file result
   handling).
 - Taxonomy resolution hardening for edge-case and ambiguous names.

@@ -328,7 +328,8 @@ def cmd_checksums(args):
     conn = odb.connect(args.db)
     odb.init_db(conn)
     summary = ochecksums.load_checksums(
-        conn, args.store, args.pdrive, source=args.source, only_project=args.project)
+        conn, args.store, args.pdrive, source=args.source, only_project=args.project,
+        full_reset=args.full, force=args.force)
     conn.close()
     print(f"updated md5 for {summary['matched']} file(s) "
           f"across {len(summary['projects'])} project(s)")
@@ -731,6 +732,10 @@ def build_parser():
     pc.add_argument("--pdrive", required=True, help="rclone md5sum output for P-drive")
     pc.add_argument("--project", help="limit to one project_id")
     pc.add_argument("--source", default="backfill", choices=["ingest", "backfill"])
+    pc.add_argument("--full", action="store_true",
+                    help="also reset files in projects absent from the listings")
+    pc.add_argument("--force", action="store_true",
+                    help="load even if a listing looks truncated")
     pc.set_defaults(func=cmd_checksums)
 
     pv = sub.add_parser("validate", help="re-check the catalog (data-files + checksum)")

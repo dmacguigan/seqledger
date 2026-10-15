@@ -49,6 +49,10 @@ by an adversarial review. Highlights (specifics may still shift):
 - Grab & Go: a `files_ok` column flags corrupt, empty, missing, or unchecked
   files per sample, with a warning and an option (on by default) to leave
   problem files out of the copy job and MitoPilot map.
+- `gui --qsub` now requests 6 GB by default (was 2 GB, which a large catalog
+  exceeds). Raise `--mem` if the job dies at once.
+- `gui --qsub` deletes its own job, log, and ready files in `~/.seqledger_gui/`
+  that are older than 7 days.
 
 ### Fixed
 
@@ -62,6 +66,19 @@ by an adversarial review. Highlights (specifics may still shift):
   `ambiguous`), and the Samples table shows the same readable labels as the charts.
 - GUI: the Taxonomy view explains how to install plotly when it is missing, and
   says "No samples in this catalog yet." on an empty catalog.
+
+- The `backup_location` config is now honored by `checksums`, `query unbacked`,
+  and the GUI backup column (it was hardcoded to `pdrive`).
+- Ctrl-C during a local `integrity` run now stops at once and saves the results
+  checked so far.
+- `validate` marks a project `unchecked` (with "data folder not found") when its
+  data folder is gone, instead of keeping a stale `ok`. An unmounted root is
+  still skipped.
+- `validate` counts cataloged files not linked to any sample: for a project with
+  a mapfile they are reported as missing from the mapfile; for a project with no
+  mapfile the count is printed.
+- `integrity` no longer flags a file whose last read is empty as a format error.
+
 - Config values and filenames are now shell-quoted in generated qsub and rclone
   scripts, and newlines, carriage returns, and NUL are rejected in config values
   and FASTQ filenames, closing command injection via the catalog or a mapfile.

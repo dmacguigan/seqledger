@@ -3,6 +3,8 @@
 import posixpath
 from datetime import date
 
+from .db import get_config
+
 
 def _decode_md5_file(path):
     """Read a checksum file, tolerating BOMs and non-UTF-8 encodings.
@@ -172,7 +174,7 @@ def load_checksums(conn, store_md5_path, pdrive_md5_path, source="backfill",
 
 
 def _update_backup(conn, project_id, backup_date):
-    """Recompute the pdrive backup row for a project from its files."""
+    """Recompute the backup row for a project from its files."""
     cur = conn.execute(
         """SELECT COUNT(*) AS n,
                   SUM(CASE WHEN md5_match=0 THEN 1 ELSE 0 END) AS n_mismatch,
@@ -186,8 +188,8 @@ def _update_backup(conn, project_id, backup_date):
     verified = 1 if (n > 0 and n_mismatch == 0 and n_uncompared == 0) else 0
     conn.execute(
         """INSERT INTO backups (project_id, location, backup_date, verified, n_files, n_mismatch)
-           VALUES (?, 'pdrive', ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, location) DO UPDATE SET
              backup_date=excluded.backup_date, verified=excluded.verified,
              n_files=excluded.n_files, n_mismatch=excluded.n_mismatch""",
-        (project_id, backup_date, verified, n, n_mismatch))
+        (project_id, get_config(conn, "backup_location"), backup_date, verified, n, n_mismatch))

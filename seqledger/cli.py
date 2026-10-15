@@ -360,9 +360,11 @@ def cmd_checksums(args):
 
 def _data_label(data):
     if data["status"] == "ok":
+        if data.get("n_unmapped"):
+            return f"OK, {data['n_unmapped']} file(s) not linked to any sample (no mapfile)"
         return "OK"
     if data["status"] == "unchecked":
-        return "unchecked"
+        return f"unchecked ({data['detail']})" if data.get("detail") else "unchecked"
     parts = []
     if data.get("n_missing"):
         parts.append(f"{data['n_missing']} missing")
@@ -881,7 +883,7 @@ def build_parser():
                     help="queue for --qsub (default: catalog config, else lTIO.sq)")
     pg.add_argument("--conda-env", default=None,
                     help="conda env activated inside the --qsub job (default: catalog config)")
-    pg.add_argument("--mem", type=int, default=2, help="memory GB for the --qsub job (default 2)")
+    pg.add_argument("--mem", type=int, default=6, help="memory GB for the --qsub job (default 6)")
     pg.add_argument("--wait", type=int, default=300,
                     help="seconds to wait for the --qsub GUI to start serving (default 300)")
     pg.set_defaults(func=cmd_gui)

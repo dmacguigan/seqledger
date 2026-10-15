@@ -207,3 +207,30 @@ def test_launch_qsub_exits_with_log_on_failed(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as ei:
         gui.launch_qsub("x.db", wait=30)
     assert ".seqledger_gui" in str(ei.value.code) and ".log" in str(ei.value.code)
+
+
+def test_launch_qsub_prunes_old_rundir_files(monkeypatch, tmp_path):
+    import os
+    import time
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rundir = tmp_path / ".seqledger_gui"
+    rundir.mkdir()
+    old = time.time() - 8 * 86400
+    for name in ("gui_1_1.job", "gui_1_1.log", "gui_1_1.ready", "keep.txt"):
+        (rundir / name).write_text("x")
+        os.utime(rundir / name, (old, old))
+    (rundir / "gui_2_2.log").write_text("x")
+
+    def fake_run(cmd, **k):
+        return subprocess.CompletedProcess(cmd, 1, "", "boom")
+
+    monkeypatch.setattr(gui.subprocess, "run", fake_run)
+    with pytest.raises(SystemExit):
+        gui.launch_qsub("x.db", wait=1)
+    names = set(os.listdir(rundir))
+    assert not names & {"gui_1_1.job", "gui_1_1.log", "gui_1_1.ready"}
+    assert {"keep.txt", "gui_2_2.log"} <= names
+
+
+def test_gui_mem_default_is_6():
+    assert cli.build_parser().parse_args(["gui"]).mem == 6

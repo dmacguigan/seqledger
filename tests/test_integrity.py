@@ -127,6 +127,23 @@ def test_check_fastq_gz_no_trailing_newline(tmp_path):
     assert res["status"] == oint.OK and res["n_reads"] == 1
 
 
+
+def test_check_fastq_gz_empty_final_read(tmp_path):
+    p = str(tmp_path / "a.fastq.gz")
+    with gzip.open(p, "wb") as f:
+        f.write(b"@r1\nACGT\n+\nIIII\n@r2\n\n+\n\n")
+    res = oint.check_fastq_gz(p)
+    assert res["status"] == oint.OK and res["n_reads"] == 2
+
+
+def test_check_fastq_gz_trailing_blank_line(tmp_path):
+    p = str(tmp_path / "a.fastq.gz")
+    with gzip.open(p, "wb") as f:
+        f.write(b"@r1\nACGT\n+\nIIII\n\n")
+    res = oint.check_fastq_gz(p)
+    assert res["status"] == oint.OK and res["n_reads"] == 1
+
+
 # ---- catalog driver ---------------------------------------------------------
 
 def test_catalog_all_ok(tmp_path):
@@ -556,3 +573,25 @@ def test_unreadable_file_is_unchecked_not_corrupt(tmp_path):
     finally:
         os.chmod(p, 0o644)
     assert res["status"] == oint.UNCHECKED and res["detail"]
+
+
+def test_interrupt_commits_checked_files(tmp_path, monkeypatch, capsys):
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1"),
+            ("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "Gadus", "U2")]
+    conn, root = _setup(tmp_path, rows)
+    real = oint._persist
+    calls = {"n": 0}
+
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise KeyboardInterrupt
+        return real(*a, **kw)
+
+    monkeypatch.setattr(oint, "_persist", flaky)
+    with pytest.raises(KeyboardInterrupt):
+        oint.check_catalog_integrity(conn, seqdata_root=root, jobs=1, progress=False)
+    assert "interrupted: 1 file(s) checked" in capsys.readouterr().out
+    other = odb.connect(os.path.join(tmp_path, "cat.db"))
+    n = other.execute("SELECT COUNT(*) FROM files WHERE integrity_status='ok'").fetchone()[0]
+    assert n == 1

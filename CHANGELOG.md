@@ -48,3 +48,9 @@ by an adversarial review. Highlights (specifics may still shift):
   on a truncated listing unless `--force`.
 - `checksums` matches uppercase md5 hex (PowerShell `Get-FileHash`) and paths
   with a leading `./` or backslashes.
+- `integrity` re-checks a file whose size changed since its last check; a re-ingest
+  that sees a new size clears the old integrity result and backup match.
+- `integrity --batch` no longer reuses results from a completed run, and `--collect`
+  only writes to the result file's own project and never overwrites a newer result.
+- Files that cannot be read (permissions, I/O errors) are reported `unchecked`
+  instead of corrupt.

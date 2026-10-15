@@ -3,6 +3,8 @@ import gzip
 import json
 import os
 
+import pytest
+
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import integrity as oint
@@ -279,22 +281,31 @@ def test_results_json_roundtrip_and_corrupt(tmp_path):
 
 
 def test_emit_json_resume_skips_seeded_files(tmp_path):
-    # Both files are valid on disk. Pre-seed a JSON marking R1 with a (stale)
-    # gzip_error, as if a prior job had checked it. Resume must trust the seed and
-    # NOT re-read R1, while R2 (absent from the seed) is freshly checked -> ok.
+    # Both files are valid on disk. A JSON marks R1 with a stale gzip_error.
+    # No .done (unfinished job): resume trusts the seed and skips R1.
+    # .done present (prior run finished): the seed is ignored and R1 is re-read.
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
     conn, root = _setup(tmp_path, rows)
     pks = _emit_pks(conn)
     out = os.path.join(tmp_path, "genohub-1_X.json")
-    with open(out, "w") as f:
-        json.dump({"project_id": "genohub-1_X", "run_date": "2000-01-01",
-                   "results": {str(pks["R1"]): {"status": "gzip_error", "n_reads": None}}}, f)
 
-    payload = oint.emit_project_json(conn, "genohub-1_X", out, seqdata_root=root,
-                                     progress=False)
-    res = payload["results"]
-    assert res[str(pks["R1"])]["status"] == "gzip_error"  # kept from seed, not re-read
-    assert res[str(pks["R2"])]["status"] == "ok"          # freshly checked
+    def seed():
+        with open(out, "w") as f:
+            json.dump({"project_id": "genohub-1_X", "run_date": "2000-01-01",
+                       "results": {str(pks["R1"]): {"status": "gzip_error",
+                                                    "n_reads": None}}}, f)
+
+    seed()
+    res = oint.emit_project_json(conn, "genohub-1_X", out, seqdata_root=root,
+                                 progress=False)["results"]
+    assert res[str(pks["R1"])]["status"] == "gzip_error"
+    assert res[str(pks["R2"])]["status"] == "ok"
+    assert os.path.exists(out + ".done")
+
+    seed()
+    res = oint.emit_project_json(conn, "genohub-1_X", out, seqdata_root=root,
+                                 progress=False)["results"]
+    assert res[str(pks["R1"])]["status"] == "ok"
 
 
 def test_collect_json_skips_orphan_project(tmp_path):
@@ -448,3 +459,100 @@ def test_migrate_adds_direction_when_no_legacy_name(tmp_path):
     conn.commit()
     odb._migrate(conn)
     assert "direction" in {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
+
+
+# ---- staleness: re-ingest size change, collect scoping, unreadable files ---
+
+def _reingest(conn, root):
+    oingest.ingest_map_file(conn, os.path.join(root, "map_file.txt"), seqdata_root=root)
+
+
+def test_reingest_after_truncation_forces_recheck(tmp_path):
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
+    conn.execute("UPDATE files SET md5_match=1")
+    conn.commit()
+    _truncate(root, "s1_1.fastq.gz", 4)
+    _reingest(conn, root)
+    row = conn.execute("SELECT gz_ok, integrity_status, n_reads, integrity_date, "
+                       "md5_match FROM files WHERE filename='s1_1.fastq.gz'").fetchone()
+    assert tuple(row) == (None, None, None, None, None)
+    res = oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
+    assert conn.execute("SELECT integrity_status FROM files "
+                        "WHERE filename='s1_1.fastq.gz'").fetchone()[0] == "gzip_error"
+    assert res["genohub-1_X"]["status"] == "fail"
+
+
+def test_reingest_same_size_keeps_integrity(tmp_path):
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
+    conn.execute("UPDATE files SET md5_match=1")
+    conn.commit()
+    q = ("SELECT file_pk, gz_ok, integrity_status, n_reads, integrity_date, md5_match "
+         "FROM files ORDER BY file_pk")
+    before = [tuple(r) for r in conn.execute(q)]
+    _reingest(conn, root)
+    assert [tuple(r) for r in conn.execute(q)] == before
+    assert all(r[1] == 1 and r[5] == 1 for r in before)
+
+
+def _collect_one(tmp_path, project_id, run_date, results):
+    d = str(tmp_path / "results")
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "r.json")
+    with open(p, "w") as f:
+        json.dump({"project_id": project_id, "run_date": run_date, "results": results}, f)
+    open(p + ".done", "w").close()
+    return d
+
+
+def test_collect_ignores_file_pk_from_other_project(tmp_path):
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
+    pks = _emit_pks(conn)
+    d = _collect_one(tmp_path, "genohub-9_Z", "2999-01-01",
+                     {str(pks["R1"]): {"status": "gzip_error", "n_reads": None}})
+    oint.collect_json(conn, d, progress=False)
+    row = conn.execute("SELECT integrity_status, gz_ok FROM files WHERE file_pk=?",
+                       (pks["R1"],)).fetchone()
+    assert tuple(row) == ("ok", 1)
+
+
+def test_collect_skips_older_run_date(tmp_path):
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
+    pks = _emit_pks(conn)
+    d = _collect_one(tmp_path, "genohub-1_X", "2000-01-01",
+                     {str(pks["R1"]): {"status": "gzip_error", "n_reads": None},
+                      str(pks["R2"]): {"status": "ok", "n_reads": "lots"}})
+    oint.collect_json(conn, d, progress=False)
+    row = conn.execute("SELECT integrity_status, gz_ok FROM files WHERE file_pk=?",
+                       (pks["R1"],)).fetchone()
+    assert tuple(row) == ("ok", 1)
+
+    d = _collect_one(tmp_path, "genohub-1_X", "2999-01-01",
+                     {str(pks["R1"]): {"status": "gzip_error", "n_reads": None},
+                      str(pks["R2"]): {"status": "ok", "n_reads": "lots"}})
+    oint.collect_json(conn, d, progress=False)
+    got = {r[0]: (r[1], r[2]) for r in conn.execute(
+        "SELECT file_pk, integrity_status, n_reads FROM files")}
+    assert got[pks["R1"]] == ("gzip_error", None)
+    assert got[pks["R2"]] == ("ok", 1)  # non-int n_reads rejected
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0,
+                    reason="permission bits not enforced")
+def test_unreadable_file_is_unchecked_not_corrupt(tmp_path):
+    p = str(tmp_path / "a.fastq.gz")
+    with gzip.open(p, "wb") as f:
+        f.write(b"@r1\nACGT\n+\nIIII\n")
+    os.chmod(p, 0)
+    try:
+        res = oint.check_fastq_gz(p)
+    finally:
+        os.chmod(p, 0o644)
+    assert res["status"] == oint.UNCHECKED and res["detail"]

@@ -16,6 +16,8 @@ import subprocess
 import sys
 import time
 
+from .db import check_directive
+
 APP_PATH = os.path.join(os.path.dirname(__file__), "app", "streamlit_app.py")
 LOGIN_HOST = "hydra-login01.si.edu"
 
@@ -23,7 +25,7 @@ LOGIN_HOST = "hydra-login01.si.edu"
 def _print_tunnel(node, port, login_host):
     user = os.environ.get("USER", "YOUR_USER_ID")
     print("\nOn your LOCAL computer, run:\n")
-    print(f"  ssh -N -L {port}:{node}:{port} {user}@{login_host}\n")
+    print(f"  {shlex.join(['ssh', '-N', '-L', f'{port}:{node}:{port}', f'{user}@{login_host}'])}\n")
     print(f"Then open http://localhost:{port} in your browser.\n")
 
 
@@ -93,6 +95,7 @@ def _gui_job_script(log_path, ready_path, queue, conda_env, mem_gb, db_abs, port
     we print always points at a live server. SEQLEDGER_DB points at the master DB
     on Store, which is reachable from lTIO -- no Scratch copy involved.
     """
+    log_path, queue = check_directive(log_path), check_directive(queue)
     return f"""#!/bin/bash
 #$ -N seqledger_gui
 #$ -o {log_path}
@@ -106,7 +109,7 @@ def _gui_job_script(log_path, ready_path, queue, conda_env, mem_gb, db_abs, port
 
 echo + `date` $JOB_NAME on $HOSTNAME in $QUEUE jobID=$JOB_ID
 source ~/.bashrc
-conda activate {conda_env}
+conda activate {shlex.quote(conda_env)}
 export SEQLEDGER_DB={shlex.quote(db_abs)}
 
 # Pick a free port on this node (fall back to the requested one).

@@ -35,6 +35,9 @@ by an adversarial review. Highlights (specifics may still shift):
 
 ### Fixed
 
+- Config values and filenames are now shell-quoted in generated qsub and rclone
+  scripts, and newlines, carriage returns, and NUL are rejected in config values
+  and FASTQ filenames, closing command injection via the catalog or a mapfile.
 - `ingest --prune` / `--prune-projects` safety guards, so a missing or unmounted
   root cannot wipe the catalog.
 - SQLite-lock resilience in the GUI when reading a catalog that is being written.

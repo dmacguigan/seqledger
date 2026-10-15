@@ -88,8 +88,12 @@ def cmd_init_db(args):
             sys.exit(f"--set expects KEY=VALUE, got: {pair}")
         k, v = pair.split("=", 1)
         updates[k.strip()] = v
-    for k, v in updates.items():
-        odb.set_config(conn, k, v)
+    try:
+        for k, v in updates.items():
+            odb.set_config(conn, k, v)
+    except ValueError as e:
+        conn.close()
+        sys.exit(str(e))
     conn.commit()
 
     if args.show:
@@ -409,6 +413,7 @@ def _batch_script(name, log_path, slots, mem, mres, run_cmd,
     72h wall, 12h CPU/slot, 8G/slot, 6 slots and 2 concurrent jobs per user.
     conda_env and io_queue come from the catalog config so another lab can retarget.
     """
+    name, log_path, io_queue = (odb.check_directive(v) for v in (name, log_path, io_queue))
     return f"""#!/bin/bash
 #$ -N seqledger_int_{name}
 #$ -o {log_path}
@@ -426,7 +431,7 @@ echo + `date` $JOB_NAME running on $HOSTNAME in $QUEUE with jobID=$JOB_ID
 # novice knows to just resubmit (the per-project JSON checkpoint is already saved).
 trap 'echo "= `date` notified (approaching a queue cap) -- stopping; resubmit to resume"; exit 2' SIGUSR1 SIGUSR2
 source ~/.bashrc
-conda activate {conda_env}
+conda activate {shlex.quote(conda_env)}
 {run_cmd}
 status=$?
 echo = `date` $JOB_NAME done exit=$status

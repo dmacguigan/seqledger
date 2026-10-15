@@ -58,15 +58,20 @@ seqledger --db <CATALOG_PATH> gui --qsub
 
 `--qsub` starts the GUI on the cluster's I/O queue (so it reads the catalog
 directly) and, once it's running, **prints two things to your screen**: an
-`ssh -N -L …` tunnel command and a `http://localhost:<port>` link. Leave this
+`ssh -N -L ...` tunnel command and a `http://localhost:<port>` link. Leave this
 window open.
 
-**On your own computer** — open a *second* terminal and paste the printed tunnel
-command (it looks like nothing happens — that's correct; leave it open):
+**On your own computer**, open a *second* terminal and paste the printed tunnel
+command (it looks like nothing happens; that's correct, leave it open):
 
 ```bash
-ssh -N -L <port>:<node>:<port> <you>@hydra-login01.si.edu
+ssh -N -L <port>:127.0.0.1:<port> -J <you>@hydra-login01.si.edu <you>@<node>
 ```
+
+The GUI only listens on the compute node itself, so the tunnel hops through the
+login host (`-J`) to `<node>` and forwards to its local port. You'll be asked for
+your password (or key) for both hops. `-J` needs OpenSSH 7.3 or newer; on older
+clients use `-o ProxyCommand="ssh -W %h:%p <you>@hydra-login01.si.edu"` instead.
 
 Then open the printed **`http://localhost:<port>`** link in your web browser.
 
@@ -354,7 +359,7 @@ no Scratch copy). From a login node:
 seqledger --db /store/nmnh_ocean_dna/public/oceandna_catalog.db gui --qsub
 ```
 This submits a Streamlit job to `lTIO.sq`, waits for it to start, then prints the
-exact `ssh -N -L <port>:<node>:<port> you@hydra-login01.si.edu` command to the
+exact `ssh -N -L <port>:127.0.0.1:<port> -J you@hydra-login01.si.edu you@<node>` command to the
 screen (no digging through the job log). Run that on your local computer, open
 `http://localhost:<port>`, and `qdel <job>` when done. lTIO caps jobs at 72h wall
 and 2 concurrent jobs/user, so the GUI stops after 72h -- just resubmit.
@@ -365,8 +370,10 @@ the DB (compute nodes don't mount Store):
 ```bash
 seqledger --db /scratch/nmnh_ocean_dna/oceandna_catalog.db gui --port 8501
 ```
-This prints the `ssh -N -L 8501:NODE:8501 you@hydra-login01.si.edu` command; run it
-locally, then open `http://localhost:8501`. Read-only browsing plus a
+This prints the `ssh -N -L 8501:127.0.0.1:8501 -J you@hydra-login01.si.edu you@NODE`
+command; run it locally, then open `http://localhost:8501`. The GUI binds
+127.0.0.1 only. Off the cluster (no `qsub` on PATH) it prints just the
+`http://localhost:8501` link. Read-only browsing plus a
 build-your-own selection view (sidebar):
 
 - **Projects** - per-project summary stats plus check fields: `mapfile`

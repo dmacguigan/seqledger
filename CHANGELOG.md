@@ -32,8 +32,23 @@ by an adversarial review. Highlights (specifics may still shift):
   does **not** validate per-record `@`/`+` framing.
 - Documentation clarifies that the map file's required columns are a fixed set
   (`ID`, `R1`, `R2`, `Taxon`, `UniqID`/`UniqueID`), matched case-insensitively.
+- The GUI now binds `127.0.0.1` only (locally and under `--qsub`), so other
+  cluster users can no longer reach it over the network. The printed tunnel is
+  now `ssh -N -L <port>:127.0.0.1:<port> -J <you>@<login_host> <you>@<node>`,
+  and off the cluster only the `http://localhost:<port>` link is printed.
 
 ### Fixed
+
+- New catalogs are created with mode `0600` (owner-only); existing catalogs keep
+  their permissions.
+- The read-only connection URI now escapes the catalog path, so a `?` or `#` in
+  the path can no longer drop `mode=ro`; the GUI connection is also query-only.
+- The CLI now waits up to 60 s for a locked catalog (was 5 s), and a local
+  `integrity` run commits at least every 30 s so it no longer starves other
+  writers. The GUI waits about 15 s on a locked catalog (was about 50 s) and shows
+  a "retrying" message while it waits.
+- `gui --qsub` reports failure (with the job log path) instead of printing a
+  tunnel when the Streamlit server never started.
 
 - `ingest --prune` / `--prune-projects` safety guards, so a missing or unmounted
   root cannot wipe the catalog.

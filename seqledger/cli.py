@@ -20,6 +20,7 @@ import sqlite3
 import subprocess
 import sys
 import tarfile
+from datetime import date
 from urllib.error import URLError
 
 from seqledger import db as odb
@@ -123,7 +124,7 @@ def _has_unchecked_files(conn, project_id):
 
 
 def _has_unresolved_taxa(conn):
-    """True if any sample taxon has no row in the taxa table yet.
+    """True if any sample taxon was never resolved against NCBI.
 
     Gates the taxonomy step on *new* taxa (a fresh name, or one changed to a
     string never resolved before) rather than on confirmation status -- taxa
@@ -134,7 +135,19 @@ def _has_unresolved_taxa(conn):
     return conn.execute(
         """SELECT 1 FROM samples s LEFT JOIN taxa t ON t.taxon = s.taxon
            WHERE s.taxon IS NOT NULL AND s.taxon != ''
-             AND t.taxon IS NULL LIMIT 1""").fetchone() is not None
+             AND t.date_resolved IS NULL LIMIT 1""").fetchone() is not None
+
+
+def _review_path(base, name):
+    """<base>/<name>.csv, or a dated name if that file already exists."""
+    path = os.path.join(base, f"{name}.csv")
+    if not os.path.exists(path):
+        return path
+    stem = os.path.join(base, f"{name}_{date.today().isoformat()}")
+    path, n = f"{stem}.csv", 2
+    while os.path.exists(path):
+        path, n = f"{stem}_{n}.csv", n + 1
+    return path
 
 
 def _prune_guard(prune, prune_projects, yes, isatty, ask=input):
@@ -288,12 +301,12 @@ def cmd_ingest(args):
                 print(f"(taxonomy skipped: {e}) -- ingest succeeded; run "
                       f"`seqledger --db {args.db} taxonomy resolve` when ready.")
             if tax_results is not None:
-                review = os.path.join(os.path.dirname(os.path.abspath(args.db)) or ".",
-                                      "taxonomy_review.csv")
-                otax.write_review_csv(tax_results, review)
                 n_flag = sum(1 for d in tax_results if d["match_type"] != "exact")
                 print(f"resolved {len(tax_results)} taxa ({n_flag} fuzzy/unresolved)")
                 if tax_results:
+                    review = _review_path(
+                        os.path.dirname(os.path.abspath(args.db)) or ".", "taxonomy_review")
+                    otax.write_review_csv(tax_results, review)
                     print(f"review + edit confirmed_taxid in: {review}")
                     print(f"then: seqledger --db {args.db} taxonomy apply --review {review}")
 
@@ -622,10 +635,12 @@ def _resolve_ncbi(otax, conn, args, taxdir, scope, base):
     elif args.rebuild_index:
         otax.build_index(taxdir, force=True)
     results = otax.resolve_catalog(conn, taxdir, scope=scope)
-    review = os.path.join(base, "taxonomy_review.csv")
-    otax.write_review_csv(results, review)
     n_flag = sum(1 for d in results if d["match_type"] != "exact")
     print(f"NCBI: resolved {len(results)} taxa ({n_flag} fuzzy/unresolved)")
+    if not results:
+        return
+    review = _review_path(base, "taxonomy_review")
+    otax.write_review_csv(results, review)
     print(f"  review + edit confirmed_taxid in: {review}")
     print(f"  then: seqledger --db {args.db} taxonomy apply --review {review}")
 
@@ -638,10 +653,12 @@ def _resolve_worms(oworms, conn, args, taxdir, scope, base):
     except (OSError, ValueError) as e:  # URLError/HTTPError subclass OSError; bad JSON -> ValueError
         print(f"WoRMS: skipped ({e}) -- network needed; retry when online.")
         return
-    review = os.path.join(base, "worms_review.csv")
-    oworms.write_review_csv_worms(results, review)
     n_flag = sum(1 for d in results if d["worms_match_type"] not in ("exact", "confirmed"))
     print(f"WoRMS: resolved {len(results)} taxa ({n_flag} non-exact/unresolved)")
+    if not results:
+        return
+    review = _review_path(base, "worms_review")
+    oworms.write_review_csv_worms(results, review)
     print(f"  review + edit confirmed_aphia_id in: {review}")
     print(f"  then: seqledger --db {args.db} taxonomy apply --source worms --review {review}")
 
@@ -859,7 +876,8 @@ def build_parser():
                     help="also re-resolve taxa resolved before but not yet confirmed "
                          "(default: only taxa never checked against the source)")
     tr.add_argument("--redo", action="store_true",
-                    help="re-resolve every taxon, including confirmed ones")
+                    help="re-resolve every taxon; confirmed taxa are kept (their "
+                         "machine result goes to the review CSV only)")
     ta = tsub.add_parser("apply", parents=[dbp], help="apply confirmed overrides from a review CSV")
     ta.add_argument("--review", required=True, help="edited review CSV")
     ta.add_argument("--source", choices=("ncbi", "worms"), default="ncbi",

@@ -20,8 +20,9 @@ def find_sample(conn, term):
 def unresolved_taxa(conn):
     """Taxa that did not resolve to an exact/confirmed NCBI match."""
     return conn.execute(
-        """SELECT taxon, match_type, taxid, sci_name, rank FROM taxa
-           WHERE match_type NOT IN ('exact', 'confirmed')
+        """SELECT taxon, COALESCE(match_type, 'unresolved') AS match_type,
+                  taxid, sci_name, rank FROM taxa
+           WHERE COALESCE(match_type, 'unresolved') NOT IN ('exact', 'confirmed')
            ORDER BY match_type, taxon""").fetchall()
 
 

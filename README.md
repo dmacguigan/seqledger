@@ -331,6 +331,17 @@ seqledger --db oceandna_catalog.db query mismatches
 seqledger --db oceandna_catalog.db query taxa      # fuzzy/unresolved taxa
 ```
 
+`--db` works before or after the subcommand. `seqledger query -h` lists what each
+lookup returns.
+
+### Exit codes
+
+Commands exit `0` on a clean run, `1` when they find problems (an ingest project
+FAILs, integrity finds gzip/format errors, checksums finds md5 mismatches, validate
+finds missing/orphan files or mismatches, or the catalog file does not exist), and
+`2` when they refuse or cannot finish (`--prune`/`--prune-projects` refused,
+`integrity --batch` with `qsub` missing or failing). Use this in cron to alert.
+
 ### Backfill of existing data
 
 Same `checksums` command with `--source backfill` (the default). Run it per project
@@ -415,7 +426,7 @@ an existing catalog is unchanged). Because the GUI reads a copy of the DB, confi
 travels with it; generated qsub/rclone scripts bake the values in.
 
 ```bash
-seqledger --db catalog.db init-db --show          # print resolved config
+seqledger --db catalog.db init-db --show          # print resolved config (read-only)
 seqledger --db catalog.db init-db --name "..." --conda-env myenv
 seqledger --db catalog.db init-db --set io_queue=sThM.q   # any key
 ```

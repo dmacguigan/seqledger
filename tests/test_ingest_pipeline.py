@@ -19,6 +19,7 @@ def test_ingest_runs_taxonomy_and_datafiles_not_integrity(tmp_path, capsys):
     mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     taxdir = _write_taxdump(str(tmp_path / "tax"))
     db = str(tmp_path / "cat.db")
+    _cli.main(["--db", db, "init-db"])
 
     cli = _load_cli()
     cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
@@ -50,6 +51,7 @@ def test_ingest_skip_taxonomy(tmp_path):
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
     mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     db = str(tmp_path / "cat.db")
+    _cli.main(["--db", db, "init-db"])
 
     cli = _load_cli()
     cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--skip-taxonomy"])
@@ -72,6 +74,7 @@ def test_ingest_without_seqdata_root_skips_datafiles(tmp_path, capsys):
     mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     taxdir = _write_taxdump(str(tmp_path / "tax"))
     db = str(tmp_path / "cat.db")
+    _cli.main(["--db", db, "init-db"])
 
     cli = _load_cli()
     cli.main(["--db", db, "ingest", mf, "--taxdir", taxdir])
@@ -95,6 +98,7 @@ def test_reingest_unchanged_gates_taxonomy(tmp_path, capsys):
     mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     taxdir = _write_taxdump(str(tmp_path / "tax"))
     db = str(tmp_path / "cat.db")
+    _cli.main(["--db", db, "init-db"])
 
     cli = _load_cli()
     cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
@@ -115,6 +119,7 @@ def test_reingest_changed_taxon_reresolves(tmp_path, capsys):
     os.makedirs(root, exist_ok=True)
     taxdir = _write_taxdump(str(tmp_path / "tax"))
     db = str(tmp_path / "cat.db")
+    _cli.main(["--db", db, "init-db"])
     cli = _load_cli()
 
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv",
@@ -143,6 +148,7 @@ def test_reingest_reports_dropped_sample_as_orphan(tmp_path, capsys):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     db = str(tmp_path / "cat.db")
+    _cli.main(["--db", db, "init-db"])
     cli = _load_cli()
 
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", [
@@ -175,6 +181,7 @@ def test_ingest_prune_refreshes_data_files_report(tmp_path, capsys):
     # them missing).
     root = str(tmp_path / "raw_sequence_data")
     db = str(tmp_path / "cat.db")
+    _cli.main(["--db", db, "init-db"])
     cli = _load_cli()
 
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1"),

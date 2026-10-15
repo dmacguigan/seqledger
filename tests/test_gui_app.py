@@ -272,3 +272,130 @@ def test_catalog_caption_shows_abs_path_and_mtime():
     assert os.path.abspath("cat.db") in cap
     assert "2026-07-23 10:30" in cap
     assert "last updated" in cap
+
+
+# --- AppTest: selection, schema check, taxonomy guards -------------------------
+
+def _make_catalog(tmp_path, samples=True):
+    from seqledger import db as odb
+    path = str(tmp_path / "catalog.db")
+    con = odb.connect(path)
+    odb.init_db(con)
+    con.execute("INSERT INTO projects (project_id, description, metadata_status) "
+                "VALUES ('P1', 'alpha', 'ok'), ('P2', 'beta', 'ok'), "
+                "('P3', 'gamma', 'missing_mapfile')")
+    if samples:
+        rows = [("s1", "Gadus"), ("s2", "Homo"), ("s3", "Mus"), ("s4", "Gadus morhua")]
+        for sid, tx in rows:
+            cur = con.execute("INSERT INTO samples (project_id, sample_id, taxon) "
+                              "VALUES ('P1', ?, ?)", (sid, tx))
+            con.execute("INSERT INTO files (project_id, sample_pk, direction, filename, "
+                        "rel_path) VALUES ('P1', ?, 'R1', ?, ?)",
+                        (cur.lastrowid, f"{sid}_R1.fq.gz", f"P1/{sid}_R1.fq.gz"))
+        con.execute("INSERT INTO taxa (taxon, match_type, worms_match_type) "
+                    "VALUES ('Gadus', 'fuzzy_species', 'review_phonetic')")
+    con.commit()
+    con.close()
+    return path
+
+
+def _apptest(monkeypatch, db_path, view):
+    testing = pytest.importorskip("streamlit.testing.v1")
+    monkeypatch.setenv("SEQLEDGER_DB", db_path)
+    at = testing.AppTest.from_file(_APP_PATH, default_timeout=30)
+    at.run()
+    at.sidebar.radio[0].set_value(view).run()
+    return at
+
+
+def _table_key(at, prefix):
+    return next(k for k in at.session_state.filtered_state if str(k).startswith(prefix))
+
+
+_SEARCH = {"Samples": ("samples_table_", "gadus"),
+           "Projects": ("projects_table_", "alpha"),
+           "Files": ("files_table_", "s1_")}
+
+
+@pytest.mark.parametrize("view", list(_SEARCH))
+def test_stale_selection_after_filter_does_not_crash(tmp_path, monkeypatch, view):
+    prefix, query = _SEARCH[view]
+    at = _apptest(monkeypatch, _make_catalog(tmp_path), view)
+    at.session_state[_table_key(at, prefix)] = {"selection": {"rows": [2], "columns": []}}
+    at.run()
+    assert not at.exception
+    at.sidebar.text_input[0].set_value(query).run()
+    assert not at.exception
+    # Even if a stale out-of-range row reaches the filtered table, it is ignored.
+    at.session_state[_table_key(at, prefix)] = {"selection": {"rows": [2], "columns": []}}
+    at.run()
+    assert not at.exception
+
+
+def test_samples_selection_resets_when_filter_changes(tmp_path, monkeypatch):
+    at = _apptest(monkeypatch, _make_catalog(tmp_path), "Samples")
+    at.session_state[_table_key(at, "samples_table_")] = {
+        "selection": {"rows": [2], "columns": []}}
+    at.run()
+    assert any("s3" in h.value for h in at.subheader)
+    at.sidebar.text_input[0].set_value("gadus").run()
+    assert not at.exception
+    assert not any("Files for sample" in h.value for h in at.subheader)
+
+
+def test_samples_table_shows_match_labels(tmp_path, monkeypatch):
+    at = _apptest(monkeypatch, _make_catalog(tmp_path), "Samples")
+    shown = at.dataframe[0].value
+    assert "fuzzy (species)" in set(shown["tax_match"])
+    assert "review: phonetic (sounds-like)" in set(shown["worms_match"])
+
+
+def test_project_null_metadata_detail_uses_fallback(tmp_path, monkeypatch):
+    at = _apptest(monkeypatch, _make_catalog(tmp_path), "Projects")
+    at.session_state[_table_key(at, "projects_table_")] = {
+        "selection": {"rows": [2], "columns": []}}
+    at.run()
+    text = " ".join(w.value for w in at.warning)
+    assert app._MAPFILE_DETAIL["missing_mapfile"] in text
+    assert "nan" not in text
+
+
+def test_old_catalog_copy_shows_schema_error(tmp_path, monkeypatch):
+    path = _make_catalog(tmp_path)
+    con = sqlite3.connect(path)
+    con.execute("DROP TABLE data_check_issues")
+    con.commit()
+    con.close()
+    assert app._missing_schema(path) == ["data_check_issues"]
+    testing = pytest.importorskip("streamlit.testing.v1")
+    monkeypatch.setenv("SEQLEDGER_DB", path)
+    at = testing.AppTest.from_file(_APP_PATH, default_timeout=30).run()
+    assert not at.exception
+    assert "missing: data_check_issues" in at.error[0].value
+
+
+def test_missing_schema_empty_on_current_catalog(tmp_path):
+    assert app._missing_schema(_make_catalog(tmp_path)) == []
+
+
+def test_taxonomy_without_plotly_shows_error(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "plotly.express", None)
+    at = _apptest(monkeypatch, _make_catalog(tmp_path), "Taxonomy")
+    assert not at.exception
+    assert "needs plotly" in at.error[0].value
+
+
+def test_taxonomy_empty_catalog_message(tmp_path, monkeypatch):
+    pytest.importorskip("plotly")
+    at = _apptest(monkeypatch, _make_catalog(tmp_path, samples=False), "Taxonomy")
+    assert not at.exception
+    assert any("No samples in this catalog yet." in i.value for i in at.info)
+
+
+def test_match_dicts_consistent():
+    for order, labels, colors in [
+            (app.MATCH_ORDER, app.MATCH_LABELS, app.MATCH_COLORS),
+            (app.WORMS_MATCH_ORDER, app.WORMS_MATCH_LABELS, app.WORMS_MATCH_COLORS)]:
+        assert set(order) == set(labels) == set(colors)
+    assert "ambiguous" in app.MATCH_ORDER
+    assert "review_phonetic" in app.WORMS_MATCH_ORDER

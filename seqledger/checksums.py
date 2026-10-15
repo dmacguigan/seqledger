@@ -1,5 +1,6 @@
 """Load and compare md5 checksums from `rclone md5sum` output (both sides)."""
 
+import posixpath
 from datetime import date
 
 
@@ -47,7 +48,8 @@ def parse_md5sum(path):
             # coreutils marks binary mode with a leading '*'
             if relpath.startswith("*"):
                 relpath = relpath[1:]
-            result[relpath] = md5
+            relpath = posixpath.normpath(relpath.replace("\\", "/"))
+            result[relpath] = md5.lower()
     return result
 
 
@@ -56,9 +58,11 @@ def _project_of(relpath):
 
 
 def load_checksums(conn, store_md5_path, pdrive_md5_path, source="backfill",
-                   only_project=None):
+                   only_project=None, full_reset=False, force=False):
     """Load both md5 listings, attach to files, compare, and update backups.
 
+    Only projects that appear in a listing are reset, unless full_reset. Raises
+    ValueError (nothing written) if a listing looks truncated, unless force.
     Returns a summary dict.
     """
     store = parse_md5sum(store_md5_path)
@@ -77,19 +81,35 @@ def load_checksums(conn, store_md5_path, pdrive_md5_path, source="backfill",
     touched_projects = set()
     touched_pks = set()
 
+    listed = {_project_of(rp) for rp in set(store) | set(pdrive)}
+
     def _in_scope(project_id):
         return not only_project or project_id == only_project
 
+    def _reset_scope(project_id):
+        return _in_scope(project_id) and (full_reset or project_id in listed)
+
     # Guard against a truncated/empty md5 file being loaded as if it were complete:
     # far fewer entries in scope than the catalog has cataloged files is a red flag.
-    n_scope_files = sum(1 for r in db_files if _in_scope(r["project_id"]))
+    scope_files = [r for r in db_files if _reset_scope(r["project_id"])]
+    n_scope_files = len(scope_files)
+    truncated = []
     for label, listing in (("Store", store), ("P-drive", pdrive)):
         n_scope_entries = sum(1 for rp in listing if _in_scope(_project_of(rp)))
         if n_scope_files > 0 and (n_scope_entries == 0
                                   or n_scope_entries * 2 < n_scope_files):
-            warnings.append(
+            truncated.append(
                 f"{label} md5 listing is empty or much smaller than the catalog "
                 f"({n_scope_entries} vs {n_scope_files}) -- truncated file?")
+    if truncated and not force:
+        lost = [r for r in scope_files
+                if r["rel_path"] not in store or r["rel_path"] not in pdrive]
+        projects = sorted({r["project_id"] for r in lost})
+        raise ValueError(
+            "; ".join(truncated) + f". Aborted, nothing changed: this would have "
+            f"left {len(lost)} cataloged file(s) unverified in project(s) "
+            f"{', '.join(projects)}. Re-run with --force to load anyway.")
+    warnings.extend(truncated)
 
     # Build a per-key view combining both sides, joined to files by rel_path.
     all_relpaths = set(store) | set(pdrive)
@@ -131,7 +151,7 @@ def load_checksums(conn, store_md5_path, pdrive_md5_path, source="backfill",
     # those files to uncompared (NULL) and flag them, so _update_backup recounts.
     absent = 0
     for r in db_files:
-        if not _in_scope(r["project_id"]) or r["file_pk"] in touched_pks:
+        if not _reset_scope(r["project_id"]) or r["file_pk"] in touched_pks:
             continue
         warnings.append(
             f"cataloged file '{r['rel_path'] or r['filename']}' absent from both "

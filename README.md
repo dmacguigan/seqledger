@@ -246,6 +246,8 @@ rclone md5sum SI-Hydra:/store/nmnh_ocean_dna/public/raw_sequence_data > store.md
 rclone md5sum /Volumes/nmnh-ocean-dna/Hydra_backup/store/raw_sequence_data > pdrive.md5
 seqledger --db oceandna_catalog.db checksums --store store.md5 --pdrive pdrive.md5
 #   add --source ingest for new data, --project X to scope to one project
+#   only projects present in the listings are updated; --full also resets
+#   projects missing from them, --force loads a listing that looks truncated
 
 # 4. re-check the whole catalog: two per-project results
 #    - data-files: reciprocal mapfile <-> disk (missing files + orphans);
@@ -335,6 +337,8 @@ seqledger --db oceandna_catalog.db query taxa      # fuzzy/unresolved taxa
 
 Same `checksums` command with `--source backfill` (the default). Run it per project
 (`--project ...`) in the background so you don't monopolize Store read bandwidth.
+A per-project listing only touches the projects it contains; other projects keep
+their verification unless you pass `--full`.
 
 ### GUI (over SSH tunnel)
 

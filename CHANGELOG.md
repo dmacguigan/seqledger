@@ -43,3 +43,8 @@ by an adversarial review. Highlights (specifics may still shift):
   handling).
 - Taxonomy resolution hardening for edge-case and ambiguous names.
 - CSV-injection sanitization on exported map files and tables.
+- `checksums` no longer resets backup verification for projects absent from the
+  md5 listing (use `--full` for a catalog-wide reset), and aborts without changes
+  on a truncated listing unless `--force`.
+- `checksums` matches uppercase md5 hex (PowerShell `Get-FileHash`) and paths
+  with a leading `./` or backslashes.

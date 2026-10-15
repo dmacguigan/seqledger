@@ -1,5 +1,7 @@
 """rclone copy-job builder for the GUI custom-table export."""
 
+import re
+
 from seqledger import rclone as orclone
 
 
@@ -54,6 +56,25 @@ def test_build_copy_script_has_ltio_directives_and_rclone():
     assert 'if [ -z "$DEST" ]' in script
     assert "no destination set" in script
     assert "not a writable directory" in script
+    assert "--progress" not in script
+
+
+def test_build_copy_script_stamped_log_and_failure_exit():
+    groups, _ = orclone.group_by_root(_rows())
+    script = orclone.build_copy_script(groups, "/pool/dest", stamp="20261015_120000")
+    assert "#$ -o seqledger_rclone_copy_20261015_120000.log" in script
+    assert "rc_fail=0" in script
+    assert script.count("rc_fail=$rc") == 2  # one per rclone copy
+    assert script.rstrip().endswith("exit $rc_fail")
+    # default stamp is YYYYmmdd_HHMMSS
+    assert re.search(r"-o seqledger_rclone_copy_\d{8}_\d{6}\.log",
+                     orclone.build_copy_script(groups, "/pool/dest"))
+
+
+def test_head_groups_caps_total_files():
+    groups = [("/a", ["1", "2", "3"]), ("/b", ["4", "5"]), ("/c", ["6"])]
+    assert orclone.head_groups(groups, 4) == [("/a", ["1", "2", "3"]), ("/b", ["4"])]
+    assert orclone.head_groups(groups, 20) == groups
 
 
 def test_build_copy_script_empty_selection():

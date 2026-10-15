@@ -272,15 +272,17 @@ def load_samples(db_path, mtime):
                     THEN '{NCBI_TAX_URL}' || t.taxid || '/#'
                          || COALESCE(t.sci_name, s.taxon) END AS ncbi_url,
                {worms_sel},
-               (SELECT {_FULL_PATH} FROM files f
+               (SELECT GROUP_CONCAT(fp, '; ') FROM (
+                  SELECT {_FULL_PATH} AS fp FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
-                    AND f.direction = 'R1') AS r1_path,
+                    AND f.direction = 'R1' ORDER BY f.rel_path)) AS r1_path,
                (SELECT f.owner_name FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
                     AND f.direction = 'R1') AS r1_owner,
-               (SELECT {_FULL_PATH} FROM files f
+               (SELECT GROUP_CONCAT(fp, '; ') FROM (
+                  SELECT {_FULL_PATH} AS fp FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
-                    AND f.direction = 'R2') AS r2_path,
+                    AND f.direction = 'R2' ORDER BY f.rel_path)) AS r2_path,
                (SELECT f.owner_name FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
                     AND f.direction = 'R2') AS r2_owner
@@ -477,7 +479,11 @@ def load_file_paths(db_path, mtime):
     return _sql(db_path, f"""
         SELECT f.project_id, s.sample_id, f.direction, f.filename,
                p.seqdata_root, f.rel_path, {_FULL_PATH} AS full_path,
-               f.size_bytes, f.n_reads
+               f.size_bytes, f.n_reads,
+               COALESCE(f.integrity_status, 'unchecked') AS integrity_status,
+               EXISTS (SELECT 1 FROM data_check_issues i
+                       WHERE i.project_id = f.project_id AND i.filename = f.rel_path
+                         AND i.kind IN ('missing from disk', 'missing')) AS missing_on_disk
         FROM files f
         JOIN projects p ON p.project_id = f.project_id
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
@@ -1074,6 +1080,34 @@ def _cart_key(project_id, sample_id):
     return f"{project_id}\t{sample_id}"
 
 
+_PROBLEM_KINDS = ("corrupt", "empty", "missing")
+_SCRIPT_PREVIEW_FILES = 20
+
+
+def _file_problem(r):
+    """One file's state for the cart: missing | corrupt | empty | ok | unchecked."""
+    if r.get("missing_on_disk"):
+        return "missing"
+    status = r.get("integrity_status")
+    if status in ("gzip_error", "format_error"):
+        return "corrupt"
+    if status == "ok":
+        n = r.get("n_reads")
+        return "empty" if n is not None and not pd.isna(n) and n == 0 else "ok"
+    return "unchecked"
+
+
+def _files_ok(problems):
+    """Per-sample summary of its files' _file_problem values."""
+    problems = list(problems)
+    if not problems:
+        return "no files"
+    parts = [f"{problems.count(k)} {k}" for k in _PROBLEM_KINDS if k in problems]
+    if "unchecked" in problems:
+        parts.append("unchecked")
+    return ", ".join(parts) or "ok"
+
+
 def custom_table_view(samples_df, paths_df):
     """Build a custom sample table by searching + selecting, then export / copy.
 
@@ -1182,10 +1216,17 @@ def custom_table_view(samples_df, paths_df):
         table = table.merge(counts, on=["project_id", "sample_id"], how="left")
         table[_col] = table[_col].astype("Int64")
 
+    # Files backing the cart samples, each tagged corrupt/empty/missing/ok/unchecked.
+    fpaths = paths_df[paths_df.set_index(["project_id", "sample_id"]).index.isin(keyset)].copy()
+    fpaths["problem"] = [_file_problem(r) for r in fpaths.to_dict("records")]
+    ok_by = {k: _files_ok(g) for k, g in fpaths.groupby(["project_id", "sample_id"])["problem"]}
+    table["files_ok"] = [ok_by.get(k, "no files")
+                         for k in zip(table["project_id"], table["sample_id"])]
+
     tcols = ["project_id", "sample_id", "taxon",
              "ncbi_url", "taxid", "tax_match",
              "worms_url", "worms_match", "worms_status",
-             "total_size", "r1_reads", "r2_reads",
+             "total_size", "r1_reads", "r2_reads", "files_ok",
              "uniq_id", "uniq_id_url", "r1_path", "r2_path"]
     tcols = [c for c in tcols if c in table.columns]
     tevent = st.dataframe(
@@ -1206,9 +1247,12 @@ def custom_table_view(samples_df, paths_df):
             r = table.iloc[i]
             cart.pop(_cart_key(r["project_id"], r["sample_id"]), None)
         st.rerun()
-    # Files backing the selected samples: paths + sizes for rclone, R1/R2
-    # basenames for the MitoPilot map file.
-    fpaths = paths_df[paths_df.set_index(["project_id", "sample_id"]).index.isin(keyset)]
+    bad = fpaths["problem"].isin(_PROBLEM_KINDS)
+    if bad.any():
+        st.warning(f"{int(bad.sum())} of {len(fpaths)} files in the cart are corrupt, empty, "
+                   "or missing on disk; they will fail to copy or copy bad data.")
+        if st.checkbox("Exclude problem files from the copy job and map", value=True):
+            fpaths = fpaths[~bad]
     rows = fpaths.to_dict("records")
 
     id_choices = {"Sample ID": "sample_id", "UniqID": "uniq_id"}
@@ -1223,7 +1267,7 @@ def custom_table_view(samples_df, paths_df):
         "worms_match": "WoRMS_match", "worms_status": "WoRMS_status",
         "worms_lineage": "WoRMS_lineage",
         "uniq_id": "uniq_id",
-        "r1_reads": "r1_reads", "r2_reads": "r2_reads",
+        "r1_reads": "r1_reads", "r2_reads": "r2_reads", "files_ok": "files_ok",
         "total_size": "seq_data_size_gb",
         "r1_path": "r1_path", "r2_path": "r2_path"}
     export_cols = [c for c in export_map if c in table.columns]
@@ -1243,8 +1287,9 @@ def custom_table_view(samples_df, paths_df):
     c2.download_button("Download MitoPilot map file",
                        mp_df.to_csv(index=False).encode(),
                        "mitopilot_mapfile.csv", "text/csv",
-                       help="CSV with ID, R1, R2, Taxon (R1/R2 are filenames; give "
-                            "MitoPilot the copied data dir as its data_path).")
+                       help="CSV with ID, R1, R2, Taxon. R1/R2 are paths relative to "
+                            "the copy destination (or to the Store seqdata root); give "
+                            "MitoPilot DEST as data_path.")
     mp_issues = omito.issues(mp_rows)
     if mp_issues["n_empty_id"] or mp_issues["duplicate_ids"] or mp_issues["n_missing_reads"]:
         msgs = []
@@ -1258,6 +1303,13 @@ def custom_table_view(samples_df, paths_df):
             msgs.append(f"{mp_issues['n_missing_reads']} sample(s) missing an R1/R2 filename")
         st.warning("MitoPilot needs a unique ID and both reads per sample — "
                    + "; ".join(msgs) + ". Try a different ID column, or fix the catalog.")
+    if mp_issues["n_lane_split"]:
+        ids = mp_issues["lane_split_ids"]
+        shown = ", ".join(ids[:20]) + (", ..." if len(ids) > 20 else "")
+        st.warning(f"MitoPilot takes one file per read direction. {len(ids)} samples in "
+                   "the cart are lane-split (several R1 or R2 files); only the first file "
+                   "of each is in the map. Merge lanes first or run them separately. "
+                   f"({shown})")
 
     total, n_files, n_unknown = orclone.estimate_size(rows)
 
@@ -1268,8 +1320,11 @@ def custom_table_view(samples_df, paths_df):
     m2.metric("Estimated size", orclone.human_size(total))
     m3.metric("Unknown-size files", n_unknown)
     if n_unknown:
-        st.caption(f"{n_unknown} file(s) have no recorded size (never stat'd on disk); "
-                   "the estimate excludes them, so the real total is larger.")
+        n_gone = sum(1 for r in rows if pd.isna(r.get("size_bytes")) and r.get("missing_on_disk"))
+        why = [f"{n} {label}" for n, label in ((n_unknown - n_gone, "never stat'd"),
+                                               (n_gone, "missing on disk")) if n]
+        st.caption(f"{n_unknown} file(s) have no recorded size ({', '.join(why)}); "
+                   "the estimate excludes them.")
 
     dest = st.text_input("Destination (directory or rclone remote:path)",
                          placeholder="/pool/public/genomics/<user>/selected_data")
@@ -1289,16 +1344,22 @@ def custom_table_view(samples_df, paths_df):
         st.info("Enter a destination above to generate the copy script.")
         return
 
-    script = orclone.build_copy_script(
-        groups, dest.strip(), transfers=transfers, slots=transfers, mem=mem,
-        est_bytes=total, n_files=n_files,
-        rclone_module=_config(DB_PATH, "rclone_module"),
-        io_queue=_config(DB_PATH, "io_queue"))
-    st.caption("Copy this into a `.job` file on Hydra and submit with "
+    stamp = orclone.timestamp()
+    kw = dict(dest=dest.strip(), transfers=transfers, slots=transfers, mem=mem,
+              est_bytes=total, n_files=n_files,
+              rclone_module=_config(DB_PATH, "rclone_module"),
+              io_queue=_config(DB_PATH, "io_queue"), stamp=stamp)
+    script = orclone.build_copy_script(groups, **kw)
+    n_copy = sum(len(rels) for _, rels in groups)
+    st.caption("Download the script to a `.job` file on Hydra and submit with "
                "`qsub <file>.job` from the login node (lTIO: 6 slots/user, 2 concurrent).")
-    st.code(script, language="bash")
+    with st.expander(f"Script preview ({n_copy} files total; full list in the download)"):
+        if n_copy > _SCRIPT_PREVIEW_FILES:
+            st.caption(f"Showing the first {_SCRIPT_PREVIEW_FILES} of {n_copy} files.")
+        st.code(orclone.build_copy_script(
+            orclone.head_groups(groups, _SCRIPT_PREVIEW_FILES), **kw), language="bash")
     st.download_button("Download submission script", script.encode(),
-                       "seqledger_rclone_copy.job", "text/x-shellscript")
+                       f"seqledger_rclone_copy_{stamp}.job", "text/x-shellscript")
 
 
 def _catalog_caption(db_path, mtime):

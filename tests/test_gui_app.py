@@ -272,3 +272,77 @@ def test_catalog_caption_shows_abs_path_and_mtime():
     assert os.path.abspath("cat.db") in cap
     assert "2026-07-23 10:30" in cap
     assert "last updated" in cap
+
+
+# --- Grab & Go: problem files, lane splits, map paths ------------------------
+
+def test_file_problem_and_files_ok():
+    fp = app._file_problem
+    assert fp({"integrity_status": "ok", "n_reads": 10, "missing_on_disk": 0}) == "ok"
+    assert fp({"integrity_status": "ok", "n_reads": 0, "missing_on_disk": 0}) == "empty"
+    assert fp({"integrity_status": "gzip_error", "n_reads": None}) == "corrupt"
+    assert fp({"integrity_status": "unchecked", "n_reads": float("nan")}) == "unchecked"
+    assert fp({"integrity_status": "ok", "n_reads": 5, "missing_on_disk": 1}) == "missing"
+    assert app._files_ok(["ok", "ok"]) == "ok"
+    assert app._files_ok(["corrupt", "missing", "corrupt", "unchecked"]) == \
+        "2 corrupt, 1 missing, unchecked"
+    assert app._files_ok([]) == "no files"
+
+
+def _grab_catalog(tmp_path):
+    from seqledger import db as odb
+    p = str(tmp_path / "cat.db")
+    con = odb.connect(p)
+    odb.init_db(con)
+    con.execute("INSERT INTO projects(project_id, seqdata_root) VALUES ('P1', '/store/root')")
+    for pk, sid in ((1, "s1"), (2, "s2")):
+        con.execute("INSERT INTO samples(sample_pk, project_id, sample_id, taxon) "
+                    "VALUES (?, 'P1', ?, 'Gadus morhua')", (pk, sid))
+    files = [  # (sample_pk, direction, rel_path, integrity_status, n_reads)
+        (1, "R1", "P1/L2/s1_R1.fastq.gz", "ok", 5),
+        (1, "R1", "P1/L1/s1_R1.fastq.gz", "ok", 5),
+        (1, "R2", "P1/L2/s1_R2.fastq.gz", "ok", 5),
+        (1, "R2", "P1/L1/s1_R2.fastq.gz", "ok", 5),
+        (2, "R1", "P1/s2_R1.fastq.gz", "gzip_error", None),
+        (2, "R2", "P1/s2_R2.fastq.gz", "ok", 5),
+    ]
+    for pk, d, rel, st_, n in files:
+        con.execute("INSERT INTO files(project_id, sample_pk, direction, filename, rel_path, "
+                    "size_bytes, integrity_status, n_reads) VALUES ('P1',?,?,?,?,100,?,?)",
+                    (pk, d, os.path.basename(rel), rel, st_, n))
+    con.execute("INSERT INTO data_check_issues(project_id, kind, filename) "
+                "VALUES ('P1', 'missing from disk', 'P1/s2_R2.fastq.gz')")
+    con.commit()
+    con.close()
+    return p
+
+
+def test_load_samples_lists_every_lane_file(tmp_path):
+    p = _grab_catalog(tmp_path)
+    df = app.load_samples(p, os.path.getmtime(p))
+    s1 = df[df["sample_id"] == "s1"].iloc[0]
+    assert s1["r1_path"] == ("/store/root/P1/L1/s1_R1.fastq.gz; "
+                             "/store/root/P1/L2/s1_R1.fastq.gz")
+
+
+def test_grab_and_go_flags_problem_files_and_lane_splits(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    p = _grab_catalog(tmp_path)
+    monkeypatch.setenv("SEQLEDGER_DB", p)
+    at = AppTest.from_file(_APP_PATH, default_timeout=30)
+    at.session_state["cart"] = {
+        f"P1\t{s}": {"project_id": "P1", "sample_id": s} for s in ("s1", "s2")}
+    at.run()
+    at.sidebar.radio[0].set_value("Grab & Go").run()
+    warnings = " ".join(w.value for w in at.warning)
+    assert "2 of 6 files in the cart are corrupt, empty, or missing on disk" in warnings
+    assert "1 samples in the cart are lane-split" in warnings and "(s1)" in warnings
+    assert at.checkbox[0].value is True
+    dest = next(t for t in at.text_input if t.label.startswith("Destination"))
+    dest.set_value("/pool/dest").run()
+    assert any("Script preview (4 files total" in e.label for e in at.expander)
+    script = at.code[0].value
+    assert "s2_R1.fastq.gz" not in script and "s2_R2.fastq.gz" not in script
+    # unticking the exclude box puts the problem files back in the job
+    at.checkbox[0].uncheck().run()
+    assert any("Script preview (6 files total" in e.label for e in at.expander)

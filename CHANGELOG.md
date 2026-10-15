@@ -36,6 +36,12 @@ by an adversarial review. Highlights (specifics may still shift):
   cluster users can no longer reach it over the network. The printed tunnel is
   now `ssh -N -L <port>:127.0.0.1:<port> -J <you>@<login_host> <you>@<node>`,
   and off the cluster only the `http://localhost:<port>` link is printed.
+- CLI commands now exit non-zero on failures and refusals (ingest FAIL, integrity
+  gzip/format errors, checksums mismatches, validate issues: 1; refused prune or
+  failed `integrity --batch` submission: 2), so cron jobs can detect problems.
+- `--db` is accepted after the subcommand too (e.g. `seqledger query summary --db x.db`).
+- `init-db --show` is read-only: it prints the config without creating, migrating,
+  or changing the catalog.
 
 ### Fixed
 
@@ -72,3 +78,9 @@ by an adversarial review. Highlights (specifics may still shift):
   only writes to the result file's own project and never overwrites a newer result.
 - Files that cannot be read (permissions, I/O errors) are reported `unchecked`
   instead of corrupt.
+- Commands other than `init-db` no longer create an empty catalog at a mistyped
+  `--db` path; they stop with a message pointing at `--db` / `SEQLEDGER_DB`.
+- `ingest --prune-projects` prints the real reason it refused to prune.
+- `integrity --batch` reports the configured I/O queue, not a hardcoded `lTIO.sq`.
+- An offline first `ingest` no longer prints a traceback when the NCBI taxdump
+  download fails; the taxonomy step is skipped with a message.

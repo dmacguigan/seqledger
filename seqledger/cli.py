@@ -38,11 +38,16 @@ def _print_rows(rows, cols):
         print("\t".join("" if r[c] is None else str(r[c]) for c in cols))
 
 
-def _require_db(db_path):
+def _require_db(db_path, db_given=True):
     """Exit with a plain message (not a traceback) if the catalog doesn't exist."""
     if not os.path.exists(db_path):
-        sys.exit(f"no catalog at '{db_path}'. Create one with:\n"
-                 f"  seqledger --db {db_path} init-db\nthen ingest your data.")
+        how = ""
+        if not db_given:
+            how = (" (no --db given; using $SEQLEDGER_DB)" if os.environ.get("SEQLEDGER_DB")
+                   else " (no --db given and $SEQLEDGER_DB is not set)")
+        sys.exit(f"no catalog at '{db_path}'{how}. Check the path, pass --db, or set "
+                 "SEQLEDGER_DB (ask your data manager for the catalog path).\n"
+                 "Data managers: create one with: seqledger --db PATH init-db")
 
 
 def _resolve_root(conn, value, key, label):
@@ -73,6 +78,13 @@ _INIT_CONFIG_FLAGS = {
 
 
 def cmd_init_db(args):
+    if args.show:
+        conn = odb.connect_ro(args.db)
+        print("config (defaults + stored):")
+        for k, v in sorted(odb.resolve_config(conn).items()):
+            print(f"  {k} = {v}")
+        conn.close()
+        return 0
     conn = odb.connect(args.db)
     odb.init_db(conn)
 
@@ -96,11 +108,6 @@ def cmd_init_db(args):
         sys.exit(str(e))
     conn.commit()
 
-    if args.show:
-        cfg = odb.resolve_config(conn)
-        print("config (defaults + stored):")
-        for k in sorted(cfg):
-            print(f"  {k} = {cfg[k]}")
     conn.close()
     msg = f"initialized schema in {args.db}"
     if updates:
@@ -184,7 +191,8 @@ def cmd_ingest(args):
     guard = _prune_guard(args.prune, args.prune_projects, args.yes, sys.stdin.isatty())
     if guard:
         conn.close()
-        sys.exit(guard)
+        print(guard, file=sys.stderr)
+        return 2
 
     # Fail loudly (not silently-empty) when a root is missing/unmounted/mistyped --
     # the most likely first-run mistake, which otherwise reports "ingest complete"
@@ -216,6 +224,7 @@ def cmd_ingest(args):
               "--seqdata-root has project folders and --metadata-root has "
               "'<project>_mapfile.csv' files (and that the mount is present).")
     n_fail = 0
+    refused = False
     ingested = []  # project_ids that did not FAIL
     tot_new = tot_changed = tot_files = 0
     tot_pruned_s = tot_pruned_f = 0
@@ -255,8 +264,8 @@ def cmd_ingest(args):
         else:
             pr = oingest.prune_missing_projects(conn, args.seqdata_root, args.metadata_root)
             if pr["skipped"]:
-                print("refusing to prune: no projects discovered under the roots "
-                      "(empty / unmounted / wrong path?)")
+                refused = True
+                print(f"refusing to prune: {pr['reason']}")
             elif pr["pruned"]:
                 print(f"deleted {len(pr['pruned'])} vanished project(s) "
                       f"(gone from disk + metadata): {', '.join(pr['pruned'])}")
@@ -274,7 +283,7 @@ def cmd_ingest(args):
             # failure surface as a traceback that makes the user think ingest failed.
             try:
                 tax_results = otax.resolve_catalog(conn, taxdir, scope="new")
-            except (OSError, URLError, tarfile.TarError) as e:
+            except (OSError, URLError, tarfile.TarError, RuntimeError) as e:
                 tax_results = None
                 print(f"(taxonomy skipped: {e}) -- ingest succeeded; run "
                       f"`seqledger --db {args.db} taxonomy resolve` when ready.")
@@ -320,12 +329,15 @@ def cmd_ingest(args):
         else:
             print("(skipped: pass --seqdata-root to check files on disk)")
 
+    root_flag = ("" if odb.get_config(conn, "seqdata_root")
+                 else " --seqdata-root <raw_sequence_data>")
     conn.close()
-    print("\ningest complete.")
-    print(f"next: run the integrity check when ready (slow; reads every byte) --\n"
-          f"  seqledger --db {args.db} integrity --seqdata-root <raw_sequence_data>\n"
-          f"  or on Hydra: seqledger --db {args.db} integrity --batch "
-          f"--seqdata-root <raw_sequence_data>")
+    if results:
+        print("\ningest complete.")
+        print(f"next: run the integrity check when ready (slow; reads every byte) --\n"
+              f"  seqledger --db {args.db} integrity{root_flag}\n"
+              f"  or on Hydra: seqledger --db {args.db} integrity --batch{root_flag}")
+    return 2 if refused else 1 if n_fail else 0
 
 
 def cmd_checksums(args):
@@ -334,11 +346,16 @@ def cmd_checksums(args):
     summary = ochecksums.load_checksums(
         conn, args.store, args.pdrive, source=args.source, only_project=args.project,
         full_reset=args.full, force=args.force)
+    ps = summary["projects"]
+    n_mismatch = conn.execute(
+        f"SELECT COUNT(*) FROM files WHERE md5_match=0 AND project_id IN "
+        f"({','.join('?' * len(ps))})", ps).fetchone()[0]
     conn.close()
     print(f"updated md5 for {summary['matched']} file(s) "
           f"across {len(summary['projects'])} project(s)")
     for w in summary["warnings"]:
         print(f"    WARN: {w}")
+    return 1 if n_mismatch else 0
 
 
 def _data_label(data):
@@ -365,16 +382,19 @@ def _checksum_label(cs):
 
 
 def cmd_validate(args):
-    _require_db(args.db)
     conn = odb.connect(args.db)
     args.seqdata_root = _resolve_root(conn, args.seqdata_root, "seqdata_root", "seqdata-root")
     results = ovalidate.validate_catalog(conn, seqdata_root=args.seqdata_root)
+    n_unscanned = 0 if args.seqdata_root else conn.execute(
+        "SELECT COUNT(*) FROM projects WHERE seqdata_root IS NULL OR seqdata_root=''"
+    ).fetchone()[0]
     conn.close()
     if not results:
         print("catalog is empty")
-        return
-    if not args.seqdata_root:
-        print("(data-files check skipped: pass --seqdata-root to scan disk)\n")
+        return 0
+    if n_unscanned:
+        print(f"(data-files check skipped for {n_unscanned} project(s) with no stored "
+              "seqdata root: pass --seqdata-root to scan disk)\n")
     for project_id in sorted(results):
         r = results[project_id]
         print(f"{project_id}"
@@ -382,12 +402,14 @@ def cmd_validate(args):
               f"\n    checksum:   {_checksum_label(r['checksum'])}")
         for f in r["notes"]:
             print(f"    {f.level}: {f.message}")
+    return int(any(r["data"]["status"] == "issues" or r["checksum"]["status"] == "mismatch"
+                   for r in results.values()))
 
 
 def _print_integrity(results):
     if not results:
         print("no cataloged files to check")
-        return
+        return 0
     icons = {"pass": "OK", "warn": "WARN", "fail": "FAIL"}
     for project_id in sorted(results):
         s = results[project_id]
@@ -396,6 +418,7 @@ def _print_integrity(results):
               f"{s['n_format_error']} format-error, {s['n_unchecked']} unchecked")
         for w in s["parity_warnings"]:
             print(f"    WARN: read-count parity: {w}")
+    return int(any(s["n_gzip_error"] or s["n_format_error"] for s in results.values()))
 
 
 def _safe_name(s):
@@ -449,7 +472,7 @@ def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
     """
     if not projects:
         print("no projects with cataloged files to submit")
-        return
+        return 0
 
     batch_dir = os.path.abspath(args.batch_dir)
     scripts_dir = os.path.join(batch_dir, "scripts")
@@ -466,6 +489,7 @@ def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
     mres = slots * mem
 
     job_ids = []
+    rc = 0
     for pid in projects:
         safe = _safe_name(pid)
         script_path = os.path.join(scripts_dir, f"integrity_{safe}.job")
@@ -492,9 +516,11 @@ def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
             print("qsub not found on PATH -- scripts written but not submitted.")
             print(f"submit them on the Hydra head node, e.g.: qsub {script_path}")
             args.no_submit = True
+            rc = 2
             break
         if out.returncode != 0:
             print(f"qsub failed for {pid}: {out.stderr.strip()}")
+            rc = 2
             continue
         jid = out.stdout.strip()
         job_ids.append(jid)
@@ -504,9 +530,10 @@ def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
     if args.no_submit:
         print(f"generated {len(projects)} script(s) in {scripts_dir}")
     else:
-        print(f"submitted {len(job_ids)} job(s) to lTIO.sq")
+        print(f"submitted {len(job_ids)} job(s) to {io_queue}")
     print("when the jobs finish, merge their results into the catalog:")
     print(f"  seqledger --db {db_path} integrity --collect {results_dir}")
+    return rc
 
 
 def cmd_integrity(args):
@@ -537,8 +564,7 @@ def cmd_integrity(args):
     if args.collect:
         summaries = ointegrity.collect_json(conn, args.collect)
         conn.close()
-        _print_integrity(summaries)
-        return
+        return _print_integrity(summaries)
 
     if args.batch:
         projects = ointegrity.list_projects(conn, args.project)
@@ -552,18 +578,16 @@ def cmd_integrity(args):
         conda_env = odb.get_config(conn, "conda_env")
         io_queue = odb.get_config(conn, "io_queue")
         conn.close()
-        _submit_batch(args, projects, conda_env=conda_env, io_queue=io_queue)
-        return
+        return _submit_batch(args, projects, conda_env=conda_env, io_queue=io_queue)
 
     results = ointegrity.check_catalog_integrity(
         conn, seqdata_root=args.seqdata_root, only_project=args.project, jobs=args.jobs,
         recheck=args.force)
     conn.close()
-    _print_integrity(results)
+    return _print_integrity(results)
 
 
 def cmd_query(args):
-    _require_db(args.db)
     conn = odb.connect_ro(args.db)  # read-only: a typo can't create a stray empty DB
     if args.what == "uniq-id":
         _print_rows(oquery.find_by_uniq_id(conn, args.term),
@@ -679,11 +703,16 @@ def build_parser():
                    help="path to catalog SQLite DB (default: $SEQLEDGER_DB, else catalog.db)")
     p.add_argument("--debug", action="store_true",
                    help="show the full traceback on error instead of a one-line message")
+    # Also accept --db after the subcommand; SUPPRESS keeps the top-level value when absent.
+    dbp = argparse.ArgumentParser(add_help=False)
+    dbp.add_argument("--db", default=argparse.SUPPRESS, help="path to catalog SQLite DB")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pdb = sub.add_parser(
-        "init-db",
-        help="create/upgrade the catalog schema; optionally set per-catalog config")
+        "init-db", parents=[dbp],
+        help="create/upgrade the catalog schema; optionally set per-catalog config",
+        description="Create/upgrade the catalog schema and set config. "
+                    "--show only prints the config (read-only).")
     pdb.add_argument("--name", help="catalog display name (GUI title / CLI banner)")
     pdb.add_argument("--slug", help="export-filename prefix (e.g. 'oceandna')")
     pdb.add_argument("--seqdata-root", dest="seqdata_root",
@@ -702,13 +731,16 @@ def build_parser():
                      help="comma-separated FASTQ suffixes to discover (e.g. 'fastq.gz,fq.gz')")
     pdb.add_argument("--set", action="append", metavar="KEY=VALUE",
                      help="set any config key directly (repeatable)")
-    pdb.add_argument("--show", action="store_true", help="print the resolved config and exit")
+    pdb.add_argument("--show", action="store_true",
+                     help="print the resolved config and exit (read-only; ignores other flags)")
     pdb.set_defaults(func=cmd_init_db)
 
     pi = sub.add_parser(
-        "ingest",
+        "ingest", parents=[dbp],
         help="auto-discover projects from a seqdata + metadata dir (or a map file); "
-             "auto-run taxonomy, refresh data-files check (integrity is a separate step)")
+             "auto-run taxonomy, refresh data-files check (integrity is a separate step)",
+        description="Ingest metadata, resolve new taxa, refresh the data-files check. "
+                    "Exits 1 if any project FAILs, 2 if a prune is refused.")
     pi.add_argument("map_file", nargs="?",
                     help="optional two-column map file (metadata csv, data dir) for "
                          "manual/odd layouts; omit to auto-discover from the roots")
@@ -732,7 +764,9 @@ def build_parser():
                     help="skip the confirmation prompt for --prune / --prune-projects")
     pi.set_defaults(func=cmd_ingest)
 
-    pc = sub.add_parser("checksums", help="load + compare rclone md5sum output")
+    pc = sub.add_parser("checksums", parents=[dbp], help="load + compare rclone md5sum output",
+                        description="Load + compare rclone md5sum output from Store and "
+                                    "P-drive. Exits 1 on any md5 mismatch.")
     pc.add_argument("--store", required=True, help="rclone md5sum output for Store")
     pc.add_argument("--pdrive", required=True, help="rclone md5sum output for P-drive")
     pc.add_argument("--project", help="limit to one project_id")
@@ -743,12 +777,19 @@ def build_parser():
                     help="load even if a listing looks truncated")
     pc.set_defaults(func=cmd_checksums)
 
-    pv = sub.add_parser("validate", help="re-check the catalog (data-files + checksum)")
+    pv = sub.add_parser("validate", parents=[dbp],
+                        help="re-check the catalog (data-files + checksum)",
+                        description="Re-check the catalog (data-files + checksum). Exits 1 "
+                                    "on missing/orphan files or md5 mismatches.")
     pv.add_argument("--seqdata-root",
                     help="root of raw_sequence_data; enables the on-disk data-files check")
     pv.set_defaults(func=cmd_validate)
 
-    pin = sub.add_parser("integrity", help="gzip + FASTQ integrity check of cataloged files")
+    pin = sub.add_parser("integrity", parents=[dbp],
+                         help="gzip + FASTQ integrity check of cataloged files",
+                         description="gzip + FASTQ integrity check of cataloged files. Exits "
+                                     "1 on any gzip/format error, 2 if --batch qsub is "
+                                     "missing or fails.")
     pin.add_argument("--seqdata-root",
                      help="root of raw_sequence_data (default: each project's stored root)")
     pin.add_argument("--project", help="limit to one project_id")
@@ -787,15 +828,26 @@ def build_parser():
                           "print the per-project summary")
     pin.set_defaults(func=cmd_integrity)
 
-    pq = sub.add_parser("query", help="lookups")
+    pq = sub.add_parser(
+        "query", parents=[dbp], help="read-only lookups (see seqledger query -h)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Read-only lookups; never changes the catalog.",
+        epilog="lookups:\n"
+               "  uniq-id TERM  samples with exactly this UniqID\n"
+               "  search TERM   samples whose ID, taxon, or UniqID contains TERM\n"
+               "  unbacked      projects with no verified P-drive backup\n"
+               "  mismatches    files whose Store and P-drive md5 differ\n"
+               "  summary       one row per project (samples, files, checks, owner)\n"
+               "  taxa          taxa without an exact/confirmed NCBI match")
     pq.add_argument("what", choices=["uniq-id", "search", "unbacked", "mismatches",
-                                     "summary", "taxa"])
-    pq.add_argument("term", nargs="?", default="")
+                                     "summary", "taxa"], help="lookup to run (listed below)")
+    pq.add_argument("term", nargs="?", default="", help="search term for uniq-id / search")
     pq.set_defaults(func=cmd_query)
 
-    pt = sub.add_parser("taxonomy", help="resolve sample taxa to NCBI TaxIDs + WoRMS AphiaIDs")
+    pt = sub.add_parser("taxonomy", parents=[dbp],
+                        help="resolve sample taxa to NCBI TaxIDs + WoRMS AphiaIDs")
     tsub = pt.add_subparsers(dest="action", required=True)
-    tr = tsub.add_parser("resolve",
+    tr = tsub.add_parser("resolve", parents=[dbp],
                          help="resolve taxa (NCBI taxdump and/or WoRMS), write review CSV")
     tr.add_argument("--source", choices=("ncbi", "worms", "both"), default="ncbi",
                     help="taxonomy source: ncbi (default, local taxdump), worms "
@@ -808,7 +860,7 @@ def build_parser():
                          "(default: only taxa never checked against the source)")
     tr.add_argument("--redo", action="store_true",
                     help="re-resolve every taxon, including confirmed ones")
-    ta = tsub.add_parser("apply", help="apply confirmed overrides from a review CSV")
+    ta = tsub.add_parser("apply", parents=[dbp], help="apply confirmed overrides from a review CSV")
     ta.add_argument("--review", required=True, help="edited review CSV")
     ta.add_argument("--source", choices=("ncbi", "worms"), default="ncbi",
                     help="which review CSV this is: ncbi (confirmed_taxid, default) "
@@ -816,7 +868,7 @@ def build_parser():
     ta.add_argument("--taxdir", help="taxdump/cache dir (default: <db dir>/.taxonomy)")
     pt.set_defaults(func=cmd_taxonomy)
 
-    pg = sub.add_parser("gui", help="launch Streamlit browse GUI (locally, or on lTIO via --qsub)")
+    pg = sub.add_parser("gui", parents=[dbp], help="launch Streamlit browse GUI (locally, or on lTIO via --qsub)")
     pg.add_argument("--port", type=int, default=8501,
                     help="server port (a free port is chosen automatically under --qsub)")
     pg.add_argument("--login-host", default=None,
@@ -838,10 +890,13 @@ def build_parser():
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
     args = build_parser().parse_args(argv)
+    if args.cmd != "init-db" or args.show:
+        _require_db(args.db, any(a == "--db" or a.startswith("--db=") for a in argv))
     try:
-        args.func(args)
-    except (OSError, sqlite3.Error, ValueError) as e:
+        return args.func(args) or 0
+    except (OSError, sqlite3.Error, ValueError, RuntimeError) as e:
         if getattr(args, "debug", False):
             raise
         # A plain one-line message instead of a raw traceback for the common

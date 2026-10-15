@@ -53,6 +53,13 @@ by an adversarial review. Highlights (specifics may still shift):
   exceeds). Raise `--mem` if the job dies at once.
 - `gui --qsub` deletes its own job, log, and ready files in `~/.seqledger_gui/`
   that are older than 7 days.
+- Taxonomy review CSVs pre-fill `confirmed_taxid` / `confirmed_aphia_id` only for
+  exact matches, so applying an untouched CSV no longer confirms fuzzy guesses.
+- `taxonomy resolve` no longer overwrites an existing review CSV: it writes
+  `<name>_YYYY-MM-DD.csv` (then `_2`, `_3`) and prints the path. No review CSV is
+  written when nothing was resolved.
+- `--redo` help and docs now say confirmed taxa are kept (re-resolved for the
+  review CSV only, not overwritten).
 
 ### Fixed
 
@@ -134,3 +141,9 @@ by an adversarial review. Highlights (specifics may still shift):
   have their files found.
 - A mapfile row with more cells than the header (often an unquoted comma) is
   flagged with a warning instead of silently shifting columns.
+- `taxonomy apply` reads review CSVs saved by Excel (UTF-8 with BOM, or cp1252),
+  and stops with a clear error when given the other source's review CSV.
+- A taxon first resolved by WoRMS is now still resolved against NCBI and listed
+  by `query taxa` until it is.
+- A genus name shared by two kingdoms is flagged `ambiguous` on the fuzzy species
+  path too, instead of silently picking one.

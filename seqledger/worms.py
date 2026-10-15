@@ -14,6 +14,7 @@ followed to its accepted record so the stored lineage/name is the accepted one.
 """
 
 import csv
+import io
 import json
 import os
 import sqlite3
@@ -23,6 +24,7 @@ import urllib.parse
 import urllib.request
 from datetime import date
 
+from seqledger.ingest import _read_text
 from seqledger.taxonomy import clean_taxon
 
 WORMS_REST = "https://www.marinespecies.org/rest"
@@ -310,7 +312,8 @@ def resolve_catalog_worms(conn, taxdir, scope="new", marine_only=False):
     scope mirrors the NCBI resolver but on WoRMS state:
       "new"          taxa with no WoRMS resolution yet (worms_date_resolved IS NULL).
       "unconfirmed"  also re-resolve WoRMS rows resolved before but not confirmed.
-      "all"          re-resolve every distinct taxon, including confirmed ones.
+      "all"          re-resolve every distinct taxon. Confirmed rows are kept:
+                     their machine result is returned but not written.
     """
     if scope == "all":
         rows = conn.execute(
@@ -339,7 +342,10 @@ def resolve_catalog_worms(conn, taxdir, scope="new", marine_only=False):
 # ---- review CSV + apply -----------------------------------------------------
 
 def write_review_csv_worms(results, path):
-    """Write a WoRMS review CSV; user edits confirmed_aphia_id then runs apply."""
+    """Write a WoRMS review CSV; user edits confirmed_aphia_id then runs apply.
+
+    confirmed_aphia_id is pre-filled only for exact matches.
+    """
     fields = ["taxon", "clean", "worms_match_type", "aphia_id", "worms_sci_name",
               "worms_status", "worms_rank", "worms_lineage", "worms_alternatives",
               "confirmed_aphia_id"]
@@ -356,7 +362,7 @@ def write_review_csv_worms(results, path):
                 "worms_rank": d["worms_rank"] or "",
                 "worms_lineage": d["worms_lineage"] or "",
                 "worms_alternatives": d["worms_alternatives"] or "",
-                "confirmed_aphia_id": aid})
+                "confirmed_aphia_id": aid if d["worms_match_type"] == "exact" else ""})
 
 
 def _apply_confirmed_worms(conn, d, today):
@@ -374,35 +380,39 @@ def apply_review_worms(conn, taxdir, csv_path):
     Each row is validated on its own (like the NCBI apply): a non-numeric or
     unknown confirmed_aphia_id is reported and skipped, not fatal. Returns
     (applied, skipped) where skipped is a list of "taxon: reason" strings.
+    Raises ValueError if the CSV has no confirmed_aphia_id column.
     """
+    reader = csv.DictReader(io.StringIO(_read_text(csv_path)))
+    if "confirmed_aphia_id" not in (reader.fieldnames or []):
+        raise ValueError(f"{csv_path} has no 'confirmed_aphia_id' column; not a WoRMS "
+                         f"review CSV (an NCBI one needs --source ncbi)")
     cache = _cache_open(taxdir)
     today = date.today().isoformat()
     applied, skipped = 0, []
     try:
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                taxon = (row.get("taxon") or "").strip()
-                ca = (row.get("confirmed_aphia_id") or "").strip()
-                if not ca:
-                    continue
-                if not taxon:
-                    skipped.append(f"(blank taxon): row has confirmed_aphia_id '{ca}'")
-                    continue
-                try:
-                    aphia_id = int(ca)
-                except ValueError:
-                    skipped.append(f"{taxon}: confirmed_aphia_id '{ca}' is not a number")
-                    continue
-                rec = _record_by_aphia_id(aphia_id, cache)
-                if not rec:
-                    skipped.append(f"{taxon}: AphiaID {aphia_id} not found in WoRMS")
-                    continue
-                d = _blank(taxon, clean_taxon(taxon))
-                _fill_fields(d, rec)
-                d["worms_status"] = rec.get("status")
-                d["worms_match_type"] = "confirmed"
-                _apply_confirmed_worms(conn, d, today)
-                applied += 1
+        for row in reader:
+            taxon = (row.get("taxon") or "").strip()
+            ca = (row.get("confirmed_aphia_id") or "").strip()
+            if not ca:
+                continue
+            if not taxon:
+                skipped.append(f"(blank taxon): row has confirmed_aphia_id '{ca}'")
+                continue
+            try:
+                aphia_id = int(ca)
+            except ValueError:
+                skipped.append(f"{taxon}: confirmed_aphia_id '{ca}' is not a number")
+                continue
+            rec = _record_by_aphia_id(aphia_id, cache)
+            if not rec:
+                skipped.append(f"{taxon}: AphiaID {aphia_id} not found in WoRMS")
+                continue
+            d = _blank(taxon, clean_taxon(taxon))
+            _fill_fields(d, rec)
+            d["worms_status"] = rec.get("status")
+            d["worms_match_type"] = "confirmed"
+            _apply_confirmed_worms(conn, d, today)
+            applied += 1
         conn.commit()
     finally:
         cache.close()

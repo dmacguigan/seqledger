@@ -306,15 +306,22 @@ seqledger --db oceandna_catalog.db integrity --batch --only-unchecked \
 #    Downloads a pinned NCBI taxdump into <db dir>/.taxonomy (once), indexes it,
 #    resolves distinct sample Taxa (exact, then genus-anchored fuzzy), writes the
 #    results into the `taxa` table + a review CSV. By DEFAULT it resolves only taxa
-#    with no `taxa` row yet (never checked against NCBI), so a new ingest doesn't
-#    re-run every taxon. Add --refresh-unconfirmed to also re-resolve taxa resolved
-#    before but not yet confirmed, or --redo to re-resolve everything.
+#    never checked against NCBI, so a new ingest doesn't re-run every taxon. Add
+#    --refresh-unconfirmed to also re-resolve taxa resolved before but not yet
+#    confirmed, or --redo to re-resolve everything (confirmed taxa are kept: their
+#    fresh machine result shows in the review CSV but is not written).
+#    The review CSV is <db dir>/taxonomy_review.csv; if that file already exists, a
+#    dated taxonomy_review_YYYY-MM-DD.csv (then _2, _3, ...) is written instead, so
+#    unapplied edits are never overwritten. The command prints the actual path. No
+#    review CSV is written when there was nothing to resolve.
 #    NOTE: if you built a taxdump index before this version, rebuild it once so
 #    the new tax_names(taxid) index (large speed-up) is applied:
 #        seqledger --db oceandna_catalog.db taxonomy resolve --rebuild-index
 seqledger --db oceandna_catalog.db taxonomy resolve
-#    edit confirmed_taxid in taxonomy_review.csv for any wrong fuzzy/unresolved
-#    rows, then fold the overrides back in:
+#    confirmed_taxid is pre-filled only for exact matches. A filled cell means
+#    "I confirm this taxid": fill it in for fuzzy/ambiguous/unresolved rows you
+#    have checked, clear it for any you reject, then fold the confirmations back
+#    in (use the path the resolve run printed; Excel CSV saves are fine):
 seqledger --db oceandna_catalog.db taxonomy apply --review taxonomy_review.csv
 
 #    WoRMS (World Register of Marine Species) -- the authoritative marine register --
@@ -326,7 +333,8 @@ seqledger --db oceandna_catalog.db taxonomy apply --review taxonomy_review.csv
 #    WoRMS is unreachable it warns and leaves the NCBI side intact. Ingest's
 #    auto-taxonomy stays NCBI-only (offline/fast) -- run WoRMS explicitly:
 seqledger --db oceandna_catalog.db taxonomy resolve --source worms   # or: --source both
-#    review + edit confirmed_aphia_id in worms_review.csv, then apply:
+#    review + edit confirmed_aphia_id in worms_review.csv (same rules: pre-filled
+#    for exact matches only, dated name if the file exists), then apply:
 seqledger --db oceandna_catalog.db taxonomy apply --source worms --review worms_review.csv
 
 # 6. lookups

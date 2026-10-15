@@ -42,3 +42,9 @@ by an adversarial review. Highlights (specifics may still shift):
   handling).
 - Taxonomy resolution hardening for edge-case and ambiguous names.
 - CSV-injection sanitization on exported map files and tables.
+- `integrity` re-checks a file whose size changed since its last check; a re-ingest
+  that sees a new size clears the old integrity result and backup match.
+- `integrity --batch` no longer reuses results from a completed run, and `--collect`
+  only writes to the result file's own project and never overwrites a newer result.
+- Files that cannot be read (permissions, I/O errors) are reported `unchecked`
+  instead of corrupt.

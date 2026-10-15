@@ -303,7 +303,8 @@ def _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
         "SELECT 1 FROM files WHERE project_id=? AND rel_path=?",
         (project_id, target_rel)).fetchone() is None
     # Do not clobber md5 columns on re-ingest; refresh size/owner only when known
-    # (COALESCE keeps prior values if the file was unreachable this run).
+    # (COALESCE keeps prior values if the file was unreachable this run). A size
+    # change invalidates prior integrity and md5_match results.
     conn.execute(
         """INSERT INTO files
              (project_id, sample_pk, direction, filename, rel_path,
@@ -312,6 +313,16 @@ def _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
            ON CONFLICT(project_id, rel_path) DO UPDATE SET
              sample_pk=excluded.sample_pk, direction=excluded.direction,
              filename=excluded.filename,
+             gz_ok=CASE WHEN excluded.size_bytes <> files.size_bytes
+                        THEN NULL ELSE files.gz_ok END,
+             integrity_status=CASE WHEN excluded.size_bytes <> files.size_bytes
+                        THEN NULL ELSE files.integrity_status END,
+             n_reads=CASE WHEN excluded.size_bytes <> files.size_bytes
+                        THEN NULL ELSE files.n_reads END,
+             integrity_date=CASE WHEN excluded.size_bytes <> files.size_bytes
+                        THEN NULL ELSE files.integrity_date END,
+             md5_match=CASE WHEN excluded.size_bytes <> files.size_bytes
+                        THEN NULL ELSE files.md5_match END,
              size_bytes=COALESCE(excluded.size_bytes, files.size_bytes),
              owner_uid=COALESCE(excluded.owner_uid, files.owner_uid),
              owner_name=COALESCE(excluded.owner_name, files.owner_name)""",

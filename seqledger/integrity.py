@@ -33,10 +33,11 @@ from datetime import date
 # Falls back to stdlib gzip (which on Python 3.14+ is itself zlib-ng-backed).
 # This only helps when the check is CPU-bound; on a network mount the read
 # dominates and the incremental skip below is what actually saves time.
-_GZIP_ERRORS = (gzip.BadGzipFile, EOFError, zlib.error, OSError)
+_GZIP_ERRORS = (gzip.BadGzipFile, EOFError, zlib.error)
 try:
     from isal import igzip as _fastgz, isal_zlib as _isal_zlib
-    _GZIP_ERRORS = _GZIP_ERRORS + (_isal_zlib.error,)
+    _GZIP_ERRORS = _GZIP_ERRORS + (_isal_zlib.error,
+                                   getattr(_fastgz, "BadGzipFile", gzip.BadGzipFile))
 except ImportError:
     _fastgz = gzip
 
@@ -48,7 +49,7 @@ _COMMIT_EVERY = 200
 OK = "ok"
 GZIP_ERROR = "gzip_error"      # invalid / truncated gzip, CRC failure
 FORMAT_ERROR = "format_error"  # decompresses but not valid FASTQ
-UNCHECKED = "unchecked"        # file not found on disk / no root known
+UNCHECKED = "unchecked"        # file not found / unreadable / no root known
 
 
 def check_fastq_gz(path, chunk_size=1 << 20):
@@ -77,6 +78,8 @@ def check_fastq_gz(path, chunk_size=1 << 20):
                 tail = (tail + chunk)[-2:]
     except _GZIP_ERRORS as e:
         return {"status": GZIP_ERROR, "n_reads": None, "detail": str(e)}
+    except OSError as e:  # permission, EIO, ESTALE: not evidence of corruption
+        return {"status": UNCHECKED, "n_reads": None, "detail": e.strerror or str(e)}
 
     if not ended_nl:  # final record without a trailing newline still counts
         n_lines += 1
@@ -138,12 +141,16 @@ def _resolve_path(seqdata_root, row):
     return os.path.join(root, row["rel_path"])
 
 
-def _persist(conn, file_pk, res, today):
+def _persist(conn, file_pk, res, today, project_id=None):
+    # project_id scopes the write and refuses to overwrite a newer result (collect).
     gz_ok = None if res["status"] == UNCHECKED else (1 if res["status"] == OK else 0)
-    conn.execute(
-        """UPDATE files SET integrity_status=?, gz_ok=?, n_reads=?, integrity_date=?
-           WHERE file_pk=?""",
-        (res["status"], gz_ok, res.get("n_reads"), today, file_pk))
+    sql = ("UPDATE files SET integrity_status=?, gz_ok=?, n_reads=?, integrity_date=? "
+           "WHERE file_pk=?")
+    params = [res["status"], gz_ok, res.get("n_reads"), today, file_pk]
+    if project_id is not None:
+        sql += " AND project_id=? AND (integrity_date IS NULL OR integrity_date <= ?)"
+        params += [project_id, today]
+    return conn.execute(sql, params).rowcount
 
 
 def _log_run(conn, project_id, status, today):
@@ -397,8 +404,9 @@ def emit_project_json(conn, project_id, out_path, seqdata_root=None, jobs=None,
     --collect).
 
     Checkpointed + resumable within a single project: results are flushed to the
-    JSON every _COMMIT_EVERY freshly-checked files, and on (re)start any existing
-    JSON at out_path is loaded so already-checked files are skipped, not re-read.
+    JSON every _COMMIT_EVERY freshly-checked files, and on (re)start an unfinished
+    JSON at out_path (no .done marker) is loaded so already-checked files are
+    skipped, not re-read. A finished JSON is never reused.
     So a job killed mid-project (e.g. the lTIO 72h wall / 12h-per-slot CPU cap)
     resumes where it stopped when resubmitted, instead of starting over. recheck=True
     (or resume=False) ignores the prior JSON and re-reads every file.
@@ -408,13 +416,13 @@ def emit_project_json(conn, project_id, out_path, seqdata_root=None, jobs=None,
     run_date = date.today().isoformat()
     rows = _select_rows(conn, project_id)
 
-    seed = _load_results_json(out_path) if (resume and not recheck) else {}
+    done_path = out_path + ".done"
+    finished = os.path.exists(done_path)  # prior run completed: start fresh
+    seed = _load_results_json(out_path) if (resume and not recheck and not finished) else {}
     if seed and progress:
         print(f"resuming {project_id}: {len(seed)} file result(s) already recorded "
               f"in {out_path}", flush=True)
-
-    done_path = out_path + ".done"
-    if os.path.exists(done_path):  # a prior full run; this run supersedes it
+    if finished:
         os.remove(done_path)
 
     results = {}
@@ -442,7 +450,8 @@ def emit_project_json(conn, project_id, out_path, seqdata_root=None, jobs=None,
 def collect_json(conn, results_dir, progress=True):
     """Merge batch integrity JSON files from results_dir into the catalog DB.
 
-    Persists each file's status/n_reads (using the emitting job's run_date), then
+    Persists each file's status/n_reads (using the emitting job's run_date) to rows
+    of the JSON's project whose integrity_date is not newer than that run_date, then
     re-aggregates per-project summaries and writes validation_log. This is the only
     step that writes the shared DB, so it runs locally and serially -- the remote
     jobs never touch it. Returns {project_id: summary_dict}.
@@ -473,13 +482,13 @@ def collect_json(conn, results_dir, progress=True):
             continue
         pid = payload.get("project_id")
         run_date = payload.get("run_date") or today
-        pfiles = payload.get("results", {})
+        pfiles = payload.get("results", {}) if pid else {}
         for pk_str, r in pfiles.items():
-            if not r.get("status"):
+            n = r.get("n_reads")
+            if not r.get("status") or not (n is None or type(n) is int):
                 continue
-            _persist(conn, int(pk_str),
-                     {"status": r["status"], "n_reads": r.get("n_reads")}, run_date)
-            n_files += 1
+            n_files += _persist(conn, int(pk_str),
+                                {"status": r["status"], "n_reads": n}, run_date, pid)
         if pid:
             project_ids.add(pid)
         if progress:

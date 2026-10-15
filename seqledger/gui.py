@@ -11,6 +11,7 @@ Two modes:
 
 import os
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -22,11 +23,21 @@ APP_PATH = os.path.join(os.path.dirname(__file__), "app", "streamlit_app.py")
 LOGIN_HOST = "hydra-login01.si.edu"
 
 
-def _print_tunnel(node, port, login_host):
+def _tunnel_text(node, port, login_host, user, on_cluster):
+    """How to reach a GUI bound to 127.0.0.1 on `node` from the user's laptop."""
+    link = f"open http://localhost:{port} in your browser.\n"
+    if not on_cluster:
+        return "\nNow " + link
+    if node.split(".")[0] == login_host.split(".")[0]:
+        ssh = shlex.join(["ssh", "-N", "-L", f"{port}:127.0.0.1:{port}", f"{user}@{login_host}"])
+    else:
+        ssh = shlex.join(["ssh", "-N", "-L", f"{port}:127.0.0.1:{port}", "-J", f"{user}@{login_host}", f"{user}@{node}"])
+    return f"\nOn your LOCAL computer, run:\n\n  {ssh}\n\nThen " + link
+
+
+def _print_tunnel(node, port, login_host, on_cluster=True):
     user = os.environ.get("USER", "YOUR_USER_ID")
-    print("\nOn your LOCAL computer, run:\n")
-    print(f"  {shlex.join(['ssh', '-N', '-L', f'{port}:{node}:{port}', f'{user}@{login_host}'])}\n")
-    print(f"Then open http://localhost:{port} in your browser.\n")
+    print(_tunnel_text(node, port, login_host, user, on_cluster))
 
 
 def _free_port(preferred=None):
@@ -55,18 +66,10 @@ def launch(db_path, port=8501, login_host=LOGIN_HOST):
     # the requested port were busy, Streamlit would silently pick another and the
     # printed tunnel would point at the wrong port).
     port = _free_port(port)
-    _print_tunnel(socket.gethostname(), port, login_host)
+    _print_tunnel(socket.gethostname(), port, login_host, shutil.which("qsub") is not None)
     env = dict(os.environ, SEQLEDGER_DB=os.path.abspath(db_path))
-    # DEFERRED (bind exposure): the documented tunnel is
-    #   ssh -N -L <port>:<NODE>:<port> <user>@<login-host>
-    # so the login host reaches this server at <NODE>:<port> over the cluster
-    # network. Binding 127.0.0.1 would make the server reachable only from this
-    # node itself and BREAK that login->node hop, so we keep 0.0.0.0. Tradeoff:
-    # the app is exposed on all interfaces with no auth -- rely on an HPC
-    # firewall/ACL (compute nodes are not internet-reachable), or add Streamlit
-    # auth, rather than switching the bind.
     cmd = [sys.executable, "-m", "streamlit", "run", APP_PATH,
-           "--server.address", "0.0.0.0", "--server.port", str(port),
+           "--server.address", "127.0.0.1", "--server.port", str(port),
            "--server.headless", "true"]
     try:
         subprocess.run(cmd, env=env)
@@ -115,22 +118,24 @@ export SEQLEDGER_DB={shlex.quote(db_abs)}
 # Pick a free port on this node (fall back to the requested one).
 PORT=$(python -c 'import socket;s=socket.socket();s.bind(("",0));print(s.getsockname()[1]);s.close()' 2>/dev/null || echo {port})
 
-# DEFERRED (bind exposure): the tunnel is `ssh -L <port>:<NODE>:<port> ...`, so the
-# login host reaches this GUI at <NODE>:<port> over the cluster network. Binding
-# 127.0.0.1 here would make it reachable only from this compute node and BREAK the
-# login->node hop, so we keep 0.0.0.0. Tradeoff: no-auth exposure on all interfaces
-# -- mitigate with the HPC firewall/ACL (compute nodes aren't internet-reachable)
-# or Streamlit auth, not by changing the bind.
-streamlit run {shlex.quote(APP_PATH)} --server.address 0.0.0.0 --server.port "$PORT" --server.headless true &
+# Loopback only: the user tunnels in with ssh -J via the login host.
+streamlit run {shlex.quote(APP_PATH)} --server.address 127.0.0.1 --server.port "$PORT" --server.headless true &
 SPID=$!
 
 # Wait (up to 90s) for the server to actually accept connections, then signal ready.
+OK=0
 for i in $(seq 1 90); do
     if python -c "import socket,sys; sys.exit(0 if socket.socket().connect_ex(('127.0.0.1', $PORT))==0 else 1)"; then
+        OK=1
         break
     fi
     sleep 1
 done
+if [ $OK = 0 ]; then
+    echo FAILED > {shlex.quote(ready_path)}
+    kill $SPID 2>/dev/null
+    exit 1
+fi
 echo "READY $(hostname) $PORT" > {shlex.quote(ready_path)}
 wait $SPID
 """
@@ -179,6 +184,9 @@ def launch_qsub(db_path, port=8501, login_host=LOGIN_HOST, queue="lTIO.sq",
             if len(parts) >= 3 and parts[0] == "READY":
                 node, srvport = parts[1], parts[2]
                 break
+            if parts[:1] == ["FAILED"]:
+                sys.exit(f"GUI job {jid} started but Streamlit never came up.\n"
+                         f"  check log: {log_path}")
         now = time.monotonic()
         if now - last_beat >= 15:
             state = _qstat_state(jid)
@@ -200,7 +208,7 @@ def launch_qsub(db_path, port=8501, login_host=LOGIN_HOST, queue="lTIO.sq",
 
     print(f"\nGUI is serving on {queue} node {node}:{srvport} with direct Store access.")
     _print_tunnel(node, srvport, login_host)
-    print(f"Job {jid}  ·  log: {log_path}")
+    print(f"Job {jid}  -  log: {log_path}")
     print(f"Stop the GUI when you're done:  qdel {jid}")
     print("Note: lTIO caps jobs at 72h wall and 2 concurrent jobs/user -- the GUI "
           "stops at 72h; just resubmit to restart.")

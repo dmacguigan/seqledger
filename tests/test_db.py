@@ -171,3 +171,38 @@ def test_migrate_files_relpath_refuses_on_duplicate(tmp_path):
     conn.commit()
     with pytest.raises(RuntimeError):  # refuses rather than a mid-rebuild IntegrityError
         odb.init_db(conn)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_init_db_new_catalog_is_0600(tmp_path):
+    p = os.path.join(tmp_path, "new.db")
+    odb.init_db(odb.connect(p))
+    assert os.stat(p).st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_init_db_leaves_existing_catalog_perms(tmp_path):
+    p = os.path.join(tmp_path, "old.db")
+    odb.init_db(odb.connect(p))
+    os.chmod(p, 0o644)
+    odb.init_db(odb.connect(p))
+    assert os.stat(p).st_mode & 0o777 == 0o644
+
+
+def test_writer_busy_timeout_is_60s(tmp_path):
+    conn = odb.connect(os.path.join(tmp_path, "w.db"))
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 60000
+
+
+def test_ro_uri_escapes_question_and_hash(tmp_path):
+    d = tmp_path / "we?ird#dir"
+    d.mkdir()
+    p = str(d / "cat.db?x=1")
+    odb.init_db(odb.connect(p))
+    raw = sqlite3.connect(odb.ro_uri(p), uri=True)
+    assert raw.execute("SELECT count(*) FROM sqlite_master WHERE name='files'").fetchone()[0] == 1
+    with pytest.raises(sqlite3.OperationalError):
+        raw.execute("CREATE TABLE evil(x)")
+    with pytest.raises(sqlite3.OperationalError):
+        sqlite3.connect(odb.ro_uri(str(d / "missing.db")), uri=True).execute("SELECT 1")
+    assert not (d / "missing.db").exists()

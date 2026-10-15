@@ -8,6 +8,7 @@ functions under test (`_csv_safe_*`, `_validate_regex`, `_with_retry`, `_drop_un
 `st.*`, so a real vs. faked streamlit makes no difference to what is verified.
 """
 
+import contextlib
 import datetime
 import importlib.util
 import math
@@ -37,6 +38,7 @@ def _load_app_module():
 
         fake.cache_data = _cache_data
         fake.column_config = types.SimpleNamespace(LinkColumn=lambda *a, **k: None)
+        fake.spinner = lambda *a, **k: contextlib.nullcontext()
         sys.modules["streamlit"] = fake
     sys.path.insert(0, _REPO_ROOT)
     spec = importlib.util.spec_from_file_location("seqledger_streamlit_app", _APP_PATH)
@@ -146,6 +148,40 @@ def test_with_retry_propagates_non_lock_errors(monkeypatch):
 
     with pytest.raises(sqlite3.OperationalError):
         app._with_retry(real_error)
+
+
+def test_ro_connect_is_query_only(tmp_path):
+    from seqledger import db as odb
+    p = str(tmp_path / "a?b#c.db")
+    odb.init_db(odb.connect(p))
+    con = app._ro_connect(p)
+    assert con.execute("PRAGMA query_only").fetchone()[0] == 1
+    with pytest.raises(sqlite3.OperationalError):
+        con.execute("CREATE TABLE evil(x)")
+
+
+def test_with_retry_shows_message_while_waiting(monkeypatch):
+    monkeypatch.setattr(app.time, "sleep", lambda *a: None)
+    shown = []
+    monkeypatch.setattr(app.st, "spinner",
+                        lambda msg, **k: shown.append(msg) or contextlib.nullcontext(),
+                        raising=False)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return 1
+
+    assert app._with_retry(flaky) == 1
+    assert shown and "retrying" in shown[0].lower()
+
+
+def test_lock_wait_budget_about_15s():
+    budget = (app._LOCK_RETRIES * app._BUSY_TIMEOUT_MS / 1000
+              + sum(app._LOCK_BACKOFF * a for a in range(1, app._LOCK_RETRIES)))
+    assert budget <= 16
 
 
 # --- #25 empty files count as an integrity issue ------------------------------

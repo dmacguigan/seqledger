@@ -3,6 +3,7 @@
 import os
 import re
 import sqlite3
+import urllib.parse
 
 SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
 
@@ -101,10 +102,15 @@ def fastq_globs(exts_csv):
 
 def connect(db_path):
     """Open a SQLite connection with foreign keys on and Row factory."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=60)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def ro_uri(db_path):
+    """SQLite read-only URI for db_path, with ?/# in the path escaped."""
+    return f"file:{urllib.parse.quote(db_path, safe='/')}?mode=ro"
 
 
 def connect_ro(db_path):
@@ -114,7 +120,7 @@ def connect_ro(db_path):
     integrity batch worker (--emit-json), which only reads its file list. mode=ro
     (not immutable) so it stays correct while the CLI writes the master elsewhere.
     """
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(ro_uri(db_path), uri=True)
     conn.row_factory = sqlite3.Row
     # Defense in depth on top of mode=ro: refuse any write attempt outright.
     # (foreign_keys is irrelevant on a pure-read connection, so it stays off.)
@@ -277,10 +283,14 @@ def _migrate(conn):
 
 def init_db(conn, schema_path=SCHEMA_PATH):
     """Create tables from schema.sql, then apply migrations (idempotent)."""
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    new = bool(path) and os.path.getsize(path) == 0
     with open(schema_path) as f:
         conn.executescript(f.read())
     _migrate(conn)
     conn.commit()
+    if new:
+        os.chmod(path, 0o600)
 
 
 def header_uniqid_column(header):

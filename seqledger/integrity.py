@@ -44,6 +44,7 @@ except ImportError:
 # Persist accumulated per-file results (and commit) every this many checks, so a
 # long run is resumable: a kill mid-run keeps everything already checked.
 _COMMIT_EVERY = 200
+_COMMIT_SECS = 30
 
 # Per-file integrity_status values.
 OK = "ok"
@@ -342,15 +343,15 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
     today = date.today().isoformat()
     rows = _select_rows(conn, only_project)
 
-    since_commit = [0]
+    since_commit = [0, time.monotonic()]
 
     def on_checked(pk, res):
         # Persist as we go so a kill mid-run keeps completed work.
         _persist(conn, pk, res, today)
         since_commit[0] += 1
-        if since_commit[0] >= _COMMIT_EVERY:
+        if since_commit[0] >= _COMMIT_EVERY or time.monotonic() - since_commit[1] >= _COMMIT_SECS:
             conn.commit()
-            since_commit[0] = 0
+            since_commit[:] = [0, time.monotonic()]
 
     results = _compute_results(rows, seqdata_root, jobs, progress, recheck, on_checked)
     # Persist no-path UNCHECKED files (never entered the worker pool). Cached rows

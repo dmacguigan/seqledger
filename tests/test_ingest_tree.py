@@ -389,3 +389,155 @@ def test_reingest_flatguess_moves_to_nested_no_dup(tmp_path):
     assert rp2 == {f"{pid}/run1/x_1.fastq.gz", f"{pid}/run1/x_2.fastq.gz"}  # moved
     assert conn.execute(
         "SELECT COUNT(*) FROM files WHERE project_id=?", (pid,)).fetchone()[0] == 2  # no dup
+
+
+def _write_mapfile(meta, pid, lines, header="ID,R1,R2,Taxon,UniqID"):
+    with open(os.path.join(meta, f"{pid}_mapfile.csv"), "w") as f:
+        f.write(header + "\n")
+        for line in lines:
+            f.write(line + "\n")
+
+
+def _links(conn):
+    return {r["filename"]: (r["sample_pk"], r["direction"]) for r in conn.execute(
+        "SELECT filename, sample_pk, direction FROM files")}
+
+
+def _linked_project(tmp_path):
+    # Names whose R1/R2 the disk-only guess cannot infer, so a lost direction shows.
+    root, meta = _roots(tmp_path)
+    pid = "genohub-1_X"
+    _gz(os.path.join(root, pid, "s1_fwd.fastq.gz"))
+    _gz(os.path.join(root, pid, "s1_rev.fastq.gz"))
+    _write_mapfile(meta, pid, ["s1,s1_fwd.fastq.gz,s1_rev.fastq.gz,Gadus,U1"])
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, root, meta)
+    return root, meta, pid, conn
+
+
+def test_reingest_missing_mapfile_keeps_sample_links(tmp_path):
+    root, meta, pid, conn = _linked_project(tmp_path)
+    before = _links(conn)
+    assert all(pk is not None for pk, _ in before.values())
+    mf = os.path.join(meta, f"{pid}_mapfile.csv")
+    os.rename(mf, mf + ".bak")
+    oingest.ingest_tree(conn, root, meta)
+    assert _links(conn) == before
+    row = conn.execute("SELECT metadata_status, metadata_file FROM projects").fetchone()
+    assert row["metadata_status"] == "missing_mapfile"
+    assert row["metadata_file"] == f"{pid}_mapfile.csv"
+
+
+def test_reingest_broken_header_keeps_sample_links(tmp_path):
+    root, meta, pid, conn = _linked_project(tmp_path)
+    before = _links(conn)
+    _write_mapfile(meta, pid, [], header="id;r1;r2")
+    oingest.ingest_tree(conn, root, meta)
+    assert _links(conn) == before
+    # a new file found while the mapfile is broken is cataloged unlinked
+    _gz(os.path.join(root, pid, "new_R1.fastq.gz"))
+    oingest.ingest_tree(conn, root, meta)
+    links = _links(conn)
+    assert links["new_R1.fastq.gz"] == (None, "R1")
+    assert links["s1_fwd.fastq.gz"] == before["s1_fwd.fastq.gz"]
+
+
+def test_moved_file_keeps_row_and_history(tmp_path):
+    root, meta = _roots(tmp_path)
+    pid = "genohub-1_X"
+    for fn in ("s1_R1.fastq.gz", "s1_R2.fastq.gz"):
+        _gz(os.path.join(root, pid, "run1", fn))
+    _write_mapfile(meta, pid, ["s1,s1_R1.fastq.gz,s1_R2.fastq.gz,Gadus,U1"])
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, root, meta)
+    conn.execute("UPDATE files SET md5_match=1")
+    conn.commit()
+    pks = {r["filename"]: r["file_pk"] for r in conn.execute("SELECT * FROM files")}
+
+    os.makedirs(os.path.join(root, pid, "run2"))
+    for fn in pks:
+        os.rename(os.path.join(root, pid, "run1", fn), os.path.join(root, pid, "run2", fn))
+    res = oingest.ingest_tree(conn, root, meta, prune=True)
+
+    rows = conn.execute("SELECT * FROM files").fetchall()
+    assert len(rows) == 2
+    for r in rows:
+        assert r["file_pk"] == pks[r["filename"]]
+        assert r["rel_path"] == f"{pid}/run2/{r['filename']}"
+        assert r["md5_match"] == 1
+    assert res[0][3]["pruned_files"] == 0
+
+
+def test_prune_deletes_by_rel_path_and_counts_rows(tmp_path):
+    # Same basename in two lanes plus junk; only the paths the mapfile resolves to
+    # survive a prune, and every deleted row is counted.
+    root, meta = _roots(tmp_path)
+    pid = "genohub-1_X"
+    for sub in ("L1", "L2"):
+        for fn in ("s1_R1.fastq.gz", "s1_R2.fastq.gz", "junk_R1.fastq.gz"):
+            _gz(os.path.join(root, pid, sub, fn))
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, root, meta)  # diskonly: 6 rows
+    _write_mapfile(meta, pid, ["s1,s1_R1.fastq.gz,s1_R2.fastq.gz,Gadus,U1"])
+    res = oingest.ingest_tree(conn, root, meta, prune=True)
+    rp = {r["rel_path"] for r in conn.execute("SELECT rel_path FROM files")}
+    assert rp == {f"{pid}/L2/s1_R1.fastq.gz", f"{pid}/L2/s1_R2.fastq.gz"}
+    assert res[0][3]["pruned_files"] == 4
+
+
+def test_glob_metachar_project_name(tmp_path):
+    from seqledger import validate as oval
+    root, meta = _roots(tmp_path)
+    pid = "LAB-run[1]_X"
+    for fn in ("s1_R1.fastq.gz", "s1_R2.fastq.gz"):
+        _gz(os.path.join(root, pid, "run1", fn))
+    _write_mapfile(meta, pid, ["s1,s1_R1.fastq.gz,s1_R2.fastq.gz,Gadus,U1"])
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, root, meta)
+    rows = conn.execute("SELECT rel_path, size_bytes FROM files").fetchall()
+    assert {r["rel_path"] for r in rows} == {
+        f"{pid}/run1/s1_R1.fastq.gz", f"{pid}/run1/s1_R2.fastq.gz"}
+    assert all(r["size_bytes"] for r in rows)
+    assert oval.validate_catalog(conn, root)[pid]["data"]["status"] == "ok"
+
+
+def test_extra_cells_row_warns_and_flags(tmp_path):
+    root, meta = _roots(tmp_path)
+    pid = "genohub-1_X"
+    for fn in ("s1_R1.fastq.gz", "s1_R2.fastq.gz"):
+        _gz(os.path.join(root, pid, fn))
+    _write_mapfile(meta, pid,
+                   ["s1,s1_R1.fastq.gz,s1_R2.fastq.gz,Gadus morhua, juvenile,USNM 123"])
+    conn = _fresh_db(tmp_path)
+    res = oingest.ingest_tree(conn, root, meta)
+    findings = [f.message for f in res[0][1]]
+    assert any("row 2: 1 extra cell(s)" in m for m in findings), findings
+    assert "extra_cells" in conn.execute("SELECT flags FROM samples").fetchone()["flags"]
+    assert res[0][3]["metadata_status"] == "flagged"
+
+
+def test_prune_refuses_to_drop_most_samples_unless_forced(tmp_path):
+    root, meta = _roots(tmp_path)
+    pid = "genohub-1_X"
+    lines = []
+    for s in ("s1", "s2", "s3"):
+        for d in ("R1", "R2"):
+            _gz(os.path.join(root, pid, f"{s}_{d}.fastq.gz"))
+        lines.append(f"{s},{s}_R1.fastq.gz,{s}_R2.fastq.gz,Gadus,U{s}")
+    _write_mapfile(meta, pid, lines)
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, root, meta)
+
+    _write_mapfile(meta, pid, lines[:1])  # truncated mapfile
+    res = oingest.ingest_tree(conn, root, meta, prune=True)
+    stats = res[0][3]
+    assert stats["pruned_samples"] == [] and stats["pruned_files"] == 0
+    assert "refusing to prune 2 of 3 samples" in stats["prune_reason"]
+    assert any("refusing to prune" in f.message for f in res[0][1])
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 3
+    assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 6
+
+    res = oingest.ingest_tree(conn, root, meta, prune=True, force=True)
+    assert res[0][3]["pruned_samples"] == ["s2", "s3"]
+    assert res[0][3]["pruned_files"] == 4
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1

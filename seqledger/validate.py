@@ -194,7 +194,7 @@ def check_data_files(conn, project_id, seq_data_relpath, seqdata_root):
     disk = set()
     for pat in globs:
         disk.update(os.path.relpath(p, seqdata_root)
-                    for p in glob.glob(os.path.join(data_dir, "**", pat), recursive=True))
+                    for p in glob.glob(os.path.join(glob.escape(data_dir), "**", pat), recursive=True))
     missing = sorted(db_files - disk)
     orphan = sorted(disk - db_files)
     status = "ok" if not missing and not orphan else "issues"

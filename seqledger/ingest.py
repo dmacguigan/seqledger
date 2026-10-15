@@ -36,8 +36,6 @@ from .db import (METADATA_SUFFIX, REQUIRED_COLUMNS, fastq_globs, get_config,
 
 # Fallback FASTQ globs when no config is available (direct callers / tests).
 _DEFAULT_FASTQ_GLOBS = ("*.fastq.gz", "*.fq.gz")
-# Chunk size for batched DELETEs so a big project can't exceed SQLITE_MAX_VARIABLE_NUMBER.
-_DELETE_CHUNK = 500
 from .validate import (Finding, FAIL, WARN, NA_VALUE, FLAG_MESSAGES,
                        plan_rows, validate_metadata, overall_status)
 
@@ -155,7 +153,8 @@ def _discover_disk_files(data_dir, seqdata_root, uid_cache, globs=_DEFAULT_FASTQ
     """
     paths = set()
     for pat in globs:
-        paths.update(glob.glob(os.path.join(data_dir, "**", pat), recursive=True))
+        paths.update(glob.glob(os.path.join(glob.escape(data_dir), "**", pat),
+                               recursive=True))
     by_basename = {}
     all_files = []
     collisions = []
@@ -219,7 +218,10 @@ def _read_csv(metadata_path):
     for raw in reader:
         if not any(cell.strip() for cell in raw):
             continue
-        rows.append({header[i]: raw[i] for i in range(min(len(header), len(raw)))})
+        row = {header[i]: raw[i] for i in range(min(len(header), len(raw)))}
+        if len(raw) > len(header):
+            row[None] = raw[len(header):]  # extra cells (csv.DictReader's restkey)
+        rows.append(row)
     return header, rows
 
 
@@ -250,7 +252,8 @@ def _upsert_project(conn, project_id, source, number, description, metadata_file
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id) DO UPDATE SET
              source=excluded.source, project_number=excluded.project_number,
-             description=excluded.description, metadata_file=excluded.metadata_file,
+             description=excluded.description,
+             metadata_file=COALESCE(excluded.metadata_file, projects.metadata_file),
              seq_data_relpath=excluded.seq_data_relpath,
              seqdata_root=excluded.seqdata_root, owner_uid=excluded.owner_uid,
              owner_name=excluded.owner_name, date_ingested=excluded.date_ingested,
@@ -277,36 +280,35 @@ def _upsert_sample(conn, project_id, sample_id, taxon, uniq_id, extra_json, flag
 
 def _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
                  size_bytes=None, owner_uid=None, owner_name=None, disk_confirmed=False,
-                 proj_relpath=None):
+                 on_disk=()):
     # A file's identity is its relative path (project_id, rel_path), not its basename:
     # two files can share a basename in different subdirs. Resolve the target rel_path
     # so a re-ingest updates the same row instead of creating a duplicate:
-    #  - disk_confirmed (path came from a real disk scan): authoritative. If a single
-    #    existing row for this basename still sits at the FLAT GUESS (proj_relpath/
-    #    filename) recorded by a prior metadata-only run, move it onto the real disk
-    #    path. A row already at a real, different path is a distinct physical file that
-    #    merely shares a basename -- leave it, so both files are kept.
+    #  - disk_confirmed (path came from a real disk scan): authoritative. If exactly
+    #    one existing row for this basename sits at a path no longer on disk (on_disk
+    #    = every rel_path this scan found), the file moved: move that row, keeping its
+    #    history. Rows still on disk are distinct files sharing a basename.
     #  - not disk_confirmed (rel_path is only a flat guess): reuse the existing row's
     #    recorded path when there's exactly one, so the guess never forks a new row.
+    # Returns (was_new, target_rel).
     target_rel = rel_path
     rows = conn.execute(
         "SELECT file_pk, rel_path FROM files WHERE project_id=? AND filename=?",
         (project_id, filename)).fetchall()
     if disk_confirmed:
-        flat_guess = os.path.join(proj_relpath, filename) if proj_relpath else None
-        if (len(rows) == 1 and flat_guess is not None
-                and rows[0]["rel_path"] == flat_guess and rel_path != flat_guess):
-            taken = conn.execute(
-                "SELECT 1 FROM files WHERE project_id=? AND rel_path=?",
-                (project_id, rel_path)).fetchone()
-            if not taken:
-                conn.execute("UPDATE files SET rel_path=? WHERE file_pk=?",
-                             (rel_path, rows[0]["file_pk"]))
+        gone = [r for r in rows if r["rel_path"] not in on_disk]
+        if len(gone) == 1 and rel_path not in {r["rel_path"] for r in rows}:
+            conn.execute("UPDATE files SET rel_path=? WHERE file_pk=?",
+                         (rel_path, gone[0]["file_pk"]))
     elif len(rows) == 1 and rows[0]["rel_path"]:
         target_rel = rows[0]["rel_path"]
-    was_new = conn.execute(
-        "SELECT 1 FROM files WHERE project_id=? AND rel_path=?",
-        (project_id, target_rel)).fetchone() is None
+    cur = conn.execute(
+        "SELECT sample_pk, direction FROM files WHERE project_id=? AND rel_path=?",
+        (project_id, target_rel)).fetchone()
+    was_new = cur is None
+    if sample_pk is None and cur is not None:
+        # No mapfile metadata (diskonly): keep an existing row's sample link.
+        sample_pk, direction = cur["sample_pk"], cur["direction"]
     # Do not clobber md5 columns on re-ingest; refresh size/owner only when known
     # (COALESCE keeps prior values if the file was unreachable this run). A size
     # change invalidates prior integrity and md5_match results.
@@ -333,18 +335,18 @@ def _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
              owner_name=COALESCE(excluded.owner_name, files.owner_name)""",
         (project_id, sample_pk, direction, filename, target_rel,
          size_bytes, owner_uid, owner_name))
-    return was_new
+    return was_new, target_rel
 
 
 def _empty_stats():
     return {"new_samples": 0, "changed_samples": 0, "new_files": 0,
             "changed_taxa": set(), "orphan_samples": [], "pruned_samples": [],
             "pruned_files": 0, "metadata_status": "ok", "metadata_detail": None,
-            "n_flagged": 0, "n_skipped": 0}
+            "n_flagged": 0, "n_skipped": 0, "prune_reason": None}
 
 
 def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, prune=False,
-                   metadata_status="ok", metadata_detail=None):
+                   metadata_status="ok", metadata_detail=None, force=False):
     """Validate and load one project from its mapfile.
 
     Returns (project_id, findings, status, stats). `stats` summarizes what the
@@ -355,16 +357,19 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
       changed_taxa   -- set of new/changed Taxon strings (may need re-resolving)
       orphan_samples -- sample_ids in the catalog but absent from this CSV
       pruned_samples -- sample_ids deleted from the catalog (only when prune=True)
-      pruned_files   -- count of stale file rows deleted (only when prune=True)
+      pruned_files   -- count of file rows deleted (only when prune=True)
+      prune_reason   -- why a requested prune was refused, else None
       metadata_status/metadata_detail -- mapfile<->folder pairing health (see module doc)
 
     FASTQ files are discovered recursively under the data dir, so files nested in
     subdirectories are found and their real (nested) rel_path is recorded.
 
     With prune=True, rows that the (corrected) CSV no longer references are
-    deleted: samples dropped from the CSV (their files cascade) and any file row
-    whose filename is no longer listed (e.g. a filename typo fixed in place).
-    On a FAIL (nothing written), stats is all-zero/empty and no pruning happens.
+    deleted: samples dropped from the CSV and any file row whose rel_path this run
+    did not resolve (e.g. a filename typo fixed in place). A prune that would drop
+    more than half of a project's samples (when it has more than 2) is refused
+    unless force=True. On a FAIL (nothing written), stats is all-zero/empty and no
+    pruning happens.
     """
     metadata_filename = os.path.basename(metadata_path)
     project_id, source, number, description = parse_project_id(seq_data_relpath)
@@ -372,14 +377,16 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
     header, rows = _read_csv(metadata_path)
 
     disk = None  # {basename: {rel_path,size,uid,name}}
+    on_disk = set()
     proj_owner_uid = proj_owner_name = None
     collisions = []
     uid_cache = {}
     if seqdata_root:
         data_dir = os.path.join(seqdata_root, seq_data_relpath)
         proj_owner_uid, proj_owner_name, _ = _stat_owner(data_dir, uid_cache)
-        disk, _all_disk, collisions = _discover_disk_files(
+        disk, all_disk, collisions = _discover_disk_files(
             data_dir, seqdata_root, uid_cache, _cfg_fastq_globs(conn))
+        on_disk = {i["rel_path"] for i in all_disk}
 
     disk_filenames = set(disk) if disk is not None else None
     findings, has_fail = validate_metadata(
@@ -408,6 +415,12 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
         stats["metadata_detail"] = _invalid_mapfile_detail(findings)
         return project_id, findings, "fail", stats
 
+    for p in usable:
+        if None in p["extra"]:
+            p["flags"].append("extra_cells")
+            findings.append(Finding(WARN, f"row {p['line']}: {len(p['extra'][None])} "
+                                          "extra cell(s), check for an unquoted comma"))
+
     n_flagged = sum(1 for p in usable if p["flags"])
     final_status, final_detail = _row_quality_status(
         metadata_status, metadata_detail, n_flagged, skipped)
@@ -426,12 +439,12 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
     existing = {r["sample_id"]: r["taxon"] for r in conn.execute(
         "SELECT sample_id, taxon FROM samples WHERE project_id=?", (project_id,))}
     csv_ids = set()
-    csv_files = set()
+    kept_paths = set()
 
     # Exclude the core columns by their verbatim header cells (header validated
     # positionally, case-insensitively), so extra_json doesn't re-capture ID/R1/R2/
     # Taxon when the mapfile header uses non-canonical casing.
-    core = {header[0], header[1], header[2], header[3], uniqid_col}
+    core = {header[0], header[1], header[2], header[3], uniqid_col, None}
     seen_files = {}  # filename -> "sample_id/direction" it was first claimed by
     for p in usable:
         sample_id = p["sample_id"]
@@ -462,7 +475,6 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
                 findings.append(Finding(WARN, f"{sample_id}/{direction} filename {filename!r} "
                                         "contains a control character; not cataloged"))
                 continue
-            csv_files.add(filename)
             # A filename can only be one physical file; if the mapfile lists it under
             # two samples/directions the last upsert silently wins, so flag it.
             claim = f"{sample_id}/{direction}"
@@ -476,33 +488,33 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
             size = info["size"] if info else None
             uid = info["uid"] if info else None
             name = info["name"] if info else None
-            if _upsert_file(conn, project_id, sample_pk, direction, filename, rel_path,
-                            size_bytes=size, owner_uid=uid, owner_name=name,
-                            disk_confirmed=info is not None, proj_relpath=seq_data_relpath):
+            was_new, target = _upsert_file(
+                conn, project_id, sample_pk, direction, filename, rel_path,
+                size_bytes=size, owner_uid=uid, owner_name=name,
+                disk_confirmed=info is not None, on_disk=on_disk)
+            kept_paths.add(target)
+            if was_new:
                 stats["new_files"] += 1
 
     stats["orphan_samples"] = sorted(set(existing) - csv_ids)
     status = "warn" if (n_flagged or skipped or overall_status(findings) != "pass") else "pass"
 
-    if prune:
-        # Drop samples the corrected CSV no longer lists (files cascade), then any
-        # remaining file row whose filename is no longer referenced (in-place fix).
-        conn.executemany(
-            "DELETE FROM samples WHERE project_id=? AND sample_id=?",
-            [(project_id, sid) for sid in stats["orphan_samples"]])
-        stats["pruned_samples"] = list(stats["orphan_samples"])
-        if csv_files:
-            # Compute stale filenames in Python (a "filename NOT IN (?,?,...)" over a
-            # big project can exceed SQLITE_MAX_VARIABLE_NUMBER) and delete in chunks.
-            existing_files = {r["filename"] for r in conn.execute(
-                "SELECT filename FROM files WHERE project_id=?", (project_id,))}
-            to_delete = sorted(existing_files - csv_files)
-            for i in range(0, len(to_delete), _DELETE_CHUNK):
-                conn.executemany(
-                    "DELETE FROM files WHERE project_id=? AND filename=?",
-                    [(project_id, fn) for fn in to_delete[i:i + _DELETE_CHUNK]])
-            # filename is UNIQUE per project, so one row deleted per name.
-            stats["pruned_files"] = len(to_delete)
+    orphans = stats["orphan_samples"]
+    if prune and not force and len(existing) > 2 and len(orphans) > len(existing) / 2:
+        reason = (f"refusing to prune {len(orphans)} of {len(existing)} samples (>50%); "
+                  "check the mapfile is complete (force=True overrides)")
+        stats["prune_reason"] = reason
+        findings.append(Finding(WARN, reason))
+        status = "warn"
+    elif prune:
+        # Drop any file row whose rel_path this run did not resolve (stale or moved
+        # paths, typo fixes, dropped samples' files), then the dropped samples.
+        if kept_paths:
+            stale = [(r["file_pk"],) for r in conn.execute(
+                "SELECT file_pk, rel_path FROM files WHERE project_id=?", (project_id,))
+                if r["rel_path"] not in kept_paths]
+            stats["pruned_files"] = conn.executemany(
+                "DELETE FROM files WHERE file_pk=?", stale).rowcount
         else:
             # An empty/all-missing mapfile references no files -- likely a transiently
             # broken mapfile rather than every file genuinely gone. Do NOT wipe the
@@ -511,6 +523,10 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
                 "prune deleted no files because the mapfile referenced none; "
                 "existing file rows were kept to avoid a catastrophic wipe"))
             stats["pruned_files"] = 0
+        conn.executemany(
+            "DELETE FROM samples WHERE project_id=? AND sample_id=?",
+            [(project_id, sid) for sid in orphans])
+        stats["pruned_samples"] = list(orphans)
 
     conn.commit()
     return project_id, findings, status, stats
@@ -521,8 +537,10 @@ def _ingest_diskonly(conn, project_id, data_dir, seqdata_root, metadata_status, 
 
     Used when a project has no usable mapfile (missing_mapfile / broken_mapfile):
     the project row is created (flagged with metadata_status) and every *.fastq.gz
-    found on disk is cataloged with sample_pk NULL and a best-effort R1/R2 guess, so
-    the files are visible and can still be integrity-checked. Returns a stats dict.
+    found on disk is cataloged, so the files are visible and can still be
+    integrity-checked. New files get sample_pk NULL and a best-effort R1/R2 guess;
+    existing rows keep their sample link, direction, and the project its previous
+    metadata_file, so a briefly missing/broken mapfile unlinks nothing. Returns stats.
     """
     uid_cache = {}
     project_id_, source, number, description = parse_project_id(project_id)
@@ -543,11 +561,12 @@ def _ingest_diskonly(conn, project_id, data_dir, seqdata_root, metadata_status, 
     stats["metadata_detail"] = detail
     # Catalog every physical file (keyed by rel_path), so two files sharing a basename
     # in different subdirs are BOTH kept, not collapsed to one row.
+    on_disk = {i["rel_path"] for i in all_files}
     for info in sorted(all_files, key=lambda i: i["rel_path"]):
         if _upsert_file(conn, project_id_, None, _infer_direction(info["filename"]),
                         info["filename"], info["rel_path"], size_bytes=info["size"],
                         owner_uid=info["uid"], owner_name=info["name"],
-                        disk_confirmed=True, proj_relpath=project_id):
+                        disk_confirmed=True, on_disk=on_disk)[0]:
             stats["new_files"] += 1
     conn.commit()
     return stats
@@ -569,14 +588,15 @@ def discover_projects(seqdata_root, metadata_root):
                 disk[name] = full
     mapfiles = {}
     if metadata_root and os.path.isdir(metadata_root):
-        for p in sorted(glob.glob(os.path.join(metadata_root, "*" + METADATA_SUFFIX))):
+        for p in sorted(glob.glob(os.path.join(glob.escape(metadata_root),
+                                               "*" + METADATA_SUFFIX))):
             pid = os.path.basename(p)[:-len(METADATA_SUFFIX)]
             mapfiles[pid] = p
     return [{"project_id": pid, "data_dir": disk.get(pid), "mapfile": mapfiles.get(pid)}
             for pid in sorted(set(disk) | set(mapfiles))]
 
 
-def ingest_tree(conn, seqdata_root, metadata_root, prune=False):
+def ingest_tree(conn, seqdata_root, metadata_root, prune=False, force=False):
     """Auto-discover and ingest every project under seqdata_root / metadata_root.
 
     Each project folder is paired with its '<project>_mapfile.csv'. Pairing problems
@@ -619,7 +639,7 @@ def ingest_tree(conn, seqdata_root, metadata_root, prune=False):
         detail = None if has_dir else MISSING_SEQDATA_DETAIL
         pid_, findings, status, stats = ingest_project(
             conn, mapfile, pid, seqdata_root=seqdata_root, prune=prune,
-            metadata_status=mstatus, metadata_detail=detail)
+            metadata_status=mstatus, metadata_detail=detail, force=force)
 
         if status == "fail":
             # No usable rows loaded (all skipped / empty). Catalog the on-disk files
@@ -679,12 +699,13 @@ def prune_missing_projects(conn, seqdata_root, metadata_root, force=False):
     return {"pruned": gone, "skipped": False}
 
 
-def ingest_map_file(conn, map_file_path, seqdata_root=None, metadata_root=None, prune=False):
+def ingest_map_file(conn, map_file_path, seqdata_root=None, metadata_root=None, prune=False,
+                    force=False):
     """Ingest all projects listed in a two-column map file.
 
     Per-project metadata CSVs are resolved relative to metadata_root when their
     path is not absolute and not found in the CWD. Defaults to the map file's
-    own directory. prune=True is forwarded to each project (see ingest_project).
+    own directory. prune/force are forwarded to each project (see ingest_project).
     """
     results = []
     if metadata_root is None:
@@ -694,5 +715,5 @@ def ingest_map_file(conn, map_file_path, seqdata_root=None, metadata_root=None, 
         if not os.path.isabs(metadata_path) and not os.path.exists(metadata_path):
             metadata_path = os.path.join(metadata_root, metadata_filename)
         results.append(ingest_project(conn, metadata_path, seq_data_relpath,
-                                      seqdata_root, prune=prune))
+                                      seqdata_root, prune=prune, force=force))
     return results

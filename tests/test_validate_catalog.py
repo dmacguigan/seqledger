@@ -118,8 +118,9 @@ def test_prune_clears_rows_dropped_from_csv(tmp_path):
     oingest.ingest_map_file(conn, map_file, seqdata_root=root)
     assert oval.validate_catalog(conn, seqdata_root=root)["genohub-1_X"]["data"]["n_missing"] == 4
 
-    # re-ingest with prune -> stale samples/files gone, project clean
-    res = oingest.ingest_map_file(conn, map_file, seqdata_root=root, prune=True)
+    # re-ingest with prune -> stale samples/files gone, project clean (force: 2 of 3
+    # samples dropped trips the >50% prune cap)
+    res = oingest.ingest_map_file(conn, map_file, seqdata_root=root, prune=True, force=True)
     assert res[0][3]["pruned_samples"] == ["bad1", "bad2"]
     data = oval.validate_catalog(conn, seqdata_root=root)["genohub-1_X"]["data"]
     assert data["status"] == "ok" and data["n_missing"] == 0

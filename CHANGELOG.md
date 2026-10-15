@@ -84,3 +84,15 @@ by an adversarial review. Highlights (specifics may still shift):
 - `integrity --batch` reports the configured I/O queue, not a hardcoded `lTIO.sq`.
 - An offline first `ingest` no longer prints a traceback when the NCBI taxdump
   download fails; the taxonomy step is skipped with a message.
+- Re-ingesting a project whose mapfile is missing, broken, or has no usable rows
+  no longer unlinks its files from their samples; existing file rows keep their
+  sample and R1/R2 direction, and the project keeps its mapfile name.
+- A FASTQ file moved to another subdirectory keeps its catalog row and history
+  (md5 and integrity results) instead of leaving a stale duplicate row.
+- `ingest --prune` deletes file rows by relative path and reports the true number
+  of rows removed. It refuses to drop more than half of a project's samples (when
+  the project has more than 2), which usually means a truncated mapfile.
+- Project folders or roots whose names contain glob characters (e.g. `[1]`) now
+  have their files found.
+- A mapfile row with more cells than the header (often an unquoted comma) is
+  flagged with a warning instead of silently shifting columns.

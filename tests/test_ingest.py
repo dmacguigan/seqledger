@@ -115,8 +115,8 @@ def test_ingest_skips_duplicate_id_row_loads_the_rest(tmp_path):
 
 
 def test_prune_deletes_stale_file_rows(tmp_path):
-    # Prune should drop file rows whose filename the corrected mapfile no longer lists
-    # (the in-place typo-fix case), via the chunked per-filename delete path (#22).
+    # Prune drops file rows whose rel_path the corrected mapfile no longer resolves
+    # (the in-place typo-fix case) and counts deleted rows.
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
@@ -131,8 +131,8 @@ def test_prune_deletes_stale_file_rows(tmp_path):
                  [("s1", "s1_1.fastq.gz", "s1_2b.fastq.gz", "Gadus", "U1")])
     results = oingest.ingest_map_file(conn, map_file, seqdata_root=root, prune=True)
     assert results[0][3]["pruned_files"] == 1
-    assert {r["filename"] for r in conn.execute("SELECT filename FROM files")} == \
-        {"s1_1.fastq.gz", "s1_2b.fastq.gz"}
+    assert {r["rel_path"] for r in conn.execute("SELECT rel_path FROM files")} == \
+        {"genohub-1_X/s1_1.fastq.gz", "genohub-1_X/s1_2b.fastq.gz"}
 
 
 def test_prune_empty_csv_does_not_wipe_files(tmp_path):

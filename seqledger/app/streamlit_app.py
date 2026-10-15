@@ -37,13 +37,15 @@ RANK_LABELS = ["domain", "kingdom", "phylum", "class",
 # taxa.match_type ordered best -> worst, with an accessible good->uncertain color
 # ramp (works on light + dark). Samples with no taxa row fall into 'unresolved'.
 MATCH_ORDER = ["confirmed", "exact", "fuzzy_species", "fuzzy_genus",
-               "fuzzy_higher", "unresolved"]
+               "fuzzy_higher", "ambiguous", "unresolved"]
 MATCH_LABELS = {"confirmed": "confirmed", "exact": "exact",
                 "fuzzy_species": "fuzzy (species)", "fuzzy_genus": "fuzzy (genus)",
-                "fuzzy_higher": "fuzzy (higher)", "unresolved": "unresolved"}
+                "fuzzy_higher": "fuzzy (higher)", "ambiguous": "ambiguous (homonym)",
+                "unresolved": "unresolved"}
 MATCH_COLORS = {"confirmed": "#0B7268", "exact": "#3C8A57",
                 "fuzzy_species": "#C9A227", "fuzzy_genus": "#C77D11",
-                "fuzzy_higher": "#B5532A", "unresolved": "#7A8A86"}
+                "fuzzy_higher": "#B5532A", "ambiguous": "#8E6BB0",
+                "unresolved": "#7A8A86"}
 
 # WoRMS (World Register of Marine Species) resolution, populated by
 # `taxonomy resolve --source worms`. WoRMS's top rank is Kingdom (no domain), so its
@@ -53,16 +55,20 @@ WORMS_RANK_COLS = ["worms_kingdom", "worms_phylum", "worms_class", "worms_order"
                    "worms_family", "worms_genus", "worms_species"]
 WORMS_RANK_LABELS = ["kingdom", "phylum", "class", "order",
                      "family", "genus", "species"]
-# WoRMS TAXAMATCH match types, best -> worst.
-WORMS_MATCH_ORDER = ["confirmed", "exact", "phonetic", "near_1", "near_2", "near_3",
-                     "match_quarantine", "unresolved"]
+# WoRMS match types as stored by worms.py, best -> worst. Loose TAXAMATCH matches
+# are stored with a 'review_' prefix and left unaccepted.
+WORMS_MATCH_ORDER = ["confirmed", "exact", "near_1", "review_phonetic", "review_near_2",
+                     "review_near_3", "review_match_quarantine", "unresolved"]
 WORMS_MATCH_LABELS = {"confirmed": "confirmed", "exact": "exact",
-                      "phonetic": "phonetic (sounds-like)", "near_1": "near (1 edit)",
-                      "near_2": "near (2 edits)", "near_3": "near (3 edits)",
-                      "match_quarantine": "quarantined", "unresolved": "unresolved"}
-WORMS_MATCH_COLORS = {"confirmed": "#0B7268", "exact": "#3C8A57",
-                      "phonetic": "#C9A227", "near_1": "#C9A227", "near_2": "#C77D11",
-                      "near_3": "#B5532A", "match_quarantine": "#B5532A",
+                      "near_1": "near (1 edit)",
+                      "review_phonetic": "review: phonetic (sounds-like)",
+                      "review_near_2": "review: near (2 edits)",
+                      "review_near_3": "review: near (3 edits)",
+                      "review_match_quarantine": "review: quarantined",
+                      "unresolved": "unresolved"}
+WORMS_MATCH_COLORS = {"confirmed": "#0B7268", "exact": "#3C8A57", "near_1": "#C9A227",
+                      "review_phonetic": "#C77D11", "review_near_2": "#C77D11",
+                      "review_near_3": "#B5532A", "review_match_quarantine": "#B5532A",
                       "unresolved": "#7A8A86"}
 
 # Registry the Taxonomy view switches between with its source toggle. Each entry is
@@ -155,6 +161,45 @@ def _ro_connect(db_path):
     # a short write lock inside SQLite before the app-level retry kicks in.
     con.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
     return con
+
+
+# Tables -> columns the GUI queries; an older catalog copy missing any is refused.
+_REQUIRED_SCHEMA = {
+    "projects": ["project_id", "source", "description", "seq_data_relpath",
+                 "seqdata_root", "owner_name", "date_ingested", "metadata_status",
+                 "metadata_detail", "data_check_status", "data_check_n_missing",
+                 "data_check_n_orphan", "data_check_date"],
+    "samples": ["sample_pk", "project_id", "sample_id", "taxon", "uniq_id", "flags"],
+    "files": ["project_id", "sample_pk", "direction", "filename", "rel_path",
+              "size_bytes", "owner_name", "md5_match", "integrity_status", "n_reads",
+              "integrity_date"],
+    "taxa": ["taxon", "match_type", "taxid", "sci_name", "lineage", "aphia_id",
+             "worms_sci_name", "worms_status", "worms_match_type", "worms_lineage"]
+            + RANK_COLS + WORMS_RANK_COLS,
+    "data_check_issues": ["project_id", "kind", "filename"],
+    "backups": ["project_id", "location", "verified"],
+    "config": ["key", "value"],
+}
+
+
+def _missing_schema(db_path):
+    """List of required tables / table.columns absent from the catalog."""
+    def run():
+        con = _ro_connect(db_path)
+        try:
+            tables = {r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            missing = []
+            for table, cols in _REQUIRED_SCHEMA.items():
+                if table not in tables:
+                    missing.append(table)
+                    continue
+                have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+                missing += [f"{table}.{c}" for c in cols if c not in have]
+            return missing
+        finally:
+            con.close()
+    return _with_retry(run)
 
 
 # Lock-contention handling for reads against the live master. busy_timeout (above)
@@ -600,6 +645,8 @@ def samples_view(df, files_df):
     on_screen = ["project_id", "sample_id", "taxon",
                  "ncbi_url", "tax_match", "worms_url", "worms_match", "worms_status",
                  "uniq_id", "uniq_id_url", "flags", "backup"]
+    tax_lab = show["tax_match"].map(MATCH_LABELS).fillna(show["tax_match"])
+    worms_lab = show["worms_match"].map(WORMS_MATCH_LABELS).fillna(show["worms_match"])
     # Label each filter box with the header the user sees, and search the DISPLAYED
     # value: the link columns show a name (after the URL '#'), not the raw URL; the
     # UniqID link icon has no text, so filter it by the adjacent UniqID value.
@@ -610,12 +657,16 @@ def samples_view(df, files_df):
                 "worms_status": "WoRMS_status", "uniq_id_url": "uniq_id_link"},
         display={"ncbi_url": _link_text(show["ncbi_url"]),
                  "worms_url": _link_text(show["worms_url"]),
+                 "tax_match": tax_lab, "worms_match": worms_lab,
                  "uniq_id_url": show["uniq_id"]})
     st.caption(f"{len(show)} of {len(df)} samples (full R1/R2 paths, taxid + "
                "lineage are in the CSV export). Select a row to list its files below.")
+    disp = show[on_screen].assign(tax_match=tax_lab.loc[show.index],
+                                  worms_match=worms_lab.loc[show.index])
     event = st.dataframe(
-        show[on_screen], width="stretch", hide_index=True,
-        on_select="rerun", selection_mode="single-row", key="samples_table",
+        disp, width="stretch", hide_index=True,
+        on_select="rerun", selection_mode="single-row",
+        key=f"samples_table_{hash(tuple(show.index))}",
         column_config={
             # Each source's matched name is a link (label = the name, carried in the
             # URL '#'-fragment) to its taxonomy page; the "* match" column is that
@@ -629,6 +680,7 @@ def samples_view(df, files_df):
     _download(show, f"{_config(DB_PATH, 'catalog_slug')}_samples.csv")
 
     sel = event.selection.rows if event and event.selection else []
+    sel = [i for i in sel if i < len(show)]
     if not sel:
         return
     r = show.iloc[sel[0]]
@@ -686,16 +738,19 @@ def projects_view(df, issues, integ_issues):
                "'owner_name' is the filesystem owner (a personal identifier).")
     event = st.dataframe(show[cols], width="stretch", hide_index=True,
                          on_select="rerun", selection_mode="single-row",
-                         key="projects_table")
+                         key=f"projects_table_{hash(tuple(show.index))}")
     _download(show, f"{_config(DB_PATH, 'catalog_slug')}_projects.csv")
 
     sel = event.selection.rows if event and event.selection else []
+    sel = [i for i in sel if i < len(show)]
     if sel:
         prow = show.iloc[sel[0]]
         pid = prow["project_id"]
         mstatus = prow["metadata_status"]
         if mstatus != "ok":
-            detail = prow.get("metadata_detail") or _MAPFILE_DETAIL.get(mstatus, "")
+            detail = prow.get("metadata_detail")
+            if not (pd.notna(detail) and detail):
+                detail = _MAPFILE_DETAIL.get(mstatus, "")
             st.warning(f"**Mapfile issue ({_MAPFILE_LABEL.get(mstatus, mstatus)}):** {detail}")
         # Disk/mapfile checks (data_check_issues) and integrity-check failures live in
         # different tables but are the same question to a user ("what's wrong with this
@@ -755,11 +810,13 @@ def files_view(df, samples_df):
                "'owner_name' is the filesystem owner (a personal identifier).")
     event = st.dataframe(
         show[on_screen], width="stretch", hide_index=True,
-        on_select="rerun", selection_mode="single-row", key="files_table",
+        on_select="rerun", selection_mode="single-row",
+        key=f"files_table_{hash(tuple(show.index))}",
         column_config={"n_reads": "reads", "integrity_date": "checked"})
     _download(show, f"{_config(DB_PATH, 'catalog_slug')}_files.csv")
 
     sel = event.selection.rows if event and event.selection else []
+    sel = [i for i in sel if i < len(show)]
     if not sel:
         return
     r = show.iloc[sel[0]]
@@ -850,7 +907,12 @@ def _composition_counts(db_path, mtime, chosen, rank_col, source, depth, include
 
 
 def taxonomy_view(db_path, mtime):
-    import plotly.express as px
+    try:
+        import plotly.express as px
+    except ImportError:
+        st.error("The Taxonomy view needs plotly. Install it with: conda env update "
+                 "-f environment.yml  (or: pip install 'seqledger[gui]')")
+        return
 
     df = load_taxonomy(db_path, mtime)  # cached; used only for the project list
     with st.sidebar:
@@ -884,7 +946,10 @@ def taxonomy_view(db_path, mtime):
     st.caption(f"{source}: {n_samples} samples across {n_proj} project(s); "
                f"run `{resolve_cmd}` to (re)populate. Unranked -> 'unknown'.")
     if not n_samples:
-        st.info(f"No resolved {source} taxonomy yet. Run `seqledger {resolve_cmd}`.")
+        if df.empty:
+            st.info("No samples in this catalog yet.")
+        else:
+            st.info(f"No resolved {source} taxonomy yet. Run `seqledger {resolve_cmd}`.")
         return
 
     # --- Hierarchy chart: sunburst or treemap ---
@@ -1320,9 +1385,15 @@ def main():
     mtime = os.path.getmtime(DB_PATH)
     st.caption(_catalog_caption(DB_PATH, mtime))
 
-    view_name = st.sidebar.radio(
-        "View", ["Projects", "Samples", "Files", "Taxonomy", "Grab & Go"])
     try:
+        missing = _missing_schema(DB_PATH)
+        if missing:
+            st.error("This catalog copy is older than this GUI (missing: "
+                     f"{', '.join(missing)}). Ask your data manager to run "
+                     "'seqledger init-db' on the master catalog and re-sync this copy.")
+            st.stop()
+        view_name = st.sidebar.radio(
+            "View", ["Projects", "Samples", "Files", "Taxonomy", "Grab & Go"])
         if view_name == "Samples":
             samples_view(load_samples(DB_PATH, mtime), load_files(DB_PATH, mtime))
         elif view_name == "Projects":

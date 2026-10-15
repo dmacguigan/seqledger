@@ -45,6 +45,16 @@ by an adversarial review. Highlights (specifics may still shift):
 
 ### Fixed
 
+- GUI: a selected row in the Samples, Projects, or Files table is cleared when the
+  filters change, instead of crashing or showing the wrong record.
+- GUI: a project with no stored mapfile detail shows the standard explanation
+  instead of "nan".
+- GUI: an older catalog copy missing tables or columns now shows a clear "run
+  init-db and re-sync" message instead of a database error.
+- GUI: match-type legends cover every stored value (WoRMS `review_*` types, NCBI
+  `ambiguous`), and the Samples table shows the same readable labels as the charts.
+- GUI: the Taxonomy view explains how to install plotly when it is missing, and
+  says "No samples in this catalog yet." on an empty catalog.
 - Config values and filenames are now shell-quoted in generated qsub and rclone
   scripts, and newlines, carriage returns, and NUL are rejected in config values
   and FASTQ filenames, closing command injection via the catalog or a mapfile.

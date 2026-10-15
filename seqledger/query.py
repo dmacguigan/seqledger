@@ -1,5 +1,7 @@
 """Read-only lookups over the catalog (CLI convenience)."""
 
+from .db import get_config
+
 
 def find_by_uniq_id(conn, uniq_id):
     return conn.execute(
@@ -26,15 +28,15 @@ def unresolved_taxa(conn):
 
 
 def unbacked_projects(conn):
-    """Projects with no verified pdrive backup."""
+    """Projects with no verified backup at the configured backup_location."""
     return conn.execute(
         """SELECT p.project_id,
                   COALESCE(b.verified, 0) AS verified,
                   b.n_files, b.n_mismatch
            FROM projects p
-           LEFT JOIN backups b ON b.project_id = p.project_id AND b.location = 'pdrive'
+           LEFT JOIN backups b ON b.project_id = p.project_id AND b.location = ?
            WHERE COALESCE(b.verified, 0) = 0
-           ORDER BY p.project_id""").fetchall()
+           ORDER BY p.project_id""", (get_config(conn, "backup_location"),)).fetchall()
 
 
 def mismatched_files(conn):

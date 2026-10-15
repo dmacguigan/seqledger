@@ -247,3 +247,17 @@ def test_dot_slash_and_backslash_paths_match(tmp_path):
     assert summary["matched"] == 4
     assert conn.execute(
         "SELECT COUNT(*) FROM files WHERE md5_match=1").fetchone()[0] == 4
+
+
+def test_backup_location_config_honored(tmp_path):
+    from seqledger import query as oquery
+    conn, _ = _setup_project(tmp_path)
+    odb.set_config(conn, "backup_location", "nas")
+    entries = _md5_entries()
+    ochecksums.load_checksums(conn, write_md5(str(tmp_path / "s.md5"), entries),
+                              write_md5(str(tmp_path / "p.md5"), entries))
+    locs = [r[0] for r in conn.execute("SELECT location FROM backups")]
+    assert locs == ["nas"]
+    assert oquery.unbacked_projects(conn) == []
+    odb.set_config(conn, "backup_location", "pdrive")
+    assert [r["project_id"] for r in oquery.unbacked_projects(conn)] == ["genohub-1_X"]

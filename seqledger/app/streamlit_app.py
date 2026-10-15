@@ -286,7 +286,7 @@ def load_samples(db_path, mtime):
                     AND f.direction = 'R2') AS r2_owner
         FROM samples s
         JOIN projects p ON p.project_id = s.project_id
-        LEFT JOIN backups b ON b.project_id = s.project_id AND b.location = 'pdrive'
+        LEFT JOIN backups b ON b.project_id = s.project_id AND b.location = '{_config(db_path, 'backup_location').replace("'", "''")}'
         LEFT JOIN taxa t ON t.taxon = s.taxon
         ORDER BY s.project_id, s.sample_id"""))
 

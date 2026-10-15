@@ -141,8 +141,20 @@ wait $SPID
 """
 
 
+def _prune_rundir(rundir, max_age_days=7):
+    cutoff = time.time() - max_age_days * 86400
+    for name in os.listdir(rundir):
+        p = os.path.join(rundir, name)
+        if (name.startswith("gui_") and name.endswith((".job", ".log", ".ready"))
+                and os.path.isfile(p) and os.path.getmtime(p) < cutoff):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
 def launch_qsub(db_path, port=8501, login_host=LOGIN_HOST, queue="lTIO.sq",
-                conda_env="seqledger", mem_gb=2, wait=300):
+                conda_env="seqledger", mem_gb=6, wait=300):
     """Submit the GUI as a job on the I/O queue, wait for it to serve, print the tunnel.
 
     Runs on a Hydra login node. Returns after printing the tunnel; the GUI keeps
@@ -151,6 +163,7 @@ def launch_qsub(db_path, port=8501, login_host=LOGIN_HOST, queue="lTIO.sq",
     db_abs = os.path.abspath(db_path)
     rundir = os.path.join(os.path.expanduser("~"), ".seqledger_gui")
     os.makedirs(rundir, exist_ok=True)
+    _prune_rundir(rundir)
     stamp = f"{os.getpid()}_{int(time.time())}"
     ready = os.path.join(rundir, f"gui_{stamp}.ready")
     log_path = os.path.join(rundir, f"gui_{stamp}.log")

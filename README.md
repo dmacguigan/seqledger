@@ -377,7 +377,8 @@ This submits a Streamlit job to `lTIO.sq`, waits for it to start, then prints th
 exact `ssh -N -L <port>:127.0.0.1:<port> -J you@hydra-login01.si.edu you@<node>` command to the
 screen (no digging through the job log). Run that on your local computer, open
 `http://localhost:<port>`, and `qdel <job>` when done. lTIO caps jobs at 72h wall
-and 2 concurrent jobs/user, so the GUI stops after 72h -- just resubmit.
+and 2 concurrent jobs/user, so the GUI stops after 72h -- just resubmit. The job
+requests `--mem` GB (default 6). If the job dies at once, raise --mem.
 
 **Alternative -- run it directly** on an interactive node against a Scratch copy of
 the DB (compute nodes don't mount Store):
@@ -470,6 +471,7 @@ seqledger --db catalog.db init-db --set io_queue=sThM.q   # any key
 | a batch integrity/copy job "fails" near 72h | it hit the lTIO wall/CPU cap; the per-project checkpoint is saved — just **re-`qsub`** (integrity resumes; rclone `--checksum` skips copied files). |
 | `integrity --collect` skips a file "no .done marker" | that project's job is still running or was killed — let it finish (or resubmit), then re-collect. |
 | GUI: tunnel connects but browser shows "connection refused" | the Streamlit server didn't start — usually the conda env wasn't activated, or (with `--qsub`) the job is still starting; check the printed job log. |
+| GUI won't start: `gui --qsub` job vanishes right after starting | it ran out of memory (the job is killed past `h_vmem`, default 6 GB). If the job dies at once, raise --mem, e.g. `gui --qsub --mem 10`. |
 | a CLI command prints a one-line `error:` | re-run with `--debug` to see the full traceback. |
 
 ## Schema

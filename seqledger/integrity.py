@@ -84,7 +84,7 @@ def check_fastq_gz(path, chunk_size=1 << 20):
 
     if not ended_nl:  # final record without a trailing newline still counts
         n_lines += 1
-    elif tail == b"\n\n":  # tolerate a single trailing blank line (common editor artifact)
+    elif tail == b"\n\n" and n_lines % 4 != 0:  # tolerate a single trailing blank line (common editor artifact)
         n_lines -= 1
     if n_lines % 4 != 0:
         return {"status": FORMAT_ERROR, "n_reads": None,
@@ -200,29 +200,35 @@ def _run_checks(to_check, cached, jobs, progress, recheck, on_checked=None, resu
               "ones that already passed) ...", flush=True)
     checked = skipped = 0
     with ThreadPoolExecutor(max_workers=jobs) as ex:
-        futures = {ex.submit(_check_path, p, cached.get(pk), recheck): pk
-                   for pk, p in to_check.items()}
-        pending = set(futures)
-        start = time.monotonic()
-        # Poll with a timeout so a heartbeat (with elapsed time) prints every few
-        # seconds even while the first large file is still being read -- otherwise
-        # there is no output until the first whole file completes.
-        while pending:
-            done, pending = wait(pending, timeout=5, return_when=FIRST_COMPLETED)
-            for fut in done:
-                pk = futures[fut]
-                res = fut.result()
-                results[pk] = res
-                if res.get("cached"):
-                    skipped += 1
-                else:
-                    checked += 1
-                    if on_checked:
-                        on_checked(pk, res)
+        try:
+            futures = {ex.submit(_check_path, p, cached.get(pk), recheck): pk
+                       for pk, p in to_check.items()}
+            pending = set(futures)
+            start = time.monotonic()
+            # Poll with a timeout so a heartbeat (with elapsed time) prints every few
+            # seconds even while the first large file is still being read -- otherwise
+            # there is no output until the first whole file completes.
+            while pending:
+                done, pending = wait(pending, timeout=5, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    pk = futures[fut]
+                    res = fut.result()
+                    results[pk] = res
+                    if res.get("cached"):
+                        skipped += 1
+                    else:
+                        checked += 1
+                        if on_checked:
+                            on_checked(pk, res)
+                if progress:
+                    print(f"\r  checked {checked}, skipped {skipped}, "
+                          f"{checked + skipped}/{total} files "
+                          f"({int(time.monotonic() - start)}s)   ", end="", flush=True)
+        except KeyboardInterrupt:
+            ex.shutdown(wait=False, cancel_futures=True)
             if progress:
-                print(f"\r  checked {checked}, skipped {skipped}, "
-                      f"{checked + skipped}/{total} files "
-                      f"({int(time.monotonic() - start)}s)   ", end="", flush=True)
+                print()
+            raise
     if progress:
         print()
     return results
@@ -344,16 +350,23 @@ def check_catalog_integrity(conn, seqdata_root=None, only_project=None, jobs=Non
     rows = _select_rows(conn, only_project)
 
     since_commit = [0, time.monotonic()]
+    n_done = [0]
 
     def on_checked(pk, res):
         # Persist as we go so a kill mid-run keeps completed work.
         _persist(conn, pk, res, today)
+        n_done[0] += 1
         since_commit[0] += 1
         if since_commit[0] >= _COMMIT_EVERY or time.monotonic() - since_commit[1] >= _COMMIT_SECS:
             conn.commit()
             since_commit[:] = [0, time.monotonic()]
 
-    results = _compute_results(rows, seqdata_root, jobs, progress, recheck, on_checked)
+    try:
+        results = _compute_results(rows, seqdata_root, jobs, progress, recheck, on_checked)
+    except KeyboardInterrupt:
+        conn.commit()
+        print(f"interrupted: {n_done[0]} file(s) checked, results saved", flush=True)
+        raise
     # Persist no-path UNCHECKED files (never entered the worker pool). Cached rows
     # are already correct in the DB; re-persisting an UNCHECKED row is idempotent.
     for pk, res in results.items():

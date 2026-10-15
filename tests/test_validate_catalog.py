@@ -218,3 +218,55 @@ def test_check_data_files_falls_back_to_stored_root(tmp_path):
     conn, root = _setup(tmp_path, rows)
     data = oval.check_data_files(conn, "genohub-1_X", "genohub-1_X", None)
     assert data["status"] == "ok"
+
+
+
+def test_deleted_project_folder_persists_unchecked(tmp_path):
+    import shutil
+    from seqledger.cli import _data_label
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    os.remove(os.path.join(root, "genohub-1_X", "s1_2.fastq.gz"))
+    oval.validate_catalog(conn, seqdata_root=root)
+    shutil.rmtree(os.path.join(root, "genohub-1_X"))
+    data = oval.validate_catalog(conn, seqdata_root=root)["genohub-1_X"]["data"]
+    assert data["status"] == "unchecked" and "data folder not found" in data["detail"]
+    assert "data folder not found" in _data_label(data)
+    row = conn.execute(
+        "SELECT data_check_status FROM projects WHERE project_id='genohub-1_X'").fetchone()
+    assert row["data_check_status"] == "unchecked"
+    assert conn.execute("SELECT COUNT(*) FROM data_check_issues").fetchone()[0] == 0
+
+
+def test_unmounted_root_not_persisted(tmp_path):
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    oval.validate_catalog(conn, seqdata_root=root)
+    data = oval.validate_catalog(conn, seqdata_root=str(tmp_path / "gone"))["genohub-1_X"]["data"]
+    assert data["status"] == "unchecked" and "detail" not in data
+    row = conn.execute(
+        "SELECT data_check_status FROM projects WHERE project_id='genohub-1_X'").fetchone()
+    assert row["data_check_status"] == "ok"
+
+
+def test_unmapped_file_is_issue_with_mapfile(tmp_path):
+    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
+    conn, root = _setup(tmp_path, rows)
+    conn.execute("UPDATE files SET sample_pk=NULL WHERE filename='s1_2.fastq.gz'")
+    data = oval.validate_catalog(conn, seqdata_root=root)["genohub-1_X"]["data"]
+    assert data["status"] == "issues" and data["n_orphan"] == 1 and data["n_unmapped"] == 1
+
+
+def test_no_mapfile_reports_unmapped(tmp_path):
+    from seqledger.cli import _data_label
+    root = str(tmp_path / "raw_sequence_data")
+    make_project(root, "genohub-2_Y", "unused.csv",
+                 [("s1", "a_1.fastq.gz", "a_2.fastq.gz", "G", "U")])
+    os.remove(os.path.join(root, "unused.csv"))
+    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
+    odb.init_db(conn)
+    os.makedirs(str(tmp_path / "meta"))
+    oingest.ingest_tree(conn, root, str(tmp_path / "meta"))
+    data = oval.validate_catalog(conn, seqdata_root=root)["genohub-2_Y"]["data"]
+    assert data["status"] == "ok" and data["n_unmapped"] == 2
+    assert "2 file(s) not linked to any sample (no mapfile)" in _data_label(data)

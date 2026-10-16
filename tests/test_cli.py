@@ -165,7 +165,7 @@ def test_prune_projects_refusal_prints_reason_exits_2(tmp_path, capsys):
     rc = _run(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root,
                "--skip-taxonomy", "--prune-projects", "--yes"])
     assert rc == 2
-    assert "refusing to prune 2 of 3" in capsys.readouterr().out
+    assert "would remove 2 of 3" in capsys.readouterr().out
 
 
 def test_prune_guard_refusal_exits_2(tmp_path):

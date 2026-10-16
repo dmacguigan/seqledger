@@ -501,8 +501,8 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
 
     orphans = stats["orphan_samples"]
     if prune and not force and len(existing) > 2 and len(orphans) > len(existing) / 2:
-        reason = (f"refusing to prune {len(orphans)} of {len(existing)} samples (>50%); "
-                  "check the mapfile is complete (force=True overrides)")
+        reason = (f"refusing to prune {len(orphans)} of {len(existing)} samples "
+                  "(more than half); check the mapfile is complete")
         stats["prune_reason"] = reason
         findings.append(Finding(WARN, reason))
         status = "warn"
@@ -692,8 +692,9 @@ def prune_missing_projects(conn, seqdata_root, metadata_root, force=False):
     # the caller explicitly forces it.
     if not force and gone and len(gone) > len(in_db) / 2:
         return {"pruned": [], "skipped": True,
-                "reason": (f"refusing to prune {len(gone)} of {len(in_db)} projects "
-                           "under this root (>50%); pass force=True to override")}
+                "reason": (f"this would remove {len(gone)} of {len(in_db)} projects "
+                           "under this root (more than half); check the mount and the "
+                           "mapfile folder")}
     conn.executemany("DELETE FROM projects WHERE project_id=?", [(p,) for p in gone])
     conn.commit()
     return {"pruned": gone, "skipped": False}

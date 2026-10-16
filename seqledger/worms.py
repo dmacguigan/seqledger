@@ -18,6 +18,7 @@ import io
 import json
 import os
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -166,7 +167,7 @@ def match_names(names, cache, marine_only=False, progress=False):
     if progress and misses:
         cached_n = len(names) - len(misses)
         print(f"  querying WoRMS for {len(misses)} name(s)"
-              + (f" ({cached_n} cached)" if cached_n else ""))
+              + (f" ({cached_n} cached)" if cached_n else ""), file=sys.stderr)
     done = 0
     for chunk in _chunks(misses, _BATCH):
         got = _fetch_match_chunk(chunk, marine_only)
@@ -175,10 +176,11 @@ def match_names(names, cache, marine_only=False, progress=False):
             _cache_put(cache, n, out[n])
         cache.commit()
         done += len(chunk)
-        if progress:
-            print(f"\r  matched {done}/{len(misses)} name(s)", end="", flush=True)
-    if progress and misses:
-        print()
+        if progress and sys.stderr.isatty():
+            print(f"\r  matched {done}/{len(misses)} name(s)", end="", file=sys.stderr,
+                  flush=True)
+    if progress and misses and sys.stderr.isatty():
+        print(file=sys.stderr)
     return out
 
 
@@ -271,12 +273,13 @@ def resolve_taxa_worms(taxa, taxdir, progress=True, marine_only=False):
         # Mapping records -> rows is cheap, except the occasional synonym-follow fetch;
         # the counter reflects it every 100 taxa (and at the end) like the NCBI path.
         total = len(taxa)
+        tty = progress and sys.stderr.isatty()
         for i, t in enumerate(taxa, 1):
             out.append(_resolve_one(t, matches.get(cleans[t], []), cache))
-            if progress and (i % 100 == 0 or i == total):
-                print(f"\r  resolved {i}/{total} taxa", end="", flush=True)
-        if progress and total:
-            print()
+            if tty and (i % 100 == 0 or i == total):
+                print(f"\r  resolved {i}/{total} taxa", end="", file=sys.stderr, flush=True)
+        if tty and total:
+            print(file=sys.stderr)
     finally:
         cache.close()
     return out

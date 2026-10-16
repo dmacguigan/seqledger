@@ -32,7 +32,7 @@ from seqledger import validate as ovalidate
 
 def _print_rows(rows, cols):
     if not rows:
-        print("(none)")
+        print("(none)", file=sys.stderr)
         return
     print("\t".join(cols))
     for r in rows:
@@ -62,7 +62,7 @@ def _resolve_root(conn, value, key, label):
         return value
     cfg = odb.get_config(conn, key)
     if cfg:
-        print(f"(using configured {label}: {cfg})")
+        print(f"(using configured {label}: {cfg})", file=sys.stderr)
         return cfg
     return None
 
@@ -243,7 +243,8 @@ def cmd_ingest(args):
     tot_pruned_s = tot_pruned_f = 0
     for project_id, findings, status, stats in results:
         print(f"[{icons[status]}] {project_id}")
-        if stats.get("metadata_status") and stats["metadata_status"] != "ok":
+        if stats.get("metadata_status") not in (None, "ok", "missing_mapfile",
+                                                "missing_seqdata"):
             print(f"    MAPFILE [{stats['metadata_status']}]: {stats['metadata_detail']}")
         for f in findings:
             print(f"    {f.level}: {f.message}")
@@ -307,8 +308,9 @@ def cmd_ingest(args):
                     review = _review_path(
                         os.path.dirname(os.path.abspath(args.db)) or ".", "taxonomy_review")
                     otax.write_review_csv(tax_results, review)
-                    print(f"review + edit confirmed_taxid in: {review}")
-                    print(f"then: seqledger --db {args.db} taxonomy apply --review {review}")
+                    if n_flag:
+                        print(f"review + edit confirmed_taxid in: {review}")
+                        print(f"then: seqledger --db {args.db} taxonomy apply --review {review}")
 
     # Refresh the stored data-files + checksum state. Ingest changes what's
     # cataloged -- new/changed rows and, with --prune, deletions -- so the
@@ -347,6 +349,7 @@ def cmd_ingest(args):
     conn.close()
     if results:
         print("\ningest complete.")
+    if tot_new or tot_changed or tot_files:
         print(f"next: run the integrity check when ready (slow; reads every byte) --\n"
               f"  seqledger --db {args.db} integrity{root_flag}\n"
               f"  or on Hydra: seqledger --db {args.db} integrity --batch{root_flag}")
@@ -366,7 +369,7 @@ def cmd_checksums(args):
     conn.close()
     print(f"updated md5 for {summary['matched']} file(s) "
           f"across {len(summary['projects'])} project(s)")
-    for w in summary["warnings"]:
+    for w in sorted(summary["warnings"]):
         print(f"    WARN: {w}")
     return 1 if n_mismatch else 0
 
@@ -597,7 +600,7 @@ def cmd_integrity(args):
 
     results = ointegrity.check_catalog_integrity(
         conn, seqdata_root=args.seqdata_root, only_project=args.project, jobs=args.jobs,
-        recheck=args.force)
+        progress=sys.stderr.isatty(), recheck=args.force)
     conn.close()
     return _print_integrity(results)
 
@@ -643,8 +646,9 @@ def _resolve_ncbi(otax, conn, args, taxdir, scope, base):
         return
     review = _review_path(base, "taxonomy_review")
     otax.write_review_csv(results, review)
-    print(f"  review + edit confirmed_taxid in: {review}")
-    print(f"  then: seqledger --db {args.db} taxonomy apply --review {review}")
+    if n_flag:
+        print(f"  review + edit confirmed_taxid in: {review}")
+        print(f"  then: seqledger --db {args.db} taxonomy apply --review {review}")
 
 
 def _resolve_worms(oworms, conn, args, taxdir, scope, base):
@@ -661,8 +665,9 @@ def _resolve_worms(oworms, conn, args, taxdir, scope, base):
         return
     review = _review_path(base, "worms_review")
     oworms.write_review_csv_worms(results, review)
-    print(f"  review + edit confirmed_aphia_id in: {review}")
-    print(f"  then: seqledger --db {args.db} taxonomy apply --source worms --review {review}")
+    if n_flag:
+        print(f"  review + edit confirmed_aphia_id in: {review}")
+        print(f"  then: seqledger --db {args.db} taxonomy apply --source worms --review {review}")
 
 
 def cmd_taxonomy(args):

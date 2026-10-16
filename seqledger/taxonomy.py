@@ -13,6 +13,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import sys
 import tarfile
 import urllib.error
 import urllib.request
@@ -118,7 +119,7 @@ def ensure_taxdump(taxdir, force=False):
     if os.path.exists(names) and os.path.exists(nodes) and not force:
         return taxdir
     tgz = os.path.join(taxdir, "taxdump.tar.gz")
-    print(f"Downloading NCBI taxdump (~72 MB) to {taxdir} ...")
+    print(f"Downloading NCBI taxdump (~72 MB) to {taxdir} ...", file=sys.stderr)
     _download(TAXDUMP_URL, tgz)
     with tarfile.open(tgz) as tf:
         for member in ("names.dmp", "nodes.dmp"):
@@ -532,7 +533,7 @@ def _dedup(taxa):
 def resolve_taxa(taxa, taxdir, progress=True):
     """Resolve a list of raw Taxon strings (deduped). Returns list of dicts.
 
-    With progress=True, prints a live 'resolved i/total' counter to stdout.
+    With progress=True, prints a live 'resolved i/total' counter to a terminal stderr.
     """
     build_index(taxdir)
     idx = open_index(taxdir)
@@ -540,13 +541,14 @@ def resolve_taxa(taxa, taxdir, progress=True):
     taxa = _dedup(taxa)
     total = len(taxa)
     out = []
+    progress = progress and sys.stderr.isatty()
     try:
         for i, t in enumerate(taxa, 1):
             out.append(_resolve_one(idx, t, name_index))
             if progress and (i % 100 == 0 or i == total):
-                print(f"\r  resolved {i}/{total} taxa", end="", flush=True)
+                print(f"\r  resolved {i}/{total} taxa", end="", file=sys.stderr, flush=True)
         if progress and total:
-            print()
+            print(file=sys.stderr)
     finally:
         idx.close()
     return out

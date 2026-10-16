@@ -657,7 +657,7 @@ def ingest_tree(conn, seqdata_root, metadata_root, prune=False, force=False):
     return results
 
 
-def prune_missing_projects(conn, seqdata_root, metadata_root, force=False):
+def prune_missing_projects(conn, seqdata_root, metadata_root, force=False, dry_run=False):
     """Delete catalog projects that vanished from BOTH roots (folder + mapfile gone).
 
     Only for auto-discovery. Cascades to the project's samples/files/backups/etc.
@@ -669,6 +669,7 @@ def prune_missing_projects(conn, seqdata_root, metadata_root, force=False):
         cap) -- unless force=True is passed to override.
     Only projects whose stored seqdata_root matches this run's root are eligible, so
     projects ingested from a different root are never touched.
+    dry_run=True lists what would go (no delete, no blast-radius cap).
     Returns {"pruned": [project_id, ...], "skipped": bool[, "reason": str]}.
     """
     # A missing/unmounted root reads as "empty" from a plain listdir, so refuse
@@ -687,6 +688,8 @@ def prune_missing_projects(conn, seqdata_root, metadata_root, force=False):
     in_db = [r["project_id"] for r in conn.execute(
         "SELECT project_id FROM projects WHERE seqdata_root=?", (abs_root,))]
     gone = sorted(pid for pid in in_db if pid not in discovered)
+    if dry_run:
+        return {"pruned": gone, "skipped": False, "dry_run": True}
     # Blast-radius cap: removing more than half of this root's projects (or all of
     # them) likely signals a partial/broken mount, not a real cleanup. Refuse unless
     # the caller explicitly forces it.

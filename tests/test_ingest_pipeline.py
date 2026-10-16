@@ -211,3 +211,29 @@ def test_ingest_prune_refreshes_data_files_report(tmp_path, capsys):
     assert conn.execute("SELECT data_check_n_missing FROM projects").fetchone()[0] == 0
     assert conn.execute("SELECT data_check_status FROM projects").fetchone()[0] == "ok"
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 2
+
+
+def test_ingest_previews_vanished_project_then_prunes(tmp_path, capsys):
+    root = str(tmp_path / "raw_sequence_data")
+    os.makedirs(root, exist_ok=True)
+    db = str(tmp_path / "cat.db")
+    _cli.main(["--db", db, "init-db"])
+    for pid in ("genohub-1_A", "genohub-2_B"):
+        make_project(root, pid, f"{pid}_mapfile.csv",
+                     [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")])
+    base = ["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root,
+            "--skip-taxonomy"]
+    _cli.main(base)
+    __import__("shutil").rmtree(os.path.join(root, "genohub-2_B"))
+    os.remove(os.path.join(root, "genohub-2_B_mapfile.csv"))
+    capsys.readouterr()
+
+    rc, args = _cli.run(base)
+    assert rc == 0 and args.prunable == (0, 1)
+    assert ("1 project(s) gone from disk and mapfiles: genohub-2_B (kept;"
+            in capsys.readouterr().out)
+    conn = odb.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
+
+    _cli.main(base + ["--prune-projects", "--yes"])
+    assert [r[0] for r in conn.execute("SELECT project_id FROM projects")] == ["genohub-1_A"]

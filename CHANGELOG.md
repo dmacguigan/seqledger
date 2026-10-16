@@ -15,6 +15,8 @@ by an adversarial review. Highlights (specifics may still shift):
 - `LICENSE` file (MIT) at the repository root, matching the `pyproject.toml`
   license declaration.
 - This `CHANGELOG.md`.
+- Plain `ingest` (auto-discovery) now lists projects gone from both disk and the
+  mapfile folder, so `--prune-projects` has a preview before it deletes them.
 
 ### Changed
 

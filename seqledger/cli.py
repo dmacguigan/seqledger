@@ -870,7 +870,7 @@ def build_parser():
     dbp.add_argument("--db", default=argparse.SUPPRESS, help="path to catalog SQLite DB")
     dbp.add_argument("-v", "--verbose", action="count", default=argparse.SUPPRESS,
                      help="more detail: -v per project, -vv per file")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd")
 
     pdb = sub.add_parser(
         "init-db", parents=[dbp],
@@ -1066,7 +1066,13 @@ def build_parser():
 def run(argv=None):
     """Like main, but returns (rc, args) so callers can read what the command set."""
     argv = sys.argv[1:] if argv is None else argv
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.cmd is None:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            from seqledger import interactive
+            return interactive.run(args.db), args
+        parser.error("choose a command (or run 'seqledger' in a terminal for a menu)")
     if args.cmd != "init-db" or args.show:
         _require_db(args.db, any(a == "--db" or a.startswith("--db=") for a in argv))
     try:

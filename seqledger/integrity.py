@@ -287,16 +287,18 @@ def aggregate_from_db(conn, project_ids, log=True):
     summaries = {}
     for pid in project_ids:
         rows = conn.execute(
-            "SELECT integrity_status, n_reads, direction, sample_pk "
-            "FROM files WHERE project_id=?", (pid,)).fetchall()
+            "SELECT integrity_status, n_reads, direction, sample_pk, rel_path "
+            "FROM files WHERE project_id=? ORDER BY rel_path", (pid,)).fetchall()
         s = {"n_files": 0, "n_ok": 0, "n_gzip_error": 0, "n_format_error": 0,
-             "n_unchecked": 0, "parity_warnings": []}
+             "n_unchecked": 0, "parity_warnings": [], "bad_files": []}
         mates = {}  # sample_pk -> {direction: [n_reads, ...]} (a sample may be lane-split)
         for r in rows:
             status = r["integrity_status"] or UNCHECKED
             s["n_files"] += 1
             s[{OK: "n_ok", GZIP_ERROR: "n_gzip_error", FORMAT_ERROR: "n_format_error",
                UNCHECKED: "n_unchecked"}.get(status, "n_unchecked")] += 1
+            if status != OK:
+                s["bad_files"].append((r["rel_path"], status))
             if status == OK:
                 if r["n_reads"] == 0:
                     s["parity_warnings"].append(

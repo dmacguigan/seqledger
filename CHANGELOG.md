@@ -65,6 +65,16 @@ by an adversarial review. Highlights (specifics may still shift):
   note goes to stderr; `checksums` warnings print in sorted order; a missing
   mapfile is reported once; the "next: integrity" and taxonomy "review + edit"
   hints are shown only when there is something new to check or review.
+- New `-v` / `-vv` flags (before or after the subcommand). By default `ingest`,
+  `checksums`, `validate`, and `integrity` print one short summary: counts, a
+  Problems list capped at 10 projects, and one "Next:" step when there is one; no
+  section banners or per-project OK rows. `-v` lists every project, `-vv` every
+  per-file warning, sorted by path. `integrity` now names damaged files and
+  `checksums` names files whose md5 differs (up to 10 by default).
+- Plainer wording in CLI output: "on disk, not in mapfile" (was orphan), "backup
+  not yet verified" (was incomplete/uncompared), "bad FASTQ line count" (was
+  format-error), "R1 and R2 read counts differ" (was read-count parity).
+  `query -h` explains the column names.
 
 ### Fixed
 

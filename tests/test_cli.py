@@ -100,7 +100,7 @@ def test_ingest_zero_projects_not_complete(tmp_path, capsys):
     db = str(tmp_path / "cat.db")
     _run(["--db", db, "init-db"])
     _run(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root])
-    assert "ingest complete" not in capsys.readouterr().out
+    assert "Next:" not in capsys.readouterr().out
 
 
 def test_ingest_next_hint_omits_root_when_configured(tmp_path, capsys):
@@ -109,7 +109,7 @@ def test_ingest_next_hint_omits_root_when_configured(tmp_path, capsys):
     _run(["--db", db, "init-db", "--seqdata-root", root, "--metadata-root", root])
     assert _run(["--db", db, "ingest", "--skip-taxonomy"]) == 0
     out = capsys.readouterr().out
-    assert "ingest complete" in out and "<raw_sequence_data>" not in out
+    assert "Next: seqledger" in out and "<raw_sequence_data>" not in out
 
 
 def test_ingest_offline_taxonomy_no_traceback(tmp_path, monkeypatch, capsys):
@@ -196,3 +196,57 @@ def test_batch_qsub_failure_exits_2(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", _fake_qsub(1))
     assert _run(["--db", db, "integrity", "--batch",
                  "--batch-dir", str(tmp_path / "b")]) == 2
+
+
+@pytest.mark.parametrize("argv,n", [
+    (["validate"], 0), (["-v", "validate"], 1), (["validate", "-vv"], 2),
+    (["-vv", "ingest"], 2), (["taxonomy", "resolve", "-v"], 1)])
+def test_verbose_flag_before_or_after_subcommand(argv, n):
+    assert cli.build_parser().parse_args(argv).verbose == n
+
+
+def test_ingest_default_is_summary_and_v_lists_projects(tmp_path, capsys):
+    db, root = _ingested(tmp_path, ("genohub-1_A", "genohub-2_B"))
+    out = capsys.readouterr().out
+    assert "Ingest: 2 project(s) (1 OK, 1 with problems" in out  # shared UniqID
+    assert "[OK]" not in out and "==" not in out and "genohub-1_A:" not in out
+    _run(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root,
+          "--skip-taxonomy", "-v"])
+    out = capsys.readouterr().out
+    assert "nothing new or changed" in out
+    assert "  genohub-1_A: " in out and "  genohub-2_B: " in out
+
+
+def test_checksums_warnings_sorted_and_mismatch_named(tmp_path, capsys):
+    db, _ = _ingested(tmp_path, ("genohub-1_A", "genohub-2_B"))
+    files = [f"genohub-{n}/s1_{d}.fastq.gz" for n in ("2_B", "1_A") for d in (2, 1)]
+    s = write_md5(str(tmp_path / "s.md5"), [("a" * 32, f) for f in files])
+    p = write_md5(str(tmp_path / "p.md5"), [("a" * 32, files[0]), ("b" * 32, files[1])])
+    capsys.readouterr()
+    assert _run(["--db", db, "checksums", "--store", s, "--pdrive", p, "--force"]) == 1
+    out = capsys.readouterr().out
+    assert "genohub-2_B/s1_1.fastq.gz: md5 differs" in out
+    assert "missing from P-drive" not in out
+    _run(["--db", db, "-vv", "checksums", "--store", s, "--pdrive", p, "--force"])
+    detail = [ln.strip() for ln in capsys.readouterr().out.splitlines()
+              if ln.startswith("      ")]
+    assert detail == sorted(detail) and len(detail) == 3
+
+
+def test_query_empty_prints_none_on_stderr(tmp_path, capsys):
+    db, _ = _ingested(tmp_path)
+    capsys.readouterr()
+    _run(["--db", db, "query", "mismatches"])
+    out, err = capsys.readouterr()
+    assert out == "" and "(none)" in err
+
+
+def test_integrity_default_names_damaged_file(tmp_path, capsys):
+    db, root = _ingested(tmp_path)
+    with open(os.path.join(root, "genohub-1_A", "s1_1.fastq.gz"), "wb") as f:
+        f.write(b"not gzip at all")
+    capsys.readouterr()
+    assert _run(["--db", db, "integrity"]) == 1
+    out = capsys.readouterr().out
+    assert "1 damaged file:" in out and "genohub-1_A/s1_1.fastq.gz: gzip error" in out
+    assert "[OK]" not in out

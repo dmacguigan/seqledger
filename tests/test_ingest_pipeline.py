@@ -37,11 +37,11 @@ def test_ingest_runs_taxonomy_and_datafiles_not_integrity(tmp_path, capsys):
     assert os.path.exists(os.path.join(os.path.dirname(db), "taxonomy_review.csv"))
 
     out = capsys.readouterr().out
-    assert "== ingest ==" in out and "== integrity ==" not in out
-    assert "== taxonomy resolve ==" in out and "ingest complete." in out
+    assert "==" not in out and "[OK]" not in out
+    assert "Species names: 1 looked up" in out
     assert "1 new sample(s)" in out
-    # points the user at the separate integrity step
-    assert "integrity" in out and "--batch" in out
+    # points the user at the separate integrity step; Hydra batch hint only at -v
+    assert "Next: seqledger" in out and "integrity" in out and "--batch" not in out
 
 
 def test_ingest_skip_taxonomy(tmp_path):
@@ -106,8 +106,8 @@ def test_reingest_unchanged_gates_taxonomy(tmp_path, capsys):
 
     cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
     out = capsys.readouterr().out
-    assert "0 new sample(s), 0 changed, 0 new file(s)" in out
-    assert "(no new taxa to resolve)" in out
+    assert "nothing new or changed" in out
+    assert "Species names" not in out and "Next:" not in out
 
     conn = odb.connect(db)
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
@@ -165,6 +165,8 @@ def test_reingest_reports_dropped_sample_as_orphan(tmp_path, capsys):
         ("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1"),
     ])
     cli.main(["--db", db, "ingest", mf, "--skip-taxonomy"])
+    assert "1 sample(s) in catalog, not in mapfile" in capsys.readouterr().out
+    cli.main(["--db", db, "-vv", "ingest", mf, "--skip-taxonomy"])
     out = capsys.readouterr().out
     assert "sample s2 in catalog but not in this CSV" in out
 

@@ -541,3 +541,17 @@ def test_prune_refuses_to_drop_most_samples_unless_forced(tmp_path):
     assert res[0][3]["pruned_samples"] == ["s2", "s3"]
     assert res[0][3]["pruned_files"] == 4
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
+
+
+def test_prune_dry_run_lists_without_deleting(tmp_path):
+    seq, meta = _roots(tmp_path)
+    for pid in ("genohub-1_A", "genohub-2_B"):
+        make_project(seq, pid, f"{pid}_mapfile.csv",
+                     [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
+    conn = _fresh_db(tmp_path)
+    oingest.ingest_tree(conn, seq, meta)
+    __import__("shutil").rmtree(os.path.join(seq, "genohub-2_B"))
+    os.remove(os.path.join(meta, "genohub-2_B_mapfile.csv"))
+    res = oingest.prune_missing_projects(conn, seq, meta, dry_run=True)
+    assert res["pruned"] == ["genohub-2_B"] and res["skipped"] is False
+    assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2

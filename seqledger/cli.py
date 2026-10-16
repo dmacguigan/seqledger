@@ -284,6 +284,18 @@ def cmd_ingest(args):
                       f"(gone from disk + metadata): {', '.join(pr['pruned'])}")
             else:
                 print("no vanished projects to prune")
+    n_gone = 0
+    if not args.map_file and not args.prune_projects:
+        gone = oingest.prune_missing_projects(
+            conn, args.seqdata_root, args.metadata_root, dry_run=True)["pruned"]
+        n_gone = len(gone)
+        if gone:
+            more = f" ... +{n_gone - 10} more" if n_gone > 10 else ""
+            print(f"{n_gone} project(s) gone from disk and mapfiles: "
+                  f"{', '.join(gone[:10])}{more} (kept; --prune-projects removes them)")
+    n_kept = 0 if args.prune else sum(
+        len(s.get("orphan_samples", ())) for _, _, st, s in results if st != "fail")
+    args.prunable = (n_kept, n_gone)
 
     if not args.skip_taxonomy:
         print("\n== taxonomy resolve ==")
@@ -909,19 +921,24 @@ def build_parser():
     return p
 
 
-def main(argv=None):
+def run(argv=None):
+    """Like main, but returns (rc, args) so callers can read what the command set."""
     argv = sys.argv[1:] if argv is None else argv
     args = build_parser().parse_args(argv)
     if args.cmd != "init-db" or args.show:
         _require_db(args.db, any(a == "--db" or a.startswith("--db=") for a in argv))
     try:
-        return args.func(args) or 0
+        return args.func(args) or 0, args
     except (OSError, sqlite3.Error, ValueError, RuntimeError) as e:
         if getattr(args, "debug", False):
             raise
         # A plain one-line message instead of a raw traceback for the common
         # mistakes (missing path/DB, bad input). Use --debug to see the traceback.
         sys.exit(f"error: {e}")
+
+
+def main(argv=None):
+    return run(argv)[0]
 
 
 if __name__ == "__main__":

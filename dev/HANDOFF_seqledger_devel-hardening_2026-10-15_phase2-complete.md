@@ -1,10 +1,10 @@
-# Handoff: seqledger review-driven hardening, Phases 1 and 2 complete
+# Handoff: seqledger review-driven hardening, Phases 1, 2, and 2b complete
 
 - **Branch:** `devel`, cut from `main` at `f3174b6`.
-- **Tip:** `919a158`, 32 commits ahead of `main`. **Not pushed. No PR.**
-- **Tests:** `python -m pytest -q` gives 291 passed, 1 skipped (the skip needs plotly; it runs in the `seqledger` conda env).
+- **Tip:** `c0d99dd` (Phase 2b merged 2026-10-16). **Not pushed. No PR.**
+- **Tests:** `python -m pytest -q` gives 311 passed, 1 skipped (the skip needs plotly). The base miniforge3 `python` on this machine has every dependency; there is no `seqledger` conda env here.
 - **Date:** 2026-10-15
-- **Status:** Phases 1 and 2 of the fix plan are merged. Phase 2b (CLI output and interactive mode) is planned and approved by the maintainer but not started. Phases 3 and 4 wait.
+- **Status:** Phases 1, 2, and 2b are merged. Phase 3 (ponytail simplification) is next, then Phase 4 (docs).
 
 ## How work is organised
 
@@ -51,7 +51,13 @@ Repro and PoC scripts from the reviews are in the session scratchpad only (not i
 - Keep the "Claude (Anthropic)" author entry in `pyproject.toml`.
 - CLI improvement plan (Phase 2b below) approved as proposed.
 
-## Next: Phase 2b, CLI output and interactive mode (approved, not started)
+### Phase 2b (three branches, merged 2026-10-16)
+
+- `fix/prune-preview`: plain `ingest` lists projects gone from both disk and the mapfile folder (`prune_missing_projects(..., dry_run=True)`); `cmd_ingest` sets `args.prunable = (n_kept_samples, n_gone_projects)`; `cli.run(argv) -> (rc, args)` wrapper, `main` returns `run(argv)[0]`.
+- `feat/cli-output`: progress counters only when stderr is a terminal, and on stderr; "(none)" and notes on stderr so `query` stdout is pure TSV; checksums warnings sorted; `-v`/`-vv` (count flag on the top parser and the `dbp` parent, SUPPRESS trick); every non-query command prints one summary block with a Problems list capped at 10 via `_problems()`, a "Next:" line only when there is one, and "More detail: add -v" only when something was hidden; integrity names damaged files (`aggregate_from_db` adds `bad_files`); plain-language labels (orphan, uncompared, format-error, parity) and the force=True refusal reworded; `query -h` epilog explains the column names. `integrity --collect` and `--batch` still print one line per project (deliberate).
+- `feat/interactive`: `seqledger/interactive.py` (240 lines, stdlib only). `seqledger` with no subcommand on a TTY opens the menu; off a TTY it prints usage and exits 2. Each action echoes "Same thing without the menu:" with the real command and runs it through `cli.run`. Prune only after a plain ingest and a typed DELETE. Taxonomy apply is not in the menu (prints the command instead). README paragraph points novices at the menu and `export SEQLEDGER_DB`.
+
+## Done: Phase 2b, CLI output and interactive mode (for reference, the original plan)
 
 Design and evidence are in `03_cli_output_and_interactive.md`. Four or five small branches in this order:
 
@@ -76,7 +82,7 @@ From `01_ponytail_audit.md` and `00_SUMMARY.md`:
 
 ## Small leftovers not yet assigned
 
-- No CLI `--force` for the ingest prune cap; the refusal text still says "pass force=True" (goes into `fix/output-trim`).
+- No CLI `--force` for the ingest prune cap (the refusal text is now plain language; a flag was deliberately not added).
 - Integrity batch JSON is not archived after collect.
 - `log_path` and `job_name` config values with spaces now raise at `--set` (by design of the allowlist; document it).
 - Non-ASCII characters remain in UI strings in `seqledger/app/streamlit_app.py` and `seqledger/gui.py` (core modules are clean).
@@ -85,7 +91,7 @@ From `01_ponytail_audit.md` and `00_SUMMARY.md`:
 
 ## Resuming
 
-1. `git switch devel`, confirm tip `919a158`, run `python -m pytest -q` in the `seqledger` conda env.
-2. Start Phase 2b with branch 1 above. Brief implementers from `03_cli_output_and_interactive.md` sections A3, A4, and B.
-3. After Phase 2b merges, Phase 3, then Phase 4.
+1. `git switch devel`, confirm tip `c0d99dd`, run `python -m pytest -q` (base python works).
+2. Start Phase 3 (`chore/ponytail-safe`, then `chore/ponytail-legacy`) from `01_ponytail_audit.md`; the interactive menu now imports `cli.run`, `cli._default_taxdir`, `taxonomy._index_path`, and `db.get_config`, so keep those names when simplifying.
+3. Then Phase 4.
 4. Release only when the maintainer decides: bump `version` in `pyproject.toml`, turn `[Unreleased]` into a dated heading, PR `devel` to `main`, then merge `main` back into `devel`.

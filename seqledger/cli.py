@@ -32,7 +32,7 @@ from seqledger import validate as ovalidate
 
 def _print_rows(rows, cols):
     if not rows:
-        print("(none)")
+        print("(none)", file=sys.stderr)
         return
     print("\t".join(cols))
     for r in rows:
@@ -51,18 +51,19 @@ def _require_db(db_path, db_given=True):
                  "Data managers: create one with: seqledger --db PATH init-db")
 
 
-def _resolve_root(conn, value, key, label):
+def _resolve_root(conn, value, key, label, verbose=0):
     """A directory root: the CLI flag if given, else the catalog's configured value.
 
     seqdata_root / metadata_root are stored at init-db, so ingest/validate/integrity
-    can be run without repeating them. Prints a note when the configured value is
-    used so it's clear where the path came from. Returns None if neither is set.
+    can be run without repeating them. At -v, notes (on stderr) when the configured
+    value is used so it's clear where the path came from. Returns None if neither is set.
     """
     if value:
         return value
     cfg = odb.get_config(conn, key)
     if cfg:
-        print(f"(using configured {label}: {cfg})")
+        if verbose:
+            print(f"(using configured {label}: {cfg})", file=sys.stderr)
         return cfg
     return None
 
@@ -190,13 +191,14 @@ def cmd_ingest(args):
     (or `integrity --batch` on Hydra's I/O queue) when you want it.
     """
     from seqledger import taxonomy as otax
-    icons = {"pass": "OK", "warn": "WARN", "fail": "FAIL"}
+    v = args.verbose
     conn = odb.connect(args.db)
     odb.init_db(conn)
 
     # Fall back to the roots configured at init-db when the flags aren't given.
-    args.seqdata_root = _resolve_root(conn, args.seqdata_root, "seqdata_root", "seqdata-root")
-    args.metadata_root = _resolve_root(conn, args.metadata_root, "metadata_root", "metadata-root")
+    args.seqdata_root = _resolve_root(conn, args.seqdata_root, "seqdata_root", "seqdata-root", v)
+    args.metadata_root = _resolve_root(conn, args.metadata_root, "metadata_root",
+                                       "metadata-root", v)
 
     # Destructive: confirm before deleting rows a (possibly truncated) source no
     # longer lists. Bypass with --yes for scripts / non-interactive runs; a
@@ -216,7 +218,6 @@ def cmd_ingest(args):
             sys.exit(f"{what} '{path}' does not exist or is not a directory -- check "
                      "the path and that the filesystem (Store/NAS) is mounted.")
 
-    print("== ingest ==")
     if args.map_file:
         _need_dir(args.seqdata_root, "--seqdata-root")
         results = oingest.ingest_map_file(
@@ -239,14 +240,17 @@ def cmd_ingest(args):
     n_fail = 0
     refused = False
     ingested = []  # project_ids that did not FAIL
+    rows = {}  # project_id -> (problem parts, disk findings, other findings)
+    notes = []  # extra summary lines
     tot_new = tot_changed = tot_files = 0
     tot_pruned_s = tot_pruned_f = 0
     for project_id, findings, status, stats in results:
-        print(f"[{icons[status]}] {project_id}")
-        if stats.get("metadata_status") and stats["metadata_status"] != "ok":
-            print(f"    MAPFILE [{stats['metadata_status']}]: {stats['metadata_detail']}")
-        for f in findings:
-            print(f"    {f.level}: {f.message}")
+        msgs = [f.message for f in findings]
+        disk = [m for m in msgs if "not found on disk" in m or "on disk is not referenced" in m]
+        other = [m for m in msgs if m not in disk]
+        parts = ["rejected"] if status == "fail" else []
+        parts += other if len(other) == 1 else [f"{len(other)} mapfile warnings"] if other else []
+        rows[project_id] = (parts, disk, other)
         if status == "fail":
             n_fail += 1
             continue
@@ -257,33 +261,28 @@ def cmd_ingest(args):
         tot_pruned_s += len(stats["pruned_samples"])
         tot_pruned_f += stats["pruned_files"]
         if args.prune:
-            for sid in stats["pruned_samples"]:
-                print(f"    pruned: sample {sid} (dropped from CSV) and its files")
-            if stats["pruned_files"]:
-                print(f"    pruned: {stats['pruned_files']} stale file row(s) no longer in CSV")
-        else:
-            for sid in stats["orphan_samples"]:
-                print(f"    WARN: sample {sid} in catalog but not in this CSV "
-                      f"(kept; re-run with --prune to remove)")
-    print(f"ingested {len(results)} project(s), {n_fail} rejected (FAIL); "
-          f"{tot_new} new sample(s), {tot_changed} changed, {tot_files} new file(s)")
-    if args.prune and (tot_pruned_s or tot_pruned_f):
-        print(f"pruned {tot_pruned_s} sample(s) and {tot_pruned_f} stale file row(s)")
+            other += [f"pruned: sample {sid} (dropped from CSV) and its files"
+                      for sid in stats["pruned_samples"]]
+        elif stats["orphan_samples"]:
+            parts.append(f"{len(stats['orphan_samples'])} sample(s) in catalog, not in "
+                         "mapfile (kept; --prune removes)")
+            other += [f"sample {sid} in catalog but not in this CSV "
+                      "(kept; re-run with --prune to remove)" for sid in stats["orphan_samples"]]
 
     if args.prune_projects:
-        print("\n== prune projects ==")
         if args.map_file:
-            print("(ignored: --prune-projects only applies to auto-discovery, not a map file)")
+            notes.append("--prune-projects ignored: it only applies to auto-discovery, "
+                         "not a map file")
         else:
             pr = oingest.prune_missing_projects(conn, args.seqdata_root, args.metadata_root)
             if pr["skipped"]:
                 refused = True
-                print(f"refusing to prune: {pr['reason']}")
+                notes.append(f"refusing to prune projects: {pr['reason']}")
             elif pr["pruned"]:
-                print(f"deleted {len(pr['pruned'])} vanished project(s) "
-                      f"(gone from disk + metadata): {', '.join(pr['pruned'])}")
+                notes.append(f"deleted {len(pr['pruned'])} vanished project(s) "
+                             f"(gone from disk and mapfiles): {', '.join(pr['pruned'])}")
             else:
-                print("no vanished projects to prune")
+                notes.append("no vanished projects to prune")
     n_gone = 0
     if not args.map_file and not args.prune_projects:
         gone = oingest.prune_missing_projects(
@@ -291,36 +290,34 @@ def cmd_ingest(args):
         n_gone = len(gone)
         if gone:
             more = f" ... +{n_gone - 10} more" if n_gone > 10 else ""
-            print(f"{n_gone} project(s) gone from disk and mapfiles: "
-                  f"{', '.join(gone[:10])}{more} (kept; --prune-projects removes them)")
+            notes.append(f"{n_gone} project(s) gone from disk and mapfiles: "
+                         f"{', '.join(gone[:10])}{more} (kept; --prune-projects removes them)")
     n_kept = 0 if args.prune else sum(
         len(s.get("orphan_samples", ())) for _, _, st, s in results if st != "fail")
     args.prunable = (n_kept, n_gone)
 
-    if not args.skip_taxonomy:
-        print("\n== taxonomy resolve ==")
-        if not _has_unresolved_taxa(conn):
-            print("(no new taxa to resolve)")
-        else:
-            taxdir = args.taxdir or _default_taxdir(args.db)
-            # The metadata ingest above is already committed. Resolving new taxa may
-            # download the NCBI taxdump (first run / offline node); don't let that
-            # failure surface as a traceback that makes the user think ingest failed.
-            try:
-                tax_results = otax.resolve_catalog(conn, taxdir, scope="new")
-            except (OSError, URLError, tarfile.TarError, RuntimeError) as e:
-                tax_results = None
-                print(f"(taxonomy skipped: {e}) -- ingest succeeded; run "
-                      f"`seqledger --db {args.db} taxonomy resolve` when ready.")
-            if tax_results is not None:
-                n_flag = sum(1 for d in tax_results if d["match_type"] != "exact")
-                print(f"resolved {len(tax_results)} taxa ({n_flag} fuzzy/unresolved)")
-                if tax_results:
-                    review = _review_path(
-                        os.path.dirname(os.path.abspath(args.db)) or ".", "taxonomy_review")
-                    otax.write_review_csv(tax_results, review)
-                    print(f"review + edit confirmed_taxid in: {review}")
-                    print(f"then: seqledger --db {args.db} taxonomy apply --review {review}")
+    if not args.skip_taxonomy and _has_unresolved_taxa(conn):
+        taxdir = args.taxdir or _default_taxdir(args.db)
+        # The metadata ingest above is already committed. Resolving new taxa may
+        # download the NCBI taxdump (first run / offline node); don't let that
+        # failure surface as a traceback that makes the user think ingest failed.
+        try:
+            tax_results = otax.resolve_catalog(conn, taxdir, scope="new")
+        except (OSError, URLError, tarfile.TarError, RuntimeError) as e:
+            tax_results = None
+            notes.append(f"Species names: taxonomy skipped ({e}); ingest succeeded, run "
+                         f"`seqledger --db {args.db} taxonomy resolve` when ready")
+        if tax_results:
+            n_flag = sum(1 for d in tax_results if d["match_type"] != "exact")
+            review = _review_path(
+                os.path.dirname(os.path.abspath(args.db)) or ".", "taxonomy_review")
+            otax.write_review_csv(tax_results, review)
+            notes.append(f"Species names: {len(tax_results)} looked up, "
+                         + (f"{n_flag} need a check -> {os.path.basename(review)} "
+                            "(next to the catalog)" if n_flag else "all matched"))
+            if n_flag and v:
+                notes.append(f"  edit confirmed_taxid in {review}, then: "
+                             f"seqledger --db {args.db} taxonomy apply --review {review}")
 
     # Refresh the stored data-files + checksum state. Ingest changes what's
     # cataloged -- new/changed rows and, with --prune, deletions -- so the
@@ -329,16 +326,10 @@ def cmd_ingest(args):
     # makes a --prune actually clear the removed files from the report.
     pruned_pids = [pid for pid, _, _, s in results
                    if s["pruned_samples"] or s["pruned_files"]]
+    val = {}
     if ingested:
-        print("\n== data-files check ==")
         if args.seqdata_root:
             val = ovalidate.validate_catalog(conn, seqdata_root=args.seqdata_root)
-            for pid in ingested:
-                r = val.get(pid)
-                if r:
-                    tag = "pass" if r["data"]["status"] == "ok" else "warn"
-                    print(f"[{icons[tag]}] {pid}: data-files {_data_label(r['data'])}, "
-                          f"checksum {_checksum_label(r['checksum'])}")
         elif pruned_pids:
             # No disk access to recompute; drop the now-stale issue rows for
             # pruned projects so the report does not show removed files.
@@ -349,38 +340,130 @@ def cmd_ingest(args):
                     "data_check_n_missing=NULL, data_check_n_orphan=NULL WHERE project_id=?",
                     (pid,))
             conn.commit()
-            print("cleared stale data-files issues for pruned project(s); "
-                  "pass --seqdata-root (or run `validate --seqdata-root`) to recompute")
+            notes.append("cleared stale data-files issues for pruned project(s); "
+                         "pass --seqdata-root (or run `validate --seqdata-root`) to recompute")
         else:
-            print("(skipped: pass --seqdata-root to check files on disk)")
+            notes.append("Files on disk: skipped: pass --seqdata-root to check them")
 
     root_flag = ("" if odb.get_config(conn, "seqdata_root")
                  else " --seqdata-root <raw_sequence_data>")
     conn.close()
-    if results:
-        print("\ningest complete.")
-        print(f"next: run the integrity check when ready (slow; reads every byte) --\n"
-              f"  seqledger --db {args.db} integrity{root_flag}\n"
-              f"  or on Hydra: seqledger --db {args.db} integrity --batch{root_flag}")
+
+    n_ok = unverified = 0
+    out = []
+    for pid, (parts, disk, other) in sorted(rows.items()):
+        r = val.get(pid) if pid in ingested else None
+        if r:
+            if r["data"]["status"] == "issues" or r["data"].get("detail"):
+                parts.append(_data_label(r["data"]))
+            if r["checksum"]["status"] == "mismatch":
+                parts.append(_checksum_label(r["checksum"]))
+            disk = [f.message for f in r["notes"]]
+        else:
+            miss = sum("not found on disk" in m for m in disk)
+            if miss:
+                parts.append(f"{miss} file(s) in mapfile not on disk")
+            if len(disk) - miss:
+                parts.append(f"{len(disk) - miss} file(s) on disk, not in mapfile")
+        n_ok += not parts
+        if r and r["checksum"]["status"] == "incomplete":
+            unverified += 1
+            if v:
+                parts.append(_checksum_label(r["checksum"]))
+        out.append((pid, "; ".join(parts), [d for d in disk + other if d not in parts]))
+
+    changed = tot_new or tot_changed or tot_files
+    if changed:
+        print(f"Ingest: {len(results)} project(s) ({n_ok} OK, "
+              f"{len(results) - n_ok - n_fail} with problems, {n_fail} rejected)")
+        print(f"  {tot_new} new sample(s), {tot_changed} changed, {tot_files} new file(s)")
+    elif results:
+        print(f"Ingest: {len(results)} project(s), nothing new or changed"
+              + (f" ({n_fail} rejected)." if n_fail else "."))
+    if args.prune and (tot_pruned_s or tot_pruned_f):
+        print(f"  pruned {tot_pruned_s} sample(s) and {tot_pruned_f} stale file row(s)")
+    for line in notes:
+        print(f"  {line}")
+    hidden = _problems(out, v)
+    if unverified:
+        print(f"Backups not yet verified: {unverified} project(s)")
+    if changed:
+        print(f"Next: seqledger --db {args.db} integrity{root_flag}   "
+              "(checks files for damage; slow)")
+        if v:
+            print(f"  or on Hydra: seqledger --db {args.db} integrity --batch{root_flag}")
+    if hidden:
+        print(_MORE[v])
     return 2 if refused else 1 if n_fail else 0
 
 
 def cmd_checksums(args):
+    v = args.verbose
     conn = odb.connect(args.db)
     odb.init_db(conn)
     summary = ochecksums.load_checksums(
         conn, args.store, args.pdrive, source=args.source, only_project=args.project,
         full_reset=args.full, force=args.force)
     ps = summary["projects"]
-    n_mismatch = conn.execute(
-        f"SELECT COUNT(*) FROM files WHERE md5_match=0 AND project_id IN "
-        f"({','.join('?' * len(ps))})", ps).fetchone()[0]
+    mism = [r[0] for r in conn.execute(
+        f"SELECT rel_path FROM files WHERE md5_match=0 AND project_id IN "
+        f"({','.join('?' * len(ps))}) ORDER BY rel_path", ps)]
     conn.close()
-    print(f"updated md5 for {summary['matched']} file(s) "
-          f"across {len(summary['projects'])} project(s)")
-    for w in summary["warnings"]:
-        print(f"    WARN: {w}")
-    return 1 if n_mismatch else 0
+    by_pid = {}
+    general = []
+    for w in sorted(summary["warnings"]):
+        m = re.match(r"(?:cataloged file ')?([^/' ]+)/", w)
+        if m:
+            by_pid.setdefault(m.group(1), []).append(w)
+        else:
+            general.append(w)
+    rows = []
+    for pid in sorted(set(ps) | set(by_pid)):
+        ws = by_pid.get(pid, [])
+        parts = [f"{n} file(s) {label}" for key, label in _CS_KINDS
+                 for n in [sum(key in w for w in ws)] if n]
+        rows.append((pid, "; ".join(parts), ws))
+    n_bad = sum(1 for r in rows if r[1] and r[0] in ps)
+    print(f"Backups: compared {summary['matched']} file(s) in {len(ps)} project(s); "
+          f"{len(ps) - n_bad} verified")
+    for w in general:
+        print(f"  WARNING: {w}")
+    _problems([(p, "md5 differs", []) for p in mism], v,
+              head=f"{len(mism)} file(s) differ between Store and P-drive:")
+    hidden = _problems(rows, v)
+    if n_bad:
+        print(f"Not verified: {n_bad} project(s). List them: seqledger --db {args.db} "
+              "query unbacked")
+    if hidden:
+        print(_MORE[v])
+    return 1 if mism else 0
+
+
+_CS_KINDS = (("MISMATCH", "differ between Store and P-drive"),
+             ("missing from Store", "missing from the Store listing"),
+             ("missing from P-drive", "missing from the P-drive listing"),
+             ("absent from both", "in neither listing (backup not yet verified)"),
+             ("(orphan)", "on disk, not in mapfile"))
+_MORE = ("More detail: add -v (per project) or -vv (per file)",
+         "More detail: add -vv (per file)")
+
+
+def _problems(rows, verbose, cap=10, head=None):
+    """Print (name, problem, detail lines) rows; return True if detail was left out.
+
+    Default: rows with a problem, capped at `cap`. -v: every row. -vv: plus detail.
+    """
+    shown = rows if verbose else [r for r in rows if r[1]]
+    if shown:
+        print(head or ("Projects:" if verbose else "Problems:"))
+    for name, prob, detail in shown[:None if verbose else cap]:
+        print(f"  {name}: {prob or 'OK'}")
+        for d in sorted(detail, key=lambda d: d.split("'", 1)[-1]) if verbose > 1 else ():
+            print(f"      {d}")
+    more = 0 if verbose else len(shown) - cap
+    if more > 0:
+        print(f"  ... and {more} more; add -v to list all")
+    return more > 0 or (verbose < 2 and any(r[2] for r in shown))
 
 
 def _data_label(data):
@@ -392,25 +475,27 @@ def _data_label(data):
         return f"unchecked ({data['detail']})" if data.get("detail") else "unchecked"
     parts = []
     if data.get("n_missing"):
-        parts.append(f"{data['n_missing']} missing")
+        parts.append(f"{data['n_missing']} file(s) in mapfile not on disk")
     if data.get("n_orphan"):
-        parts.append(f"{data['n_orphan']} orphan")
+        parts.append(f"{data['n_orphan']} file(s) on disk, not in mapfile")
     return ", ".join(parts) or "issues"
 
 
 def _checksum_label(cs):
     if cs["status"] == "verified":
-        return "verified"
+        return "backup verified"
     if cs["status"] == "mismatch":
-        return f"{cs['n_mismatch']} mismatch"
+        return f"{cs['n_mismatch']} file(s) differ between Store and P-drive"
     if cs["status"] == "incomplete":
-        return f"incomplete ({cs['n_uncompared']} uncompared)"
+        return f"backup not yet verified ({cs['n_uncompared']} file(s))"
     return "no files"
 
 
 def cmd_validate(args):
+    v = args.verbose
     conn = odb.connect(args.db)
-    args.seqdata_root = _resolve_root(conn, args.seqdata_root, "seqdata_root", "seqdata-root")
+    args.seqdata_root = _resolve_root(conn, args.seqdata_root, "seqdata_root",
+                                      "seqdata-root", v)
     results = ovalidate.validate_catalog(conn, seqdata_root=args.seqdata_root)
     n_unscanned = 0 if args.seqdata_root else conn.execute(
         "SELECT COUNT(*) FROM projects WHERE seqdata_root IS NULL OR seqdata_root=''"
@@ -419,33 +504,74 @@ def cmd_validate(args):
     if not results:
         print("catalog is empty")
         return 0
+    rows = []
+    n_ok = unverified = 0
+    for pid in sorted(results):
+        r = results[pid]
+        parts = []
+        if r["data"]["status"] == "issues" or r["data"].get("detail"):
+            parts.append(_data_label(r["data"]))
+        if r["checksum"]["status"] == "mismatch":
+            parts.append(_checksum_label(r["checksum"]))
+        shared = sum("shared across projects" in f.message for f in r["notes"])
+        if shared:
+            parts.append(f"{shared} UniqID(s) shared with other projects")
+        incomplete = r["checksum"]["status"] == "incomplete"
+        n_ok += not parts and not incomplete
+        unverified += incomplete
+        if v and (incomplete or not parts):
+            parts.append(_checksum_label(r["checksum"]))
+        rows.append((pid, "; ".join(parts), [f.message for f in r["notes"]]))
+    print(f"Checked {len(results)} project(s): {n_ok} fully OK")
     if n_unscanned:
-        print(f"(data-files check skipped for {n_unscanned} project(s) with no stored "
-              "seqdata root: pass --seqdata-root to scan disk)\n")
-    for project_id in sorted(results):
-        r = results[project_id]
-        print(f"{project_id}"
-              f"\n    data-files: {_data_label(r['data'])}"
-              f"\n    checksum:   {_checksum_label(r['checksum'])}")
-        for f in r["notes"]:
-            print(f"    {f.level}: {f.message}")
+        print(f"  files on disk not checked for {n_unscanned} project(s) with no stored "
+              "seqdata root: pass --seqdata-root to scan disk")
+    hidden = _problems(rows, v)
+    if unverified:
+        print(f"Backups not yet verified: {unverified} project(s). List them: "
+              f"seqledger --db {args.db} query unbacked")
+    if hidden:
+        print(_MORE[v])
     return int(any(r["data"]["status"] == "issues" or r["checksum"]["status"] == "mismatch"
                    for r in results.values()))
 
 
-def _print_integrity(results):
+_INTEGRITY_LABELS = {"gzip_error": "gzip error", "format_error": "bad FASTQ line count",
+                     "unchecked": "not checked (not found on disk or unreadable)"}
+
+
+def _print_integrity(results, verbose=0):
     if not results:
         print("no cataloged files to check")
         return 0
-    icons = {"pass": "OK", "warn": "WARN", "fail": "FAIL"}
-    for project_id in sorted(results):
-        s = results[project_id]
-        print(f"[{icons[s['status']]}] {project_id}: {s['n_files']} file(s), "
-              f"{s['n_ok']} ok, {s['n_gzip_error']} gzip-error, "
-              f"{s['n_format_error']} format-error, {s['n_unchecked']} unchecked")
-        for w in s["parity_warnings"]:
-            print(f"    WARN: read-count parity: {w}")
-    return int(any(s["n_gzip_error"] or s["n_format_error"] for s in results.values()))
+    s_all = list(results.values())
+    n_files = sum(s["n_files"] for s in s_all)
+    n_unch = sum(s["n_unchecked"] for s in s_all)
+    bad = [(p, _INTEGRITY_LABELS[st], []) for pid in sorted(results)
+           for p, st in results[pid].get("bad_files", []) if st in ("gzip_error", "format_error")]
+    print(f"Integrity: {n_files} file(s) in {len(results)} project(s): "
+          f"{sum(s['n_ok'] for s in s_all)} OK, {len(bad)} damaged, {n_unch} not checked")
+    if n_files and n_unch == n_files:
+        print("  none were found on disk (is --seqdata-root correct, and are the files "
+              "mounted?)")
+    _problems(bad, verbose, head=f"{len(bad)} damaged file{'' if len(bad) == 1 else 's'}:")
+    rows = []
+    for pid in sorted(results):
+        s = results[pid]
+        n_bad = s["n_gzip_error"] + s["n_format_error"]
+        empty = sum("0 reads" in w for w in s["parity_warnings"])
+        parts = [f"{n} {label}" for n, label in (
+            (n_bad if verbose else 0, "damaged file(s)"),
+            (s["n_unchecked"], "file(s) not checked"),
+            (empty, "empty file(s)"),
+            (len(s["parity_warnings"]) - empty, "sample(s) where R1 and R2 read counts differ"))
+            if n]
+        detail = s["parity_warnings"] + [f"{p}: {_INTEGRITY_LABELS.get(st, st)}"
+                                         for p, st in s.get("bad_files", [])]
+        rows.append((pid, "; ".join(parts), detail))
+    if _problems(rows, verbose):
+        print(_MORE[verbose])
+    return int(any(s["n_gzip_error"] or s["n_format_error"] for s in s_all))
 
 
 def _safe_name(s):
@@ -586,12 +712,13 @@ def cmd_integrity(args):
 
     # Fall back to the seqdata root configured at init-db (used by the local run and
     # baked into batch job scripts). --collect doesn't touch disk, so it's harmless.
-    args.seqdata_root = _resolve_root(conn, args.seqdata_root, "seqdata_root", "seqdata-root")
+    args.seqdata_root = _resolve_root(conn, args.seqdata_root, "seqdata_root",
+                                      "seqdata-root", args.verbose)
 
     if args.collect:
         summaries = ointegrity.collect_json(conn, args.collect)
         conn.close()
-        return _print_integrity(summaries)
+        return _print_integrity(summaries, args.verbose)
 
     if args.batch:
         projects = ointegrity.list_projects(conn, args.project)
@@ -609,9 +736,9 @@ def cmd_integrity(args):
 
     results = ointegrity.check_catalog_integrity(
         conn, seqdata_root=args.seqdata_root, only_project=args.project, jobs=args.jobs,
-        recheck=args.force)
+        progress=sys.stderr.isatty(), recheck=args.force)
     conn.close()
-    return _print_integrity(results)
+    return _print_integrity(results, args.verbose)
 
 
 def cmd_query(args):
@@ -650,13 +777,14 @@ def _resolve_ncbi(otax, conn, args, taxdir, scope, base):
         otax.build_index(taxdir, force=True)
     results = otax.resolve_catalog(conn, taxdir, scope=scope)
     n_flag = sum(1 for d in results if d["match_type"] != "exact")
-    print(f"NCBI: resolved {len(results)} taxa ({n_flag} fuzzy/unresolved)")
+    print(f"NCBI: {len(results)} taxa looked up, {n_flag} need a check")
     if not results:
         return
     review = _review_path(base, "taxonomy_review")
     otax.write_review_csv(results, review)
-    print(f"  review + edit confirmed_taxid in: {review}")
-    print(f"  then: seqledger --db {args.db} taxonomy apply --review {review}")
+    if n_flag:
+        print(f"Next: edit confirmed_taxid in {review}, then: "
+              f"seqledger --db {args.db} taxonomy apply --review {review}")
 
 
 def _resolve_worms(oworms, conn, args, taxdir, scope, base):
@@ -668,13 +796,14 @@ def _resolve_worms(oworms, conn, args, taxdir, scope, base):
         print(f"WoRMS: skipped ({e}) -- network needed; retry when online.")
         return
     n_flag = sum(1 for d in results if d["worms_match_type"] not in ("exact", "confirmed"))
-    print(f"WoRMS: resolved {len(results)} taxa ({n_flag} non-exact/unresolved)")
+    print(f"WoRMS: {len(results)} taxa looked up, {n_flag} need a check")
     if not results:
         return
     review = _review_path(base, "worms_review")
     oworms.write_review_csv_worms(results, review)
-    print(f"  review + edit confirmed_aphia_id in: {review}")
-    print(f"  then: seqledger --db {args.db} taxonomy apply --source worms --review {review}")
+    if n_flag:
+        print(f"Next: edit confirmed_aphia_id in {review}, then: "
+              f"seqledger --db {args.db} taxonomy apply --source worms --review {review}")
 
 
 def cmd_taxonomy(args):
@@ -734,9 +863,13 @@ def build_parser():
                    help="path to catalog SQLite DB (default: $SEQLEDGER_DB, else catalog.db)")
     p.add_argument("--debug", action="store_true",
                    help="show the full traceback on error instead of a one-line message")
-    # Also accept --db after the subcommand; SUPPRESS keeps the top-level value when absent.
+    p.add_argument("-v", "--verbose", action="count", default=0,
+                   help="more detail: -v per project, -vv per file")
+    # Also accept --db / -v after the subcommand; SUPPRESS keeps the top-level value when absent.
     dbp = argparse.ArgumentParser(add_help=False)
     dbp.add_argument("--db", default=argparse.SUPPRESS, help="path to catalog SQLite DB")
+    dbp.add_argument("-v", "--verbose", action="count", default=argparse.SUPPRESS,
+                     help="more detail: -v per project, -vv per file")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pdb = sub.add_parser(
@@ -869,7 +1002,16 @@ def build_parser():
                "  unbacked      projects with no verified P-drive backup\n"
                "  mismatches    files whose Store and P-drive md5 differ\n"
                "  summary       one row per project (samples, files, checks, owner)\n"
-               "  taxa          taxa without an exact/confirmed NCBI match")
+               "  taxa          taxa without an exact/confirmed NCBI match\n"
+               "\n"
+               "columns:\n"
+               "  verified           1 if every file matched its P-drive copy\n"
+               "  data_check_status  last files-on-disk check: ok, issues, or unchecked\n"
+               "  n_mismatch         files whose Store and P-drive md5 differ\n"
+               "  n_uncompared       files whose backup is not yet verified\n"
+               "  owner_name         owner of the project's files on disk\n"
+               "\n"
+               "Output is tab-separated; \"(none)\" goes to stderr when nothing matches.")
     pq.add_argument("what", choices=["uniq-id", "search", "unbacked", "mismatches",
                                      "summary", "taxa"], help="lookup to run (listed below)")
     pq.add_argument("term", nargs="?", default="", help="search term for uniq-id / search")

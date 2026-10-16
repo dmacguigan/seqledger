@@ -70,9 +70,9 @@ def test_ingest_uses_configured_roots(tmp_path, capsys):
     # roots set only at init-db
     cli.main(["--db", db, "init-db", "--seqdata-root", seq, "--metadata-root", meta])
     # ingest with NO root flags -> must use the configured roots
-    cli.main(["--db", db, "ingest", "--skip-taxonomy"])
-    out = capsys.readouterr().out
-    assert "using configured seqdata-root" in out
-    assert "using configured metadata-root" in out
+    cli.main(["--db", db, "ingest", "--skip-taxonomy", "-v"])
+    err = capsys.readouterr().err
+    assert "using configured seqdata-root" in err
+    assert "using configured metadata-root" in err
     conn = odb.connect(db)
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1

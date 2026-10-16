@@ -23,6 +23,7 @@ import glob
 import gzip
 import json
 import os
+import sys
 import zlib
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -197,8 +198,9 @@ def _run_checks(to_check, cached, jobs, progress, recheck, on_checked=None, resu
     if progress:
         print(f"checking {total} cataloged file(s) on disk "
               "(reading every byte of new/changed files; skipping unchanged "
-              "ones that already passed) ...", flush=True)
+              "ones that already passed) ...", file=sys.stderr, flush=True)
     checked = skipped = 0
+    tty = progress and sys.stderr.isatty()
     with ThreadPoolExecutor(max_workers=jobs) as ex:
         try:
             futures = {ex.submit(_check_path, p, cached.get(pk), recheck): pk
@@ -220,17 +222,18 @@ def _run_checks(to_check, cached, jobs, progress, recheck, on_checked=None, resu
                         checked += 1
                         if on_checked:
                             on_checked(pk, res)
-                if progress:
+                if tty:
                     print(f"\r  checked {checked}, skipped {skipped}, "
                           f"{checked + skipped}/{total} files "
-                          f"({int(time.monotonic() - start)}s)   ", end="", flush=True)
+                          f"({int(time.monotonic() - start)}s)   ", end="", file=sys.stderr,
+                          flush=True)
         except KeyboardInterrupt:
             ex.shutdown(wait=False, cancel_futures=True)
-            if progress:
-                print()
+            if tty:
+                print(file=sys.stderr)
             raise
-    if progress:
-        print()
+    if tty:
+        print(file=sys.stderr)
     return results
 
 
@@ -284,16 +287,18 @@ def aggregate_from_db(conn, project_ids, log=True):
     summaries = {}
     for pid in project_ids:
         rows = conn.execute(
-            "SELECT integrity_status, n_reads, direction, sample_pk "
-            "FROM files WHERE project_id=?", (pid,)).fetchall()
+            "SELECT integrity_status, n_reads, direction, sample_pk, rel_path "
+            "FROM files WHERE project_id=? ORDER BY rel_path", (pid,)).fetchall()
         s = {"n_files": 0, "n_ok": 0, "n_gzip_error": 0, "n_format_error": 0,
-             "n_unchecked": 0, "parity_warnings": []}
+             "n_unchecked": 0, "parity_warnings": [], "bad_files": []}
         mates = {}  # sample_pk -> {direction: [n_reads, ...]} (a sample may be lane-split)
         for r in rows:
             status = r["integrity_status"] or UNCHECKED
             s["n_files"] += 1
             s[{OK: "n_ok", GZIP_ERROR: "n_gzip_error", FORMAT_ERROR: "n_format_error",
                UNCHECKED: "n_unchecked"}.get(status, "n_unchecked")] += 1
+            if status != OK:
+                s["bad_files"].append((r["rel_path"], status))
             if status == OK:
                 if r["n_reads"] == 0:
                     s["parity_warnings"].append(

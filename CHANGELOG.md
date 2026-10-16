@@ -17,6 +17,9 @@ by an adversarial review. Highlights (specifics may still shift):
 - This `CHANGELOG.md`.
 - Plain `ingest` (auto-discovery) now lists projects gone from both disk and the
   mapfile folder, so `--prune-projects` has a preview before it deletes them.
+- `seqledger` with no subcommand in a terminal opens a text menu for the common
+  tasks; each step prints the equivalent command. Off a terminal (cron, pipes)
+  it still prints usage and exits 2.
 
 ### Changed
 

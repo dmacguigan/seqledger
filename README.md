@@ -206,6 +206,11 @@ tests/                   pytest suite + fixture builders
 
 ## Usage
 
+Not sure where to start? Run `seqledger` with no arguments in a terminal for a
+menu; it shows the equivalent command for each step. Add
+`export SEQLEDGER_DB=/path/to/catalog.db` to your `~/.bashrc` so every command
+(and the menu) finds your catalog.
+
 ```bash
 # 1. create the catalog
 seqledger --db oceandna_catalog.db init-db

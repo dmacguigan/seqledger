@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from seqledger import rclone as orclone  # noqa: E402
 from seqledger import mitopilot as omito  # noqa: E402
 from seqledger import db as odb  # noqa: E402
+from seqledger import dismiss  # noqa: E402
 from seqledger import validate as ovalidate  # noqa: E402
 
 NCBI_TAX_URL = "https://www.ncbi.nlm.nih.gov/datasets/taxonomy/"
@@ -98,6 +99,7 @@ _ISSUE_LABEL = {
     "gzip error":           "gzip error",
     "format error":         "format error",
     "empty (0 reads)":      "empty (0 reads)",
+    "md5 mismatch":         "md5 mismatch",
 }
 _ISSUE_DETAIL = {
     "missing from disk":    "Sequence file is listed in the mapfile but was not found on disk.",
@@ -105,6 +107,7 @@ _ISSUE_DETAIL = {
     "gzip error":           "File is not valid gzip or is truncated (failed decompression / `gunzip -t`).",
     "format error":         "File decompresses but is not valid FASTQ (line count not a multiple of 4).",
     "empty (0 reads)":      "File passed the gzip/FASTQ check but contains 0 reads (empty file or failed transfer?).",
+    "md5 mismatch":         "Store and backup md5 differ for this file (one copy changed or is corrupt).",
 }
 
 # projects.metadata_status -> (short label, plain-english meaning). The full
@@ -172,6 +175,15 @@ def _config(db_path, key):
             con.close()
     except sqlite3.Error:
         return odb.CONFIG_DEFAULTS.get(key)
+
+
+def _dismiss_log_path(db_path):
+    return _config(db_path, "dismiss_log") or dismiss.default_log_path(db_path)
+
+
+@st.cache_data(ttl=60)
+def load_dismissals(path, mtime, size):
+    return dismiss.read(path)
 
 
 # A UniqID is sometimes a URL (e.g. a specimen record page). Render those as a
@@ -315,14 +327,40 @@ def load_integrity_issues(db_path, mtime):
                     WHEN 'gzip_error' THEN 'gzip error'
                     WHEN 'format_error' THEN 'format error'
                     ELSE 'empty (0 reads)' END AS kind,
-               f.filename, {_FULL_PATH} AS full_path,
+               f.rel_path AS filename, {_FULL_PATH} AS full_path,
                s.sample_id, f.direction, s.taxon, s.uniq_id
         FROM files f
         LEFT JOIN projects p ON p.project_id = f.project_id
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
         WHERE f.integrity_status IN ('gzip_error', 'format_error')
            OR (f.integrity_status = 'ok' AND f.n_reads = 0)
-        ORDER BY f.project_id, kind, f.filename"""))
+        ORDER BY f.project_id, kind, f.rel_path"""))
+
+
+@st.cache_data(ttl=60)
+def load_md5_issues(db_path, mtime):
+    return _with_uniqid_url(_sql(db_path, f"""
+        SELECT f.project_id, 'md5 mismatch' AS kind,
+               f.rel_path AS filename, {_FULL_PATH} AS full_path,
+               s.sample_id, f.direction, s.taxon, s.uniq_id
+        FROM files f
+        LEFT JOIN projects p ON p.project_id = f.project_id
+        LEFT JOIN samples s ON s.sample_pk = f.sample_pk
+        WHERE f.md5_match = 0
+        ORDER BY f.project_id, f.rel_path"""))
+
+
+def _issue_key(row):
+    return dismiss.file_key(row["project_id"], row["filename"], row["kind"])
+
+
+def _mark_issues(issues, dismissed):
+    out = issues.copy()
+    hits = [dismissed.get(_issue_key(r)) for r in out.to_dict("records")]
+    out["dismissed"] = pd.Series([h is not None for h in hits], index=out.index, dtype=bool)
+    for col, field in (("dismissed_by", "user"), ("dismissed_on", "time"), ("note", "note")):
+        out[col] = [(h or {}).get(field, "") for h in hits]
+    return out
 
 
 def backup_label(v):
@@ -359,10 +397,95 @@ def integrity_label(row):
     return "verified"
 
 
+def _rollup(live_label, full_label, n_dis, has_live, clear_label, show_dismissed):
+    if not n_dis:
+        return full_label
+    if show_dismissed:
+        return f"{full_label} ({n_dis} dismissed)"
+    return live_label + " *" if has_live else clear_label
+
+
+def _project_status(prow, issues, dismissed, show_dismissed):
+    status = prow["metadata_status"]
+    mapfile = _MAPFILE_LABEL.get(status, status)
+    if isinstance(status, str) and \
+            dismiss.project_key(prow["project_id"], status, prow["metadata_detail"]) in dismissed:
+        mapfile = mapfile + " (dismissed)" if show_dismissed else "OK *"
+
+    live = issues.loc[~issues["dismissed"], "kind"].value_counts()
+    dis = issues.loc[issues["dismissed"], "kind"].value_counts()
+
+    def n(counts, *kinds):
+        return int(sum(counts.get(k, 0) for k in kinds))
+
+    data = {"status": prow["data_check_status"], "n_missing": prow["data_check_n_missing"],
+            "n_orphan": prow["data_check_n_orphan"]}
+    data_full = ovalidate.data_label(data)
+    if prow["data_check_status"] == "issues":
+        lm, lo = n(live, "missing from disk"), n(live, "missing from mapfile")
+        data_files = _rollup(ovalidate.data_label({**data, "n_missing": lm, "n_orphan": lo}),
+                             data_full, n(dis, "missing from disk", "missing from mapfile"),
+                             lm + lo > 0, "OK *", show_dismissed)
+    else:
+        data_files = data_full
+
+    lb, le = n(live, "gzip error", "format error"), n(live, "empty (0 reads)")
+    rest = (int(prow["n_files"] or 0) - int(prow["n_integrity_ok"] or 0)
+            - int(prow["n_integrity_bad"] or 0))
+    integrity = _rollup(
+        integrity_label({**prow, "n_integrity_bad": lb, "n_integrity_empty": le}),
+        integrity_label(prow), n(dis, "gzip error", "format error", "empty (0 reads)"),
+        lb + le > 0, "OK *" if rest == 0 else f"incomplete ({rest} unchecked) *", show_dismissed)
+
+    lmm, n_unc = n(live, "md5 mismatch"), int(prow["n_uncompared"] or 0)
+    cs = {"n_files": prow["n_files"], "n_mismatch": prow["n_mismatch"], "n_uncompared": n_unc}
+    checksum = _rollup(
+        ovalidate.checksum_label({**cs, "n_mismatch": lmm}), ovalidate.checksum_label(cs),
+        n(dis, "md5 mismatch"), lmm > 0,
+        "OK *" if n_unc == 0 else f"incomplete ({n_unc} not compared) *", show_dismissed)
+
+    return {"mapfile": mapfile, "data_files": data_files, "checksum": checksum,
+            "integrity": integrity}
+
+
+_ERROR_LABELS = {"no mapfile", "no data folder", "broken mapfile", "no usable rows", "Mismatch",
+                 "gzip_error", "format_error", "gzip error", "format error", "empty (0 reads)",
+                 "missing from disk", "md5 mismatch"}
+_ERROR_PARTS = ("corrupt", "empty", "in mapfile not on disk", "differ between Store")
+_PENDING_LABELS = {"unchecked", "Not verified", "Not compared", "no files"}
+_PENDING_PREFIXES = ("incomplete", "backup not yet verified", "unchecked (")
+_TINT = {"error": "background-color: rgba(213, 94, 0, 0.30)",
+         "warning": "background-color: rgba(230, 159, 0, 0.35)",
+         "dismissed": "background-color: rgba(86, 180, 233, 0.35)",
+         "pending": "background-color: rgba(187, 187, 187, 0.35)",
+         "ok": ""}
+
+
+def _severity(label):
+    if not isinstance(label, str) or not label:
+        return "ok"
+    if label == "OK *" or label.endswith("(dismissed)"):
+        return "dismissed"
+    s = re.sub(r" \(\d+ dismissed\)$", "", label.removesuffix(" *"))
+    if s in _ERROR_LABELS or any(p in s for p in _ERROR_PARTS):
+        return "error"
+    if s in ("flagged rows", "missing from mapfile") or "not in mapfile" in s or \
+            all(t.strip() in ovalidate.FLAG_MESSAGES for t in s.split(";")):
+        return "warning"
+    if s in _PENDING_LABELS or s.startswith(_PENDING_PREFIXES):
+        return "pending"
+    return "ok"
+
+
+def _tint(df, columns):
+    return df.style.map(lambda v: _TINT[_severity(v)],
+                        subset=[c for c in columns if c in df.columns])
+
+
 @st.cache_data(ttl=60)
 def load_files(db_path, mtime):
     return _sql(db_path, f"""
-        SELECT f.project_id, s.sample_id, f.direction, f.filename,
+        SELECT f.project_id, s.sample_id, f.direction, f.filename, f.rel_path,
                {_FULL_PATH} AS full_path,
                f.size_bytes, f.owner_name,
                CASE f.md5_match WHEN 1 THEN 'Verified' WHEN 0 THEN 'Mismatch'
@@ -1007,17 +1130,24 @@ _PROBLEM_KINDS = ("corrupt", "empty", "missing")
 _SCRIPT_PREVIEW_FILES = 20
 
 
-def _file_problem(r):
-    """One file's state for the cart: missing | corrupt | empty | ok | unchecked."""
-    if r.get("missing_on_disk"):
-        return "missing"
+def _file_problem(r, dismissed=frozenset()):
+    """One file's state for the cart: missing | corrupt | empty | ok | unchecked | dismissed."""
     status = r.get("integrity_status")
-    if status in ("gzip_error", "format_error"):
-        return "corrupt"
-    if status == "ok":
+    if r.get("missing_on_disk"):
+        problem, kind = "missing", "missing from disk"
+    elif status in ("gzip_error", "format_error"):
+        problem, kind = "corrupt", status.replace("_", " ")
+    elif status == "ok":
         n = r.get("n_reads")
-        return "empty" if n is not None and not pd.isna(n) and n == 0 else "ok"
-    return "unchecked"
+        if n is not None and not pd.isna(n) and n == 0:
+            problem, kind = "empty", "empty (0 reads)"
+        else:
+            return "ok"
+    else:
+        return "unchecked"
+    if dismissed and dismiss.file_key(r["project_id"], r["rel_path"], kind) in dismissed:
+        return "dismissed"
+    return problem
 
 
 def _files_ok(problems):
@@ -1028,7 +1158,8 @@ def _files_ok(problems):
     parts = [f"{problems.count(k)} {k}" for k in _PROBLEM_KINDS if k in problems]
     if "unchecked" in problems:
         parts.append("unchecked")
-    return ", ".join(parts) or "ok"
+    out = ", ".join(parts) or "ok"
+    return out + " *" if "dismissed" in problems else out
 
 
 def custom_table_view(samples_df, paths_df):

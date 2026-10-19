@@ -3,6 +3,15 @@
 import gzip
 import os
 
+from seqledger import db as odb
+from seqledger import ingest as oingest
+
+
+def write_gz(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with gzip.open(path, "wb") as f:
+        f.write(b"@read\nACGT\n+\nIIII\n")
+
 
 def make_project(root, project_dir, mapfile_name, rows, disk_files=None, header=None):
     """Create a project on disk: data dir with fastq.gz + a mapfile CSV.
@@ -22,8 +31,7 @@ def make_project(root, project_dir, mapfile_name, rows, disk_files=None, header=
         for r in rows:
             disk_files.extend([r[1], r[2]])
     for fn in disk_files:
-        with gzip.open(os.path.join(data_dir, fn), "wb") as f:
-            f.write(b"@read\nACGT\n+\nIIII\n")
+        write_gz(os.path.join(data_dir, fn))
 
     header = header or ["ID", "R1", "R2", "Taxon", "UniqID"]
     mapfile_path = os.path.join(root, mapfile_name)
@@ -32,6 +40,16 @@ def make_project(root, project_dir, mapfile_name, rows, disk_files=None, header=
         for r in rows:
             f.write(",".join(str(x) for x in r) + "\n")
     return mapfile_path, project_dir
+
+
+def ingested_project(tmp_path, rows, disk_files=None):
+    """One ingested project 'genohub-1_X'. Returns (conn, root)."""
+    root = str(tmp_path / "raw_sequence_data")
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows, disk_files=disk_files)
+    conn = odb.connect(str(tmp_path / "cat.db"))
+    odb.init_db(conn)
+    oingest.ingest_tree(conn, root, root)
+    return conn, root
 
 
 def write_md5(path, entries):

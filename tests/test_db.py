@@ -6,12 +6,6 @@ import pytest
 from seqledger import db as odb
 
 
-def _fresh_db(tmp_path):
-    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
-    odb.init_db(conn)
-    return conn
-
-
 def test_init_db_refuses_old_catalog(tmp_path):
     conn = odb.connect(os.path.join(tmp_path, "old.db"))
     conn.execute("CREATE TABLE files (file_pk INTEGER PRIMARY KEY, project_id TEXT, filename TEXT)")
@@ -21,8 +15,8 @@ def test_init_db_refuses_old_catalog(tmp_path):
 
 # --- #15: CHECK constraints on freshly-created catalogs ---
 
-def test_check_rejects_bad_files_flags(tmp_path):
-    conn = _fresh_db(tmp_path)
+def test_check_rejects_bad_files_flags(fresh_db):
+    conn = fresh_db
     conn.execute("INSERT INTO projects(project_id) VALUES ('p1')")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
@@ -35,8 +29,8 @@ def test_check_rejects_bad_files_flags(tmp_path):
             "INSERT INTO files(project_id, filename, direction) VALUES ('p1','c.fastq.gz','R3')")
 
 
-def test_check_allows_valid_and_null_files_flags(tmp_path):
-    conn = _fresh_db(tmp_path)
+def test_check_allows_valid_and_null_files_flags(fresh_db):
+    conn = fresh_db
     conn.execute("INSERT INTO projects(project_id) VALUES ('p1')")
     # R1/R2/NULL directions and 0/1/NULL flags are all accepted (rel_path is NOT NULL)
     conn.execute("INSERT INTO files(project_id, filename, rel_path, direction, md5_match, gz_ok) "
@@ -48,8 +42,8 @@ def test_check_allows_valid_and_null_files_flags(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 3
 
 
-def test_check_rejects_bad_backups_and_taxa(tmp_path):
-    conn = _fresh_db(tmp_path)
+def test_check_rejects_bad_backups_and_taxa(fresh_db):
+    conn = fresh_db
     conn.execute("INSERT INTO projects(project_id) VALUES ('p1')")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO backups(project_id, location, verified) "

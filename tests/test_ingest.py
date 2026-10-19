@@ -1,18 +1,11 @@
 import os
 import pwd
 
-from seqledger import db as odb
 from seqledger import ingest as oingest
 from helpers import make_project
 
 
-def _fresh_db(tmp_path):
-    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
-    odb.init_db(conn)
-    return conn
-
-
-def test_ingest_populates_tables(tmp_path):
+def test_ingest_populates_tables(tmp_path, fresh_db):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     rows = [
@@ -23,7 +16,7 @@ def test_ingest_populates_tables(tmp_path):
     make_project(root, "genohub-1249488_WHF2",
                  "genohub-1249488_WHF2_mapfile.csv", rows, header=header)
 
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     results = oingest.ingest_tree(conn, root, root)
 
     project_id, findings, status, stats = results[0]
@@ -42,13 +35,13 @@ def test_ingest_populates_tables(tmp_path):
     assert "extraval" in extra
 
 
-def test_ingest_is_idempotent(tmp_path):
+def test_ingest_is_idempotent(tmp_path, fresh_db):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     rows = [("i1", "i1_1.fastq.gz", "i1_2.fastq.gz", "Gadus", "USNM 1")]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
 
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, root, root)
     oingest.ingest_tree(conn, root, root)
 
@@ -56,13 +49,13 @@ def test_ingest_is_idempotent(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 2
 
 
-def test_ingest_captures_owner_and_size(tmp_path):
+def test_ingest_captures_owner_and_size(tmp_path, fresh_db):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     rows = [("i1", "i1_1.fastq.gz", "i1_2.fastq.gz", "Gadus", "USNM 1")]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
 
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, root, root)
 
     me = pwd.getpwuid(os.getuid()).pw_name
@@ -76,20 +69,20 @@ def test_ingest_captures_owner_and_size(tmp_path):
     assert prow["owner_name"] == me
 
 
-def test_ingest_without_seqdata_root_leaves_owner_null(tmp_path):
+def test_ingest_without_seqdata_root_leaves_owner_null(tmp_path, fresh_db):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     rows = [("i1", "i1_1.fastq.gz", "i1_2.fastq.gz", "Gadus", "USNM 1")]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
 
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, None, root)  # no seqdata_root
     frow = conn.execute(
         "SELECT size_bytes, owner_name FROM files WHERE filename='i1_1.fastq.gz'").fetchone()
     assert frow["size_bytes"] is None and frow["owner_name"] is None
 
 
-def test_ingest_skips_duplicate_id_row_loads_the_rest(tmp_path):
+def test_ingest_skips_duplicate_id_row_loads_the_rest(tmp_path, fresh_db):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     # duplicate sample ID -> the 2nd 'dup' row is skipped, the first still loads
@@ -99,7 +92,7 @@ def test_ingest_skips_duplicate_id_row_loads_the_rest(tmp_path):
     ]
     make_project(root, "genohub-2_Y", "genohub-2_Y_mapfile.csv", rows)
 
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     results = oingest.ingest_tree(conn, root, root)
     # project loaded (not rejected), one sample; the duplicate row skipped + flagged
     assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
@@ -108,14 +101,14 @@ def test_ingest_skips_duplicate_id_row_loads_the_rest(tmp_path):
     assert results[0][3]["metadata_status"] == "flagged"
 
 
-def test_prune_deletes_stale_file_rows(tmp_path):
+def test_prune_deletes_stale_file_rows(tmp_path, fresh_db):
     # Prune drops file rows whose rel_path the corrected mapfile no longer resolves
     # (the in-place typo-fix case) and counts deleted rows.
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, root, root)
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 2
 
@@ -128,14 +121,14 @@ def test_prune_deletes_stale_file_rows(tmp_path):
         {"genohub-1_X/s1_1.fastq.gz", "genohub-1_X/s1_2b.fastq.gz"}
 
 
-def test_prune_empty_csv_does_not_wipe_files(tmp_path):
+def test_prune_empty_csv_does_not_wipe_files(tmp_path, fresh_db):
     # A transiently-broken mapfile that references NO files must not cause prune to
     # wipe every existing file row; it keeps them and appends a WARN instead (#1b).
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, root, root)
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 2
 
@@ -151,7 +144,7 @@ def test_prune_empty_csv_does_not_wipe_files(tmp_path):
         [str(f) for f in findings]
 
 
-def test_ingest_flags_filename_listed_twice(tmp_path):
+def test_ingest_flags_filename_listed_twice(tmp_path, fresh_db):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     # same filename 'dup.fastq.gz' used as R2 of s1 and R1 of s2 -> WARN
@@ -160,7 +153,7 @@ def test_ingest_flags_filename_listed_twice(tmp_path):
         ("s2", "dup.fastq.gz", "s2_2.fastq.gz", "Gadus", "U2"),
     ]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     results = oingest.ingest_tree(conn, root, root)
     findings = results[0][1]
     assert any("listed twice" in f.message for f in findings), [str(f) for f in findings]

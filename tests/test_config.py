@@ -5,21 +5,15 @@ import os
 from seqledger import db as odb
 
 
-def _fresh(tmp_path):
-    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
-    odb.init_db(conn)
-    return conn
-
-
-def test_defaults_when_unset(tmp_path):
-    conn = _fresh(tmp_path)
+def test_defaults_when_unset(fresh_db):
+    conn = fresh_db
     assert odb.get_config(conn, "conda_env") == "seqledger"
     assert odb.get_config(conn, "io_queue") == "lTIO.sq"
     assert odb.get_config(conn, "nope", "fallback") == "fallback"
 
 
-def test_set_and_get_overrides_default(tmp_path):
-    conn = _fresh(tmp_path)
+def test_set_and_get_overrides_default(fresh_db):
+    conn = fresh_db
     odb.set_config(conn, "conda_env", "otherlab")
     odb.set_config(conn, "catalog_name", "Deep Sea Catalog")
     conn.commit()
@@ -29,10 +23,10 @@ def test_set_and_get_overrides_default(tmp_path):
     assert cfg["io_queue"] == "lTIO.sq"  # untouched -> default
 
 
-def test_fresh_schema_loads_and_resolves_defaults(tmp_path):
+def test_fresh_schema_loads_and_resolves_defaults(fresh_db):
     # Guard for #15: the new CHECK constraints in schema.sql must not break a fresh
     # init_db, and every config default still resolves on the resulting catalog.
-    conn = _fresh(tmp_path)
+    conn = fresh_db
     cfg = odb.resolve_config(conn)
     for key, default in odb.CONFIG_DEFAULTS.items():
         assert cfg[key] == default

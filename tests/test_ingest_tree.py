@@ -1,17 +1,9 @@
 """Auto-discovery ingest: pair project folders with <project>_mapfile.csv."""
 
-import gzip
 import os
 
-from seqledger import db as odb
 from seqledger import ingest as oingest
-from helpers import make_project
-
-
-def _fresh_db(tmp_path):
-    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
-    odb.init_db(conn)
-    return conn
+from helpers import make_project, write_gz
 
 
 def _roots(tmp_path):
@@ -21,18 +13,12 @@ def _roots(tmp_path):
     return root, root
 
 
-def _gz(path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with gzip.open(path, "wb") as f:
-        f.write(b"@r\nACGT\n+\nIIII\n")
-
-
-def test_tree_ingests_folder_plus_mapfile(tmp_path):
+def test_tree_ingests_folder_plus_mapfile(tmp_path, fresh_db):
     seq, meta = _roots(tmp_path)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
     make_project(seq, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
 
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     results = oingest.ingest_tree(conn, seq, meta)
 
     assert [r[0] for r in results] == ["genohub-1_X"]
@@ -43,15 +29,15 @@ def test_tree_ingests_folder_plus_mapfile(tmp_path):
         "SELECT metadata_status FROM projects").fetchone()["metadata_status"] == "ok"
 
 
-def test_tree_finds_nested_fastq(tmp_path):
+def test_tree_finds_nested_fastq(tmp_path, fresh_db):
     seq, meta = _roots(tmp_path)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
     # mapfile lists bare basenames; files live in a nested subdir on disk.
     make_project(seq, "genohub-1_X", "genohub-1_X_mapfile.csv", rows, disk_files=[])
-    _gz(os.path.join(seq, "genohub-1_X", "lane1", "s1_1.fastq.gz"))
-    _gz(os.path.join(seq, "genohub-1_X", "lane1", "s1_2.fastq.gz"))
+    write_gz(os.path.join(seq, "genohub-1_X", "lane1", "s1_1.fastq.gz"))
+    write_gz(os.path.join(seq, "genohub-1_X", "lane1", "s1_2.fastq.gz"))
 
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, seq, meta)
 
     rel = conn.execute(
@@ -62,13 +48,13 @@ def test_tree_finds_nested_fastq(tmp_path):
         "SELECT size_bytes FROM files WHERE filename='s1_1.fastq.gz'").fetchone()[0] > 0
 
 
-def test_tree_missing_mapfile_catalogs_disk_files_only(tmp_path):
+def test_tree_missing_mapfile_catalogs_disk_files_only(tmp_path, fresh_db):
     seq, meta = _roots(tmp_path)
     # A project folder with fastq but NO mapfile in the metadata dir.
-    _gz(os.path.join(seq, "genohub-9_Z", "a_1.fastq.gz"))
-    _gz(os.path.join(seq, "genohub-9_Z", "a_2.fastq.gz"))
+    write_gz(os.path.join(seq, "genohub-9_Z", "a_1.fastq.gz"))
+    write_gz(os.path.join(seq, "genohub-9_Z", "a_2.fastq.gz"))
 
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     results = oingest.ingest_tree(conn, seq, meta)
 
     assert results[0][3]["metadata_status"] == "missing_mapfile"
@@ -84,7 +70,7 @@ def test_tree_missing_mapfile_catalogs_disk_files_only(tmp_path):
     assert [f["direction"] for f in files] == ["R1", "R2"]
 
 
-def test_tree_missing_seqdata_catalogs_samples_only(tmp_path):
+def test_tree_missing_seqdata_catalogs_samples_only(tmp_path, fresh_db):
     seq, meta = _roots(tmp_path)
     # A mapfile with no matching project folder on disk.
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
@@ -92,7 +78,7 @@ def test_tree_missing_seqdata_catalogs_samples_only(tmp_path):
     # remove the (empty) folder make_project created, so no folder exists
     os.rmdir(os.path.join(seq, "genohub-7_M"))
 
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     results = oingest.ingest_tree(conn, seq, meta)
 
     assert results[0][3]["metadata_status"] == "missing_seqdata"
@@ -101,15 +87,15 @@ def test_tree_missing_seqdata_catalogs_samples_only(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
 
 
-def test_tree_broken_mapfile_flags_and_catalogs_disk(tmp_path):
+def test_tree_broken_mapfile_flags_and_catalogs_disk(tmp_path, fresh_db):
     seq, meta = _roots(tmp_path)
     # Bad header (missing required columns) but a real folder with fastq.
-    _gz(os.path.join(seq, "genohub-3_B", "x_1.fastq.gz"))
+    write_gz(os.path.join(seq, "genohub-3_B", "x_1.fastq.gz"))
     with open(os.path.join(seq, "genohub-3_B_mapfile.csv"), "w") as f:
         f.write("ID,Sample,Notes\n")
         f.write("s1,foo,bar\n")
 
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     results = oingest.ingest_tree(conn, seq, meta)
 
     assert results[0][2] == "fail"
@@ -121,21 +107,21 @@ def test_tree_broken_mapfile_flags_and_catalogs_disk(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 1
 
 
-def test_tree_valid_header_invalid_rows_flags_not_ok(tmp_path):
+def test_tree_valid_header_invalid_rows_flags_not_ok(tmp_path, fresh_db):
     # A VALID header whose rows have empty fields (a control row with empty UniqID)
     # must NOT be silently 'ok': the control row loads with UniqID NA-filled, the
     # sample is flagged, and the project is 'flagged'.
     seq, meta = _roots(tmp_path)
-    _gz(os.path.join(seq, "genohub-9_C", "s1_1.fastq.gz"))
-    _gz(os.path.join(seq, "genohub-9_C", "s1_2.fastq.gz"))
-    _gz(os.path.join(seq, "genohub-9_C", "c_1.fastq.gz"))
-    _gz(os.path.join(seq, "genohub-9_C", "c_2.fastq.gz"))
+    write_gz(os.path.join(seq, "genohub-9_C", "s1_1.fastq.gz"))
+    write_gz(os.path.join(seq, "genohub-9_C", "s1_2.fastq.gz"))
+    write_gz(os.path.join(seq, "genohub-9_C", "c_1.fastq.gz"))
+    write_gz(os.path.join(seq, "genohub-9_C", "c_2.fastq.gz"))
     with open(os.path.join(meta, "genohub-9_C_mapfile.csv"), "w") as f:
         f.write("ID,R1,R2,Taxon,UniqID\n")
         f.write("s1,s1_1.fastq.gz,s1_2.fastq.gz,Gadus,U1\n")
         f.write("Amp_neg_Plate1,c_1.fastq.gz,c_2.fastq.gz,control,\n")  # empty UniqID -> NA
 
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, seq, meta)
 
     row = conn.execute(
@@ -153,14 +139,14 @@ def test_tree_valid_header_invalid_rows_flags_not_ok(tmp_path):
     assert clean["flags"] is None
 
 
-def test_tree_all_rows_unusable_is_invalid_mapfile(tmp_path):
+def test_tree_all_rows_unusable_is_invalid_mapfile(tmp_path, fresh_db):
     # If NO row is loadable (all empty IDs), it's 'invalid_mapfile' with files only.
     seq, meta = _roots(tmp_path)
-    _gz(os.path.join(seq, "genohub-8_D", "x_1.fastq.gz"))
+    write_gz(os.path.join(seq, "genohub-8_D", "x_1.fastq.gz"))
     with open(os.path.join(meta, "genohub-8_D_mapfile.csv"), "w") as f:
         f.write("ID,R1,R2,Taxon,UniqID\n")
         f.write(",x_1.fastq.gz,x_2.fastq.gz,Gadus,U1\n")  # empty ID -> skipped
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, seq, meta)
     row = conn.execute(
         "SELECT metadata_status FROM projects WHERE project_id='genohub-8_D'").fetchone()
@@ -185,13 +171,13 @@ def test_discover_projects_unions_both_sides(tmp_path):
     assert found["both"]["data_dir"] and found["both"]["mapfile"]
 
 
-def test_prune_missing_projects_deletes_vanished(tmp_path):
+def test_prune_missing_projects_deletes_vanished(tmp_path, fresh_db):
     seq, meta = _roots(tmp_path)
     make_project(seq, "genohub-1_A", "genohub-1_A_mapfile.csv",
                  [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
     make_project(seq, "genohub-2_B", "genohub-2_B_mapfile.csv",
                  [("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "Gadus", "U2")])
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, seq, meta)
     assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
 
@@ -212,11 +198,11 @@ def test_prune_missing_projects_deletes_vanished(tmp_path):
         "SELECT COUNT(*) FROM files WHERE project_id='genohub-2_B'").fetchone()[0] == 0
 
 
-def test_prune_missing_projects_refuses_when_nothing_discovered(tmp_path):
+def test_prune_missing_projects_refuses_when_nothing_discovered(tmp_path, fresh_db):
     seq, meta = _roots(tmp_path)
     make_project(seq, "genohub-1_A", "genohub-1_A_mapfile.csv",
                  [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, seq, meta)
 
     # Simulate an unmounted / empty root: discovery finds nothing -> must NOT prune.
@@ -228,11 +214,11 @@ def test_prune_missing_projects_refuses_when_nothing_discovered(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1  # kept
 
 
-def test_prune_missing_projects_ignores_other_roots(tmp_path):
+def test_prune_missing_projects_ignores_other_roots(tmp_path, fresh_db):
     seq, meta = _roots(tmp_path)
     make_project(seq, "genohub-1_A", "genohub-1_A_mapfile.csv",
                  [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, seq, meta)
 
     # A project stored under a DIFFERENT seqdata_root must not be pruned by a run
@@ -246,14 +232,14 @@ def test_prune_missing_projects_ignores_other_roots(tmp_path):
         "SELECT COUNT(*) FROM projects WHERE project_id='other-proj'").fetchone()[0] == 1
 
 
-def test_reingest_metadata_only_keeps_nested_rel_path(tmp_path):
+def test_reingest_metadata_only_keeps_nested_rel_path(tmp_path, fresh_db):
     # First ingest sees the fastq nested on disk -> a nested rel_path is recorded.
     seq, meta = _roots(tmp_path)
     make_project(seq, "genohub-1_X", "genohub-1_X_mapfile.csv",
                  [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")], disk_files=[])
-    _gz(os.path.join(seq, "genohub-1_X", "lane1", "s1_1.fastq.gz"))
-    _gz(os.path.join(seq, "genohub-1_X", "lane1", "s1_2.fastq.gz"))
-    conn = _fresh_db(tmp_path)
+    write_gz(os.path.join(seq, "genohub-1_X", "lane1", "s1_1.fastq.gz"))
+    write_gz(os.path.join(seq, "genohub-1_X", "lane1", "s1_2.fastq.gz"))
+    conn = fresh_db
     oingest.ingest_tree(conn, seq, meta)
     nested = os.path.join("genohub-1_X", "lane1", "s1_1.fastq.gz")
     assert conn.execute(
@@ -267,12 +253,12 @@ def test_reingest_metadata_only_keeps_nested_rel_path(tmp_path):
         "SELECT rel_path FROM files WHERE filename='s1_1.fastq.gz'").fetchone()["rel_path"] == nested
 
 
-def test_prune_refuses_when_root_missing(tmp_path):
+def test_prune_refuses_when_root_missing(tmp_path, fresh_db):
     # An unmounted / nonexistent root reads as "empty"; prune must refuse, not wipe (#1).
     seq, meta = _roots(tmp_path)
     make_project(seq, "genohub-1_A", "genohub-1_A_mapfile.csv",
                  [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, seq, meta)
 
     missing = str(tmp_path / "not_mounted")  # never created
@@ -282,14 +268,14 @@ def test_prune_refuses_when_root_missing(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1  # kept
 
 
-def test_prune_blast_radius_cap_refuses_without_force(tmp_path):
+def test_prune_blast_radius_cap_refuses_without_force(tmp_path, fresh_db):
     # Removing >50% of a root's projects likely means a partial mount; refuse unless
     # force=True is passed (#1).
     seq, meta = _roots(tmp_path)
     for n in (1, 2, 3):
         make_project(seq, f"genohub-{n}_P", f"genohub-{n}_P_mapfile.csv",
                      [(f"s{n}", f"s{n}_1.fastq.gz", f"s{n}_2.fastq.gz", "Gadus", f"U{n}")])
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, seq, meta)
     assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 3
 
@@ -310,11 +296,11 @@ def test_prune_blast_radius_cap_refuses_without_force(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
 
 
-def test_tree_reingest_upgrades_missing_mapfile_to_ok(tmp_path):
+def test_tree_reingest_upgrades_missing_mapfile_to_ok(tmp_path, fresh_db):
     seq, meta = _roots(tmp_path)
-    _gz(os.path.join(seq, "genohub-1_X", "s1_1.fastq.gz"))
-    _gz(os.path.join(seq, "genohub-1_X", "s1_2.fastq.gz"))
-    conn = _fresh_db(tmp_path)
+    write_gz(os.path.join(seq, "genohub-1_X", "s1_1.fastq.gz"))
+    write_gz(os.path.join(seq, "genohub-1_X", "s1_2.fastq.gz"))
+    conn = fresh_db
     oingest.ingest_tree(conn, seq, meta)
     assert conn.execute(
         "SELECT metadata_status FROM projects").fetchone()["metadata_status"] == "missing_mapfile"
@@ -333,14 +319,14 @@ def test_tree_reingest_upgrades_missing_mapfile_to_ok(tmp_path):
     assert linked == 2
 
 
-def test_reingest_case_insensitive_header_loads_samples(tmp_path):
+def test_reingest_case_insensitive_header_loads_samples(tmp_path, fresh_db):
     # A mapfile with a lowercase header (id,r1,r2,taxon,uniqid) is accepted
     # case-insensitively AND its rows load -- not silently dropped as invalid.
     root, meta = _roots(tmp_path)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "USNM 1")]
     make_project(root, "genohub-9_CI", "genohub-9_CI_mapfile.csv", rows,
                  header=["id", "r1", "r2", "taxon", "uniqid"])
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     res = oingest.ingest_tree(conn, root, meta)
     pid, findings, status, stats = res[0]
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1, findings
@@ -352,37 +338,37 @@ def test_reingest_case_insensitive_header_loads_samples(tmp_path):
     assert extra is None
 
 
-def test_diskonly_same_basename_both_cataloged(tmp_path):
+def test_diskonly_same_basename_both_cataloged(tmp_path, fresh_db):
     # A project folder with NO mapfile and two files sharing a basename in different
     # subdirs -> BOTH cataloged as distinct rows keyed by rel_path (not collapsed).
     root, meta = _roots(tmp_path)
     pid = "genohub-9_COLL"
-    _gz(os.path.join(root, pid, "laneA", "x_1.fastq.gz"))
-    _gz(os.path.join(root, pid, "laneB", "x_1.fastq.gz"))
-    conn = _fresh_db(tmp_path)
+    write_gz(os.path.join(root, pid, "laneA", "x_1.fastq.gz"))
+    write_gz(os.path.join(root, pid, "laneB", "x_1.fastq.gz"))
+    conn = fresh_db
     oingest.ingest_tree(conn, root, meta)  # no mapfile -> diskonly cataloging
     relpaths = {r["rel_path"] for r in conn.execute(
         "SELECT rel_path FROM files WHERE project_id=?", (pid,))}
     assert relpaths == {f"{pid}/laneA/x_1.fastq.gz", f"{pid}/laneB/x_1.fastq.gz"}
 
 
-def test_reingest_flatguess_moves_to_nested_no_dup(tmp_path):
+def test_reingest_flatguess_moves_to_nested_no_dup(tmp_path, fresh_db):
     # Metadata-only ingest records a flat-guess rel_path; when the file later arrives
     # nested on disk, a disk-backed re-ingest MOVES that row to the real path instead
     # of forking a duplicate (and does not collapse genuinely distinct files).
-    from helpers import make_project
+    from helpers import make_project, write_gz
     root, meta = _roots(tmp_path)
     pid = "genohub-8_FG"
     rows = [("s1", "x_1.fastq.gz", "x_2.fastq.gz", "Gadus", "U1")]
     make_project(root, pid, f"{pid}_mapfile.csv", rows, disk_files=[])  # mapfile, no files yet
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, root, meta)
     rp = {r["rel_path"] for r in conn.execute(
         "SELECT rel_path FROM files WHERE project_id=?", (pid,))}
     assert rp == {f"{pid}/x_1.fastq.gz", f"{pid}/x_2.fastq.gz"}  # flat guesses
 
-    _gz(os.path.join(root, pid, "run1", "x_1.fastq.gz"))
-    _gz(os.path.join(root, pid, "run1", "x_2.fastq.gz"))
+    write_gz(os.path.join(root, pid, "run1", "x_1.fastq.gz"))
+    write_gz(os.path.join(root, pid, "run1", "x_2.fastq.gz"))
     oingest.ingest_tree(conn, root, meta)  # disk-backed re-ingest
     rp2 = {r["rel_path"] for r in conn.execute(
         "SELECT rel_path FROM files WHERE project_id=?", (pid,))}
@@ -403,20 +389,19 @@ def _links(conn):
         "SELECT filename, sample_pk, direction FROM files")}
 
 
-def _linked_project(tmp_path):
+def _linked_project(tmp_path, conn):
     # Names whose R1/R2 the disk-only guess cannot infer, so a lost direction shows.
     root, meta = _roots(tmp_path)
     pid = "genohub-1_X"
-    _gz(os.path.join(root, pid, "s1_fwd.fastq.gz"))
-    _gz(os.path.join(root, pid, "s1_rev.fastq.gz"))
+    write_gz(os.path.join(root, pid, "s1_fwd.fastq.gz"))
+    write_gz(os.path.join(root, pid, "s1_rev.fastq.gz"))
     _write_mapfile(meta, pid, ["s1,s1_fwd.fastq.gz,s1_rev.fastq.gz,Gadus,U1"])
-    conn = _fresh_db(tmp_path)
     oingest.ingest_tree(conn, root, meta)
     return root, meta, pid, conn
 
 
-def test_reingest_missing_mapfile_keeps_sample_links(tmp_path):
-    root, meta, pid, conn = _linked_project(tmp_path)
+def test_reingest_missing_mapfile_keeps_sample_links(tmp_path, fresh_db):
+    root, meta, pid, conn = _linked_project(tmp_path, fresh_db)
     before = _links(conn)
     assert all(pk is not None for pk, _ in before.values())
     mf = os.path.join(meta, f"{pid}_mapfile.csv")
@@ -428,27 +413,27 @@ def test_reingest_missing_mapfile_keeps_sample_links(tmp_path):
     assert row["metadata_file"] == f"{pid}_mapfile.csv"
 
 
-def test_reingest_broken_header_keeps_sample_links(tmp_path):
-    root, meta, pid, conn = _linked_project(tmp_path)
+def test_reingest_broken_header_keeps_sample_links(tmp_path, fresh_db):
+    root, meta, pid, conn = _linked_project(tmp_path, fresh_db)
     before = _links(conn)
     _write_mapfile(meta, pid, [], header="id;r1;r2")
     oingest.ingest_tree(conn, root, meta)
     assert _links(conn) == before
     # a new file found while the mapfile is broken is cataloged unlinked
-    _gz(os.path.join(root, pid, "new_R1.fastq.gz"))
+    write_gz(os.path.join(root, pid, "new_R1.fastq.gz"))
     oingest.ingest_tree(conn, root, meta)
     links = _links(conn)
     assert links["new_R1.fastq.gz"] == (None, "R1")
     assert links["s1_fwd.fastq.gz"] == before["s1_fwd.fastq.gz"]
 
 
-def test_moved_file_keeps_row_and_history(tmp_path):
+def test_moved_file_keeps_row_and_history(tmp_path, fresh_db):
     root, meta = _roots(tmp_path)
     pid = "genohub-1_X"
     for fn in ("s1_R1.fastq.gz", "s1_R2.fastq.gz"):
-        _gz(os.path.join(root, pid, "run1", fn))
+        write_gz(os.path.join(root, pid, "run1", fn))
     _write_mapfile(meta, pid, ["s1,s1_R1.fastq.gz,s1_R2.fastq.gz,Gadus,U1"])
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, root, meta)
     conn.execute("UPDATE files SET md5_match=1")
     conn.commit()
@@ -468,15 +453,15 @@ def test_moved_file_keeps_row_and_history(tmp_path):
     assert res[0][3]["pruned_files"] == 0
 
 
-def test_prune_deletes_by_rel_path_and_counts_rows(tmp_path):
+def test_prune_deletes_by_rel_path_and_counts_rows(tmp_path, fresh_db):
     # Same basename in two lanes plus junk; only the paths the mapfile resolves to
     # survive a prune, and every deleted row is counted.
     root, meta = _roots(tmp_path)
     pid = "genohub-1_X"
     for sub in ("L1", "L2"):
         for fn in ("s1_R1.fastq.gz", "s1_R2.fastq.gz", "junk_R1.fastq.gz"):
-            _gz(os.path.join(root, pid, sub, fn))
-    conn = _fresh_db(tmp_path)
+            write_gz(os.path.join(root, pid, sub, fn))
+    conn = fresh_db
     oingest.ingest_tree(conn, root, meta)  # diskonly: 6 rows
     _write_mapfile(meta, pid, ["s1,s1_R1.fastq.gz,s1_R2.fastq.gz,Gadus,U1"])
     res = oingest.ingest_tree(conn, root, meta, prune=True)
@@ -485,14 +470,14 @@ def test_prune_deletes_by_rel_path_and_counts_rows(tmp_path):
     assert res[0][3]["pruned_files"] == 4
 
 
-def test_glob_metachar_project_name(tmp_path):
+def test_glob_metachar_project_name(tmp_path, fresh_db):
     from seqledger import validate as oval
     root, meta = _roots(tmp_path)
     pid = "LAB-run[1]_X"
     for fn in ("s1_R1.fastq.gz", "s1_R2.fastq.gz"):
-        _gz(os.path.join(root, pid, "run1", fn))
+        write_gz(os.path.join(root, pid, "run1", fn))
     _write_mapfile(meta, pid, ["s1,s1_R1.fastq.gz,s1_R2.fastq.gz,Gadus,U1"])
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, root, meta)
     rows = conn.execute("SELECT rel_path, size_bytes FROM files").fetchall()
     assert {r["rel_path"] for r in rows} == {
@@ -501,14 +486,14 @@ def test_glob_metachar_project_name(tmp_path):
     assert oval.validate_catalog(conn, root)[pid]["data"]["status"] == "ok"
 
 
-def test_extra_cells_row_warns_and_flags(tmp_path):
+def test_extra_cells_row_warns_and_flags(tmp_path, fresh_db):
     root, meta = _roots(tmp_path)
     pid = "genohub-1_X"
     for fn in ("s1_R1.fastq.gz", "s1_R2.fastq.gz"):
-        _gz(os.path.join(root, pid, fn))
+        write_gz(os.path.join(root, pid, fn))
     _write_mapfile(meta, pid,
                    ["s1,s1_R1.fastq.gz,s1_R2.fastq.gz,Gadus morhua, juvenile,USNM 123"])
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     res = oingest.ingest_tree(conn, root, meta)
     findings = [f.message for f in res[0][1]]
     assert any("row 2: 1 extra cell(s)" in m for m in findings), findings
@@ -516,16 +501,16 @@ def test_extra_cells_row_warns_and_flags(tmp_path):
     assert res[0][3]["metadata_status"] == "flagged"
 
 
-def test_prune_refuses_to_drop_most_samples_unless_forced(tmp_path):
+def test_prune_refuses_to_drop_most_samples_unless_forced(tmp_path, fresh_db):
     root, meta = _roots(tmp_path)
     pid = "genohub-1_X"
     lines = []
     for s in ("s1", "s2", "s3"):
         for d in ("R1", "R2"):
-            _gz(os.path.join(root, pid, f"{s}_{d}.fastq.gz"))
+            write_gz(os.path.join(root, pid, f"{s}_{d}.fastq.gz"))
         lines.append(f"{s},{s}_R1.fastq.gz,{s}_R2.fastq.gz,Gadus,U{s}")
     _write_mapfile(meta, pid, lines)
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, root, meta)
 
     _write_mapfile(meta, pid, lines[:1])  # truncated mapfile
@@ -543,12 +528,12 @@ def test_prune_refuses_to_drop_most_samples_unless_forced(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
 
 
-def test_prune_dry_run_lists_without_deleting(tmp_path):
+def test_prune_dry_run_lists_without_deleting(tmp_path, fresh_db):
     seq, meta = _roots(tmp_path)
     for pid in ("genohub-1_A", "genohub-2_B"):
         make_project(seq, pid, f"{pid}_mapfile.csv",
                      [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
-    conn = _fresh_db(tmp_path)
+    conn = fresh_db
     oingest.ingest_tree(conn, seq, meta)
     __import__("shutil").rmtree(os.path.join(seq, "genohub-2_B"))
     os.remove(os.path.join(meta, "genohub-2_B_mapfile.csv"))

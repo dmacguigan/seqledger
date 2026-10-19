@@ -8,17 +8,7 @@ import pytest
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import integrity as oint
-from helpers import make_project
-
-
-def _setup(tmp_path, rows, disk_files=None):
-    root = str(tmp_path / "raw_sequence_data")
-    os.makedirs(root, exist_ok=True)
-    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows, disk_files=disk_files)
-    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
-    odb.init_db(conn)
-    oingest.ingest_tree(conn, root, root)
-    return conn, root
+from helpers import ingested_project, make_project
 
 
 def _write_gz(root, fn, data):
@@ -38,7 +28,7 @@ def _truncate(root, fn, n_trailing):
 
 def test_integrity_skips_unchanged_on_rerun(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
     assert all(r[0] == "ok" for r in
                conn.execute("SELECT integrity_status FROM files"))
@@ -68,7 +58,7 @@ def test_integrity_skips_unchanged_on_rerun(tmp_path):
 def test_integrity_rechecks_when_size_changes(tmp_path):
     # A size change must bypass the skip (else real corruption would be hidden).
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
     assert conn.execute(
         "SELECT integrity_status FROM files WHERE filename='s1_1.fastq.gz'"
@@ -147,7 +137,7 @@ def test_check_fastq_gz_trailing_blank_line(tmp_path):
 
 def test_catalog_all_ok(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     res = oint.check_catalog_integrity(conn, seqdata_root=root)["genohub-1_X"]
     assert res["status"] == "pass"
     assert res["n_files"] == 2 and res["n_ok"] == 2
@@ -162,7 +152,7 @@ def test_catalog_all_ok(tmp_path):
 
 def test_catalog_truncated_fails(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     _truncate(root, "s1_2.fastq.gz", 4)
     res = oint.check_catalog_integrity(conn, seqdata_root=root)["genohub-1_X"]
     assert res["status"] == "fail" and res["n_gzip_error"] == 1
@@ -173,7 +163,7 @@ def test_catalog_truncated_fails(tmp_path):
 
 def test_catalog_format_error(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     _write_gz(root, "s1_1.fastq.gz", b"@r1\nACGT\n+\n")  # 3 lines -> not a multiple of 4
     res = oint.check_catalog_integrity(conn, seqdata_root=root)["genohub-1_X"]
     assert res["status"] == "fail" and res["n_format_error"] == 1
@@ -181,7 +171,7 @@ def test_catalog_format_error(tmp_path):
 
 def test_catalog_parity_warn(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     # R1 gets two reads, R2 keeps one -> parity mismatch
     _write_gz(root, "s1_1.fastq.gz", b"@r1\nAC\n+\nII\n@r2\nGT\n+\nII\n")
     res = oint.check_catalog_integrity(conn, seqdata_root=root)["genohub-1_X"]
@@ -191,7 +181,7 @@ def test_catalog_parity_warn(tmp_path):
 
 def test_catalog_unchecked_missing_file(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     os.remove(os.path.join(root, "genohub-1_X", "s1_2.fastq.gz"))
     res = oint.check_catalog_integrity(conn, seqdata_root=root)["genohub-1_X"]
     assert res["status"] == "warn" and res["n_unchecked"] == 1
@@ -205,7 +195,7 @@ def test_deleted_file_after_ok_becomes_unchecked(tmp_path):
     # without --force: a real deletion (ENOENT) must surface as 'unchecked', not
     # stay masked as the previously-cached 'ok' forever.
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
     assert conn.execute(
         "SELECT integrity_status FROM files WHERE direction='R2'").fetchone()[0] == "ok"
@@ -241,7 +231,7 @@ def test_check_path_transient_error_keeps_cached_ok(monkeypatch):
 
 def test_catalog_uses_stored_root(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     # no seqdata_root passed -> falls back to projects.seqdata_root from ingest
     res = oint.check_catalog_integrity(conn)["genohub-1_X"]
     assert res["status"] == "pass" and res["n_ok"] == 2
@@ -284,7 +274,7 @@ def test_emit_json_resume_skips_seeded_files(tmp_path):
     # No .done (unfinished job): resume trusts the seed and skips R1.
     # .done present (prior run finished): the seed is ignored and R1 is re-read.
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     pks = _emit_pks(conn)
     out = os.path.join(tmp_path, "genohub-1_X.json")
 
@@ -312,7 +302,7 @@ def test_collect_json_skips_orphan_project(tmp_path):
     # validation_log.project_id has an FK to projects, so collecting it must skip the
     # orphan with a warning rather than aborting with 'FOREIGN KEY constraint failed'.
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     pks = _emit_pks(conn)
     results = str(tmp_path / "results")
     os.makedirs(results)
@@ -339,7 +329,7 @@ def test_collect_json_skips_orphan_project(tmp_path):
 
 def test_emit_json_recheck_ignores_seed(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     pks = _emit_pks(conn)
     out = os.path.join(tmp_path, "genohub-1_X.json")
     with open(out, "w") as f:
@@ -358,7 +348,7 @@ def test_emit_json_checkpoints_during_run(tmp_path, monkeypatch):
     monkeypatch.setattr(oint, "_COMMIT_EVERY", 1)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1"),
             ("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "Gadus", "U2")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     out = os.path.join(tmp_path, "genohub-1_X.json")
 
     seen = {}
@@ -382,7 +372,7 @@ def test_emit_json_works_on_readonly_connection(tmp_path):
     # can't contend/corrupt the master over NFS. Emit must still work read-only.
     import sqlite3
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     conn.close()
     ro = odb.connect_ro(os.path.join(tmp_path, "cat.db"))
     # a write must be rejected on the read-only connection
@@ -421,7 +411,7 @@ def test_trailing_blank_line_tolerated(tmp_path):
 
 def test_empty_fastq_flagged_as_zero_reads(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     _write_gz(root, "s1_1.fastq.gz", b"")  # empty but valid gzip -> 0 reads
     res = oint.check_catalog_integrity(conn, seqdata_root=root)["genohub-1_X"]
     assert res["status"] == "warn"
@@ -431,7 +421,7 @@ def test_empty_fastq_flagged_as_zero_reads(tmp_path):
 def test_parity_sums_lane_split(tmp_path):
     # Two lanes per direction: totals match (2+3 == 4+1) so NO parity warning,
     # even though individual lane counts differ -- the old code compared one lane.
-    conn, root = _setup(tmp_path, [("s1","s1_1.fastq.gz","s1_2.fastq.gz","Gadus","U1")])
+    conn, root = ingested_project(tmp_path, [("s1","s1_1.fastq.gz","s1_2.fastq.gz","Gadus","U1")])
     # give sample s1 a second lane per direction with differing per-lane counts
     _write_gz(root, "s1_1.fastq.gz", b"@a\nAC\n+\nII\n@b\nGT\n+\nII\n")  # 2 reads
     _write_gz(root, "s1_2.fastq.gz", b"@a\nAC\n+\nII\n@b\nGT\n+\nII\n@c\nAA\n+\nII\n@d\nTT\n+\nII\n")  # 4 reads
@@ -458,7 +448,7 @@ def _reingest(conn, root):
 
 def test_reingest_after_truncation_forces_recheck(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
     conn.execute("UPDATE files SET md5_match=1")
     conn.commit()
@@ -475,7 +465,7 @@ def test_reingest_after_truncation_forces_recheck(tmp_path):
 
 def test_reingest_same_size_keeps_integrity(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
     conn.execute("UPDATE files SET md5_match=1")
     conn.commit()
@@ -499,7 +489,7 @@ def _collect_one(tmp_path, project_id, run_date, results):
 
 def test_collect_ignores_file_pk_from_other_project(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
     pks = _emit_pks(conn)
     d = _collect_one(tmp_path, "genohub-9_Z", "2999-01-01",
@@ -512,7 +502,7 @@ def test_collect_ignores_file_pk_from_other_project(tmp_path):
 
 def test_collect_skips_older_run_date(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     oint.check_catalog_integrity(conn, seqdata_root=root, progress=False)
     pks = _emit_pks(conn)
     d = _collect_one(tmp_path, "genohub-1_X", "2000-01-01",
@@ -550,7 +540,7 @@ def test_unreadable_file_is_unchecked_not_corrupt(tmp_path):
 def test_interrupt_commits_checked_files(tmp_path, monkeypatch, capsys):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1"),
             ("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "Gadus", "U2")]
-    conn, root = _setup(tmp_path, rows)
+    conn, root = ingested_project(tmp_path, rows)
     real = oint._persist
     calls = {"n": 0}
 

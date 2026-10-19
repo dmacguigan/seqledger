@@ -1,498 +1,122 @@
 # seqledger
 
-A SQLite-backed catalog + Python tooling that becomes the source of truth for a
-lab's raw sequence (FASTQ) data on an HPC cluster. It adds schema validation,
-per-file gzip/FASTQ integrity checks, `rclone` checksum + backup verification, and
-a queryable central index with a lightweight read-only browse GUI. Built for the
-NMNH "Ocean DNA" project on Hydra, and configurable (`init-db` config) to retarget
-another lab's paths, cluster settings, and catalog name.
+[![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
 
-> Prototype, in active development. Per-deployment settings (catalog display name,
-> seqdata/metadata roots, conda env, login host, I/O queue, rclone module, FASTQ
-> extensions) are set once at `init-db` — see the [Configuration](#configuration) section.
+seqledger is a catalog of a lab's raw sequencing data (FASTQ files). It keeps one
+SQLite database that records every project, sample, and file, checks that the
+files are intact and backed up, and resolves sample names against NCBI and WoRMS
+taxonomy. You use it from a command line (`seqledger`) or from a read-only browser
+GUI. It was built for the NMNH Ocean DNA project on the Smithsonian Hydra cluster.
+Paths, queue names, and similar per-site settings live in the catalog itself
+([config reference](docs/reference/config.md)).
+
+Status: prototype, in active development.
 
 ## Who this is for
 
-There are two kinds of user. Most people are the first kind.
-
-| | **Users** — browse only | **Data managers** — run the catalog |
+| | Researchers | Data managers |
 |---|---|---|
-| **What you do** | search/filter the catalog, view sample & file info, export CSV/[MitoPilot](https://github.com/Smithsonian/MitoPilot) map files, build copy jobs in **Grab & Go** | everything Users do, **plus** create the catalog, ingest metadata, run integrity + checksums, resolve taxonomy, keep it current |
-| **How** | log into the cluster, run **one** `seqledger … gui --qsub` command to start the **read-only browse GUI**, open the printed link in a web browser | the full `seqledger` command-line tool |
-| **Install anything?** | **Once**, into your own account — a copy-paste conda + pip setup (no admin, no shared env, no editing files). Steps in [For GUI users](#for-gui-users-browsing-only). | Yes — same install (see [Install](#install)). |
-| **Start here** | [**For GUI users (browsing only)**](#for-gui-users-browsing-only) | [Requirements](#requirements) → [Quick start](#quick-start) → [Usage](#usage) |
+| What you do | Search and filter the catalog, look up samples and files, export tables, build copy jobs for FASTQs in Grab & Go | Everything researchers do, plus create the catalog, load new projects, run the checks, and keep it current |
+| How | One command on Hydra starts the GUI; you open it in your web browser | The `seqledger` command line |
+| Install | Once, into your own Hydra account | Same install |
+| Read | [User guide](docs/user-guide.md) | [Admin guide](docs/admin-guide.md) |
 
-## For GUI users (browsing only)
+## 60-second start: researchers
 
-You install seqledger once into your **own** Hydra account, then launch the GUI
-yourself whenever you want to browse. Ask your data manager once for the **catalog
-path** for your lab (the `.db` file on Store) — that's the only thing you need from
-them.
-
-### One-time setup (on Hydra)
-
-Log into the login node and create the `seqledger` conda environment. This installs
-into *your* account — no admin or shared environment needed.
+Ask your data manager for the catalog path once. Install as shown in the
+[user guide](docs/user-guide.md#one-time-setup), then on Hydra:
 
 ```bash
-ssh <you>@hydra-login01.si.edu
-git clone https://github.com/OWNER/seqledger.git
-cd seqledger
-conda env create -f environment.yml    # creates an env named 'seqledger'
+ssh jsmith@hydra-login01.si.edu
 conda activate seqledger
-pip install -e '.[gui]'
-```
-
-> Keep the environment name **`seqledger`** (the default). The GUI job activates the
-> env by that name; if you must use a different name, see [Install](#install).
-
-### Each time you want to browse
-
-**On the cluster** — log in, activate the env, and start the GUI:
-
-```bash
-ssh <you>@hydra-login01.si.edu
-conda activate seqledger
-seqledger --db <CATALOG_PATH> gui --qsub
-```
-
-`--qsub` starts the GUI on the cluster's I/O queue (so it reads the catalog
-directly) and, once it's running, **prints two things to your screen**: an
-`ssh -N -L …` tunnel command and a `http://localhost:<port>` link. Leave this
-window open.
-
-**On your own computer** — open a *second* terminal and paste the printed tunnel
-command (it looks like nothing happens — that's correct; leave it open):
-
-```bash
-ssh -N -L <port>:<node>:<port> <you>@hydra-login01.si.edu
-```
-
-Then open the printed **`http://localhost:<port>`** link in your web browser.
-
-**When you're done**, back in the first (cluster) terminal run the `qdel <job>`
-command it printed, to stop the GUI. (It also stops on its own after 72 hours.)
-
-Inside the GUI (pick a view in the left sidebar):
-
-- **Projects / Samples / Files** — search, filter, and download the table as CSV.
-- **Taxonomy** — an interactive sunburst of the catalog's taxonomic breadth.
-- **Grab & Go** — build a custom set of samples, export a CSV or a [**MitoPilot**](https://github.com/Smithsonian/MitoPilot)
-  map file, and generate a ready-to-run copy job for their sequence data.
-
-Everything is **read-only** — you can't change or delete catalog data from the GUI.
-The sections below are for **data managers**.
-
-> **Tip:** `export SEQLEDGER_DB=<CATALOG_PATH>` in your `~/.bashrc`, then omit
-> `--db` on any command — e.g. just `seqledger gui --qsub`. An explicit `--db`
-> still overrides it.
-
-## Requirements
-
-- **Python 3.10+** for the core CLI (standard library only — runs on a Hydra login
-  node or a Mac with no install step).
-- **`rclone`** on `PATH` (or `module load`) for the `checksums` step.
-- **conda** with a `seqledger` env (`environment.yml`) only for the **GUI**
-  (`streamlit` + `pandas` + `plotly`).
-- Back up the catalog `.db` before running `init-db` on an existing catalog —
-  migrations add columns in place and are not reversible.
-
-## Quick start
-
-Placeholders in `<ANGLE_BRACKETS>` are yours to fill in (the Ocean-DNA values in
-the examples further down are just one lab's settings).
-
-```bash
-# 1. create a catalog + set this deployment's config (all flags optional)
-seqledger --db <YOUR_CATALOG>.db init-db \
-    --name "<Your Lab> sequence catalog" --slug <yourlab> \
-    --seqdata-root <SEQDATA_ROOT> --metadata-root <METADATA_ROOT> \
-    --conda-env <ENV> --login-host <LOGIN_HOST>
-
-# 2. ingest: auto-discover project folders + their <project>_mapfile.csv.
-#    The roots come from the config set in step 1, so no need to repeat them
-#    (pass --seqdata-root/--metadata-root to override for a one-off run).
-seqledger --db <YOUR_CATALOG>.db ingest
-
-# 3. browse it (serve on the I/O queue so it reads the master on Store directly)
-seqledger --db <YOUR_CATALOG>.db gui --qsub
-```
-Integrity, checksums, taxonomy, and query are separate steps — see Usage below.
-
-## Why
-
-The old flow kept one CSV per project and validated with `validate_seq_data.py`.
-Gaps this addresses:
-
-- **No content integrity** - `rclone` only compared size + mtime, so silent
-  corruption / truncated backups went undetected. We now record and compare md5s.
-- **Fragile matching** - the old "is this fastq in the metadata" test was a
-  substring search over raw CSV text (`sample_1.fastq.gz` matched
-  `sample_11.fastq.gz`). We match by exact basename, both directions.
-- **No schema enforcement** - now: required non-null fields, `R1 != R2`, unique
-  sample IDs per project, cross-project UniqID duplicate detection.
-- **No central index** - now one queryable DB ("where is USNM 477715?", "which
-  projects are not verified-backed-up?").
-
-## Design at a glance
-
-- **Backend:** one SQLite DB. Master lives on Store (backed up like the data). The
-  catalog is only metadata + checksums (a few MB), decoupled from the huge FASTQs.
-  **Store is not mounted on compute nodes**, so the GUI reaches the master one of
-  two ways: preferred, run the GUI as a job on the **I/O queue (`gui --qsub`)**,
-  which *can* read Store directly; or serve it from a **read-only copy synced to
-  Scratch** (which compute nodes do mount).
-- **Metadata entry:** unchanged - users submit the CSV map file.
-- **Checksums:** captured from `rclone md5sum` run on **both Store and P-drive**,
-  then compared. Piggybacks on the backup the data manager already runs; no hashing
-  burden on users. The same step backfills existing already-backed-up data (a
-  one-time catch-up that doubles as the first real backup audit).
-- **Frontend:** read-only Streamlit GUI served on Hydra over an SSH tunnel
-
-Core tooling (ingest / checksums / validate / query) uses only the Python stdlib,
-so it runs on a Hydra login node or a Mac with no install step. Only the GUI needs
-`streamlit` + `pandas`, provided as a conda env (`environment.yml`; `requirements.txt`
-kept for pip users).
-
-## Install
-
-Everyone installs into their own account (there's no shared environment). On Hydra,
-use the conda env so the GUI deps are present:
-
-```bash
-git clone https://github.com/OWNER/seqledger.git
-cd seqledger
-conda env create -f environment.yml    # creates an env named 'seqledger'
-conda activate seqledger
-pip install -e '.[gui]'                 # GUI + CLI; use -e . for CLI only
-```
-
-Runs without installing too: `python -m seqledger ...` from the repo root. On a Mac
-the stdlib-only CLI needs no install at all.
-
-### Conda environment name
-
-The env name comes from the `name:` field in `environment.yml` (`seqledger`), so
-`conda env create -f environment.yml` makes an env called **`seqledger`**. Override
-it with `conda env create -n <name> -f environment.yml`.
-
-**Keep the default `seqledger` unless you have a reason not to.** The `gui --qsub`
-and `integrity --batch` job scripts run `conda activate <conda_env>` on the compute
-node, where `<conda_env>` is the catalog's `conda_env` [config](#configuration)
-value (default `seqledger`). Your env name must match it. If a deployment uses a
-different name, either create your env with that name, or pass `--conda-env <name>`
-(and, for the whole catalog, set it once with
-`seqledger --db … init-db --conda-env <name>`).
-
-## Layout
-
-```
-pyproject.toml           packaging (the `seqledger` console command)
-seqledger/               the package
-  cli.py                 CLI entry point (subcommands); `python -m seqledger`
-  db.py ingest.py checksums.py validate.py integrity.py taxonomy.py query.py
-  rclone.py              rclone copy-job builder
-  mitopilot.py           [MitoPilot](https://github.com/Smithsonian/MitoPilot) map-file export
-  gui.py                 GUI launcher (local or `--qsub` on the I/O queue)
-  schema.sql             SQLite DDL (source of truth for tables)
-  app/streamlit_app.py   read-only browse GUI
-tests/                   pytest suite + fixture builders
-```
-
-## Usage
-
-```bash
-# 1. create the catalog
-seqledger --db oceandna_catalog.db init-db
-
-# 2. ingest metadata -- AUTO-DISCOVERY (recommended): point at the sequence-data
-#    root and the metadata root; no map file needed. Every top-level folder in
-#    --seqdata-root is a project, paired with '<project>_mapfile.csv' in
-#    --metadata-root. FASTQ files may be nested in subdirs -- they are found
-#    recursively. Projects are always added; pairing problems are flagged on the
-#    project row (metadata_status, shown in the GUI 'mapfile' column):
-#      missing_mapfile  folder on disk, no mapfile -> files cataloged, no samples
-#      missing_seqdata  mapfile present, no folder  -> samples cataloged, no files
-#      broken_mapfile   mapfile header malformed    -> files cataloged, no samples
-#    (an 'ok' project has a parseable mapfile and a matching folder).
-#
-#    ingest is self-driving: after loading rows it auto-runs the taxonomy-resolve
-#    step (5 below) + a data-files check on whatever is new or changed. It upserts,
-#    so re-running picks up added/fixed mapfiles (a missing_mapfile project flips to
-#    ok once its mapfile appears) and re-resolves changed names. These steps are
-#    gated so unchanged re-runs are cheap. Samples dropped from a CSV are reported
-#    but kept, not pruned (use --prune to remove them + stale file rows). A project
-#    that vanished from BOTH roots (folder + mapfile deleted) lingers unless you add
-#    --prune-projects, which deletes it (cascading to its samples/files); that step
-#    refuses to run if the roots turn up no projects, so a missing mount can't wipe
-#    the catalog. (Deleting only a mapfile flips the project to missing_mapfile and
-#    leaves its old samples in place.) Use --skip-taxonomy to load metadata only.
-#    NOTE: the integrity byte-scan (4b) is NOT run by ingest -- it is slow, so run
-#    it separately when ready.
-seqledger --db oceandna_catalog.db ingest \
-    --metadata-root ../raw_sequence_metadata \
-    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
-
-#    ingest metadata -- MANUAL (override for odd layouts): pass an explicit
-#    two-column map file (metadata csv, data dir), same format as
-#    scripts/.../example_map_file.txt. Per-project CSVs are looked up in
-#    --metadata-root (default: the map file's own dir).
-seqledger --db oceandna_catalog.db ingest map_file.txt \
-    --metadata-root ../raw_sequence_metadata \
-    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
-
-# 3. checksums: run rclone md5sum on BOTH sides, then load + compare
-rclone md5sum SI-Hydra:/store/nmnh_ocean_dna/public/raw_sequence_data > store.md5
-rclone md5sum /Volumes/nmnh-ocean-dna/Hydra_backup/store/raw_sequence_data > pdrive.md5
-seqledger --db oceandna_catalog.db checksums --store store.md5 --pdrive pdrive.md5
-#   add --source ingest for new data, --project X to scope to one project
-
-# 4. re-check the whole catalog: two per-project results
-#    - data-files: reciprocal mapfile <-> disk (missing files + orphans);
-#      needs --seqdata-root to scan disk, and is persisted to `projects`.
-#    - checksum: Store vs P-drive md5 (from the `checksums` step above).
-seqledger --db oceandna_catalog.db validate \
-    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
-
-# 4b. integrity: gzip + FASTQ line-count check of cataloged files.
-#    Stream-decompresses each *.fastq.gz to EOF (== `gzip -t`, catches truncation
-#    / CRC corruption / bit-rot), checks the total line count is a multiple of 4
-#    (does NOT validate per-record '@'/'+' framing), and compares R1/R2 read
-#    counts per sample. Per-file results land in `files`
-#    (integrity_status, gz_ok, n_reads); a per-project run status is logged to
-#    `validation_log`. Reads every byte, so it is a separate opt-in step; files
-#    are checked concurrently (--jobs, default min(8, CPU count)).
-seqledger --db oceandna_catalog.db integrity \
-    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
-#    (--seqdata-root is optional; each project's ingest-time root is used by default)
-
-# 4b-batch. integrity --batch: run the check on Hydra's I/O queue (lTIO.sq).
-#    The Store/NAS partition is only reachable from a compute node via the I/O
-#    queue, so --batch generates one qsub script per project and submits it there
-#    (respects --project to limit to one). Each remote job checks its project and
-#    writes results to <batch-dir>/results/<project>.json instead of the DB -- no
-#    two Hydra nodes ever write the shared SQLite catalog at once. The env inside
-#    each job is `source ~/.bashrc; conda activate seqledger`.
-#    Tunables: --slots (mthread slots + remote --jobs, default 4), --mem (GB/slot,
-#    default 2), --batch-dir (default ./integrity_batch), --no-submit (write the
-#    scripts but don't qsub). Note lTIO caps: 6 slots/user, 2 concurrent jobs,
-#    8G/slot, 72h wall -- with the default 4 slots a 2nd concurrent job queues.
-seqledger --db oceandna_catalog.db integrity --batch \
-    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
-#    Once the jobs finish, merge their JSON results back into the catalog (this is
-#    the only step that writes the DB; runs locally + serially, then aggregates
-#    per-project summaries + validation_log the same as a live run):
-seqledger --db oceandna_catalog.db integrity --collect integrity_batch/results
-#    Checkpointed + resumable per project: each job flushes its results JSON every
-#    ~200 checked files and, on restart, reloads its own JSON and skips already-done
-#    files -- so a job killed at the lTIO 72h wall / 12h-per-slot CPU cap resumes
-#    where it stopped when you just re-qsub it (no re-reading). --force re-reads all.
-#    Incremental skip also applies: a re-submitted job reads prior gz_ok/size
-#    from the DB and skips unchanged files that already passed. To also avoid
-#    submitting a no-op job for a project that is already fully checked, add
-#    --only-unchecked (skips projects with no never-checked file; ignored under
-#    --force):
-seqledger --db oceandna_catalog.db integrity --batch --only-unchecked \
-    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
-
-# 5. taxonomy: resolve free-text Taxon -> NCBI TaxID + lineage
-#    Downloads a pinned NCBI taxdump into <db dir>/.taxonomy (once), indexes it,
-#    resolves distinct sample Taxa (exact, then genus-anchored fuzzy), writes the
-#    results into the `taxa` table + a review CSV. By DEFAULT it resolves only taxa
-#    with no `taxa` row yet (never checked against NCBI), so a new ingest doesn't
-#    re-run every taxon. Add --refresh-unconfirmed to also re-resolve taxa resolved
-#    before but not yet confirmed, or --redo to re-resolve everything.
-#    NOTE: if you built a taxdump index before this version, rebuild it once so
-#    the new tax_names(taxid) index (large speed-up) is applied:
-#        seqledger --db oceandna_catalog.db taxonomy resolve --rebuild-index
-seqledger --db oceandna_catalog.db taxonomy resolve
-#    edit confirmed_taxid in taxonomy_review.csv for any wrong fuzzy/unresolved
-#    rows, then fold the overrides back in:
-seqledger --db oceandna_catalog.db taxonomy apply --review taxonomy_review.csv
-
-#    WoRMS (World Register of Marine Species) -- the authoritative marine register --
-#    can be resolved alongside NCBI with --source. It queries the WoRMS REST API
-#    (needs network; caches responses in <db dir>/.taxonomy/worms_cache.sqlite),
-#    filling the parallel worms_* columns of the `taxa` table (AphiaID, accepted
-#    name, synonym status, kingdom..species lineage -- WoRMS has no domain rank).
-#    Synonyms are followed to their accepted name. `both` runs NCBI + WoRMS; if
-#    WoRMS is unreachable it warns and leaves the NCBI side intact. Ingest's
-#    auto-taxonomy stays NCBI-only (offline/fast) -- run WoRMS explicitly:
-seqledger --db oceandna_catalog.db taxonomy resolve --source worms   # or: --source both
-#    review + edit confirmed_aphia_id in worms_review.csv, then apply:
-seqledger --db oceandna_catalog.db taxonomy apply --source worms --review worms_review.csv
-
-# 6. lookups
-seqledger --db oceandna_catalog.db query summary
-seqledger --db oceandna_catalog.db query uniq-id "USNM 477715"
-seqledger --db oceandna_catalog.db query search Urophycis
-seqledger --db oceandna_catalog.db query unbacked
-seqledger --db oceandna_catalog.db query mismatches
-seqledger --db oceandna_catalog.db query taxa      # fuzzy/unresolved taxa
-```
-
-### Backfill of existing data
-
-Same `checksums` command with `--source backfill` (the default). Run it per project
-(`--project ...`) in the background so you don't monopolize Store read bandwidth.
-
-### GUI (over SSH tunnel)
-
-One-time env setup on Hydra:
-
-```bash
-conda env create -f environment.yml     # creates the `seqledger` env
-conda activate seqledger                 # or: mamba env create -f environment.yml
-```
-(Existing env? `conda env update -f environment.yml`. Pip users: `pip install -r
-requirements.txt`.)
-
-**Recommended -- serve it on the I/O queue** (reads the master on Store directly,
-no Scratch copy). From a login node:
-
-```bash
 seqledger --db /store/nmnh_ocean_dna/public/oceandna_catalog.db gui --qsub
 ```
-This submits a Streamlit job to `lTIO.sq`, waits for it to start, then prints the
-exact `ssh -N -L <port>:<node>:<port> you@hydra-login01.si.edu` command to the
-screen (no digging through the job log). Run that on your local computer, open
-`http://localhost:<port>`, and `qdel <job>` when done. lTIO caps jobs at 72h wall
-and 2 concurrent jobs/user, so the GUI stops after 72h -- just resubmit.
 
-**Alternative -- run it directly** on an interactive node against a Scratch copy of
-the DB (compute nodes don't mount Store):
+After a minute or two it prints a tunnel command. Run that command on your own
+computer in a second terminal, for example:
 
 ```bash
-seqledger --db /scratch/nmnh_ocean_dna/oceandna_catalog.db gui --port 8501
+ssh -N -L 8765:127.0.0.1:8765 -J jsmith@hydra-login01.si.edu jsmith@compute-64-12
 ```
-This prints the `ssh -N -L 8501:NODE:8501 you@hydra-login01.si.edu` command; run it
-locally, then open `http://localhost:8501`. Read-only browsing plus a
-build-your-own selection view (sidebar):
 
-- **Projects** - per-project summary stats plus check fields: `mapfile`
-  (folder<->mapfile pairing + row quality: OK / flagged rows / no mapfile / no data
-  folder / broken mapfile / no usable rows),
-  `data_files` (mapfile <-> disk reciprocal: OK / "N missing, M orphan"), and
-  `checksum` (Store vs P-drive: verified / "N mismatch" / incomplete). Filter to
-  just the flagged ones ("Only mapfile issues" etc). Select a project row to see
-  its mapfile explanation + drill into its data_files issues (each missing /
-  orphan file, with sample info where known).
-- **Samples** - one row per sample; the on-screen table stays lean, but the CSV
-  export carries the full absolute R1/R2 paths + owner.
-- **Files** - one row per FASTQ: full absolute path, size, owner, backup status.
-- **Taxonomy** - interactive view of the catalog's taxonomic breadth (filter by
-  project, pick the deepest rank, toggle the `unknown` bucket), with a **source
-  toggle** to switch the whole view between **NCBI** and **WoRMS** taxonomy, an
-  interactive hierarchy chart you can switch between **sunburst and treemap**,
-  a click-scoped per-rank sample-count bar, a **resolution-quality** breakdown
-  (confirmed / exact / fuzzy / unresolved), and a **composition-by-project**
-  stacked bar (colored by a chosen rank). Populated by `taxonomy resolve`
-  (WoRMS by `--source worms`). The Samples view also shows each sample's WoRMS
-  accepted name, status, and a clickable AphiaID link.
-- **Grab & Go** - build a hand-picked set of samples. Search by project,
-  taxonomy (taxon / NCBI name / lineage), sample ID, and UniqID, with a **regex
-  toggle**; add matches (selected rows or all) to a running table that persists as
-  you refine the search. Export the table to CSV or as a **[MitoPilot](https://github.com/Smithsonian/MitoPilot) map file**
-  (ID, R1, R2, Taxon -- R1/R2 are filenames; pick which column fills the `ID`),
-  and generate an **rclone copy job** for the selected samples' sequence data: a
-  self-contained `lTIO.sq`
-  submission script (`module load tools/rclone/1.66.0`, one `rclone copy
-  --files-from` per source root, preserving the directory layout) with a
-  disk-space estimate. Copy it from the screen or download the `.job`, then
-  `qsub` it on the login node.
+Then open `http://localhost:8765` in your browser. When you are done, run the
+`qdel` command it printed. Details, Windows notes, and troubleshooting are in the
+[user guide](docs/user-guide.md).
 
-The Samples view also links each row to its NCBI datasets taxonomy browser page,
-and when a sample's UniqID is a URL (e.g. a specimen-record page) a clickable
-`UniqID link` column resolves it. Each view filters/searches and downloads CSV, and
-the Samples / Projects / Files tables have a **"Filter columns"** bar (one box per
-column) for per-column substring filtering.
-
-## Configuration
-
-Per-deployment settings live in a `config` table in the catalog DB, set at
-`init-db` (re-run it any time to change them; unset keys keep sensible defaults, so
-an existing catalog is unchanged). Because the GUI reads a copy of the DB, config
-travels with it; generated qsub/rclone scripts bake the values in.
+## 60-second start: data managers
 
 ```bash
-seqledger --db catalog.db init-db --show          # print resolved config
-seqledger --db catalog.db init-db --name "..." --conda-env myenv
-seqledger --db catalog.db init-db --set io_queue=sThM.q   # any key
+git clone https://github.com/dmacguigan/seqledger.git
+cd seqledger
+conda env create -f environment.yml
+conda activate seqledger
+pip install -e '.[gui]'
+
+# create the catalog and record where the data lives
+seqledger --db /path/to/catalog.db init-db --name "My lab sequence catalog" \
+    --seqdata-root /path/to/raw_sequence_data \
+    --metadata-root /path/to/raw_sequence_metadata
+
+# find every project folder and its <project>_mapfile.csv, load them
+seqledger --db /path/to/catalog.db ingest
+
+# check every FASTQ for damage on the I/O queue; when the jobs finish (qstat), merge
+seqledger --db /path/to/catalog.db integrity --batch
+seqledger --db /path/to/catalog.db integrity --collect integrity_batch/results
 ```
 
-| key | what it controls | default |
-|---|---|---|
-| `catalog_name` / `catalog_slug` | GUI title + CLI banner / export-file prefix | Ocean DNA … / `oceandna` |
-| `seqdata_root` / `metadata_root` | default roots for `ingest` / `validate` / `integrity` — set these once and you can omit `--seqdata-root` / `--metadata-root` on every run (an explicit flag still overrides) | (unset) |
-| `conda_env` | env activated inside generated qsub jobs | `seqledger` |
-| `login_host` | Hydra login host in GUI tunnel commands | `hydra-login01.si.edu` |
-| `io_queue` | queue for `integrity --batch`, `gui --qsub`, rclone jobs | `lTIO.sq` |
-| `rclone_module` | `module load`ed in rclone copy jobs | `tools/rclone/1.66.0` |
-| `backup_location` | "verified backup" location label | `pdrive` |
-| `fastq_extensions` | FASTQ suffixes discovered on disk | `fastq.gz,fq.gz` |
+Put `export SEQLEDGER_DB=/path/to/catalog.db` in your `~/.bashrc` to drop `--db`
+from every command. Read the [admin guide](docs/admin-guide.md) before the first
+real ingest, and the [mapfile spec](docs/reference/mapfile.md) before writing
+mapfiles.
 
-> **Not (yet) configurable:** the map file's required columns are a **fixed set** —
-> `ID`, `R1`, `R2`, `Taxon`, and a fifth `UniqID`/`UniqueID` column. The header
-> names are matched **case-insensitively**, but the set itself is hard-coded, so
-> retargeting another lab means producing map files with these columns (paths,
-> cluster settings, and catalog name are the configurable parts).
+## The `seqledger` menu
 
-## Troubleshooting
+Run `seqledger` with no subcommand in a terminal for a text menu:
 
-| you see | it means / what to do |
-|---|---|
-| `ingest` prints `WARNING: discovered 0 projects` | the roots are empty/unmounted/mistyped, or no `<project>_mapfile.csv` files — check the paths and that Store/NAS is mounted. |
-| Projects view `mapfile` = `flagged rows` | the mapfile loaded, but some rows needed repair: empty Taxon/UniqID were filled with `NA`, and empty-ID / duplicate-ID rows were skipped. The affected samples show tokens in the Samples view `flags` column (`na_uniqid`, `na_taxon`, `missing_r1`/`missing_r2`, `r1_eq_r2`). Fix the mapfile and re-ingest to clear them. |
-| Projects view `mapfile` = `no mapfile` / `broken mapfile` / `no data folder` / `no usable rows` | a project folder has no mapfile, a malformed header, no folder, or (`no usable rows`) a valid header where no row could be loaded (all empty/duplicate IDs). Select the row for details; the files are still cataloged. Fix the mapfile and re-ingest. |
-| `data_files` = "N missing / M orphan" | files listed in the mapfile aren't on disk (missing), or on-disk FASTQ aren't in the mapfile (orphan). |
-| a batch integrity/copy job "fails" near 72h | it hit the lTIO wall/CPU cap; the per-project checkpoint is saved — just **re-`qsub`** (integrity resumes; rclone `--checksum` skips copied files). |
-| `integrity --collect` skips a file "no .done marker" | that project's job is still running or was killed — let it finish (or resubmit), then re-collect. |
-| GUI: tunnel connects but browser shows "connection refused" | the Streamlit server didn't start — usually the conda env wasn't activated, or (with `--qsub`) the job is still starting; check the printed job log. |
-| a CLI command prints a one-line `error:` | re-run with `--debug` to see the full traceback. |
+```
+  Look things up
+    1  Search samples (sample ID, species, or UniqID)
+    2  Project overview
+    3  Open the browse GUI
 
-## Schema
+  Data manager tasks
+    4  Add or update projects from the mapfiles (ingest)
+    5  Check files for damage (integrity)
+    6  Verify backups from md5 listings (checksums)
+    7  Look up species names (taxonomy)
+    c  Use a different catalog, or create one
+    q  Quit
+```
 
-`projects` (1 per sequencing project; `metadata_status` / `metadata_detail` record
-folder<->mapfile pairing health from auto-discovery ingest) -> `samples` (1 per
-sample, extra map-file columns kept as JSON; `flags` records any NA-fill/skip repairs)
--> `files` (R1/R2, with `store_md5` /
-`pdrive_md5` / `md5_match`; `rel_path` may be nested when FASTQ live in subdirs).
-`backups` summarizes per-project verification; `validation_log` records
-validation runs. `taxa` holds the per distinct raw Taxon string resolution against
-**two** sources, joined to `samples.taxon`: the NCBI columns (taxid, ranked lineage
-`tax_domain`..`tax_species`, `match_type`, `confirmed`) and the parallel WoRMS
-columns (`aphia_id`, `worms_sci_name`, `worms_status`, `worms_match_type`, lineage
-`worms_kingdom`..`worms_species` -- no domain rank in WoRMS -- and `worms_confirmed`).
-See `schema.sql`.
+Each pick prints the plain command it ran ("Same thing without the menu"), so you
+can learn the commands or copy them into a script. Outside a terminal (cron,
+pipes) `seqledger` with no subcommand prints usage and exits 2.
 
-Taxonomy resolution is pure-Python (stdlib): the NCBI taxdump is parsed once into
-`<db dir>/.taxonomy/taxdump.sqlite` (git-ignored), then exact `name -> taxid` with
-a genus-anchored fuzzy fallback. Mirrors RiboPilot's `R/taxonomy.R` approach
-without the `taxonkit` binary. WoRMS resolution (`--source worms`) instead queries
-the WoRMS REST API (stdlib urllib + json, no dependencies, no API key) with its
-batch TAXAMATCH matcher, following synonyms to their accepted name; responses are
-cached in `<db dir>/.taxonomy/worms_cache.sqlite` (git-ignored) so re-runs are cheap
-and repeat/offline runs still work.
+## Documentation
 
-Ownership + size (`owner_name` / `owner_uid` / `size_bytes` on `files`, plus
-`owner_name` / `seqdata_root` on `projects`) are captured during `ingest` when
-`--seqdata-root` is reachable; re-run ingest to refresh. The data-files check result
-(`data_check_status` / `data_check_n_missing` / `data_check_n_orphan` /
-`data_check_date` on `projects`) is written by `validate --seqdata-root`; the same run
-rewrites the per-file `data_check_issues` table (missing / orphan filenames) that backs
-the GUI drill-down. The checksum result is derived from `files.md5_match`. `init-db`
-auto-migrates older catalogs by adding the new columns.
-
-## Open items
-
-- Confirm the fifth map-file column name against a live map file. The guide says
-  `UniqID`; the old script checked `UniqueID`. The validator accepts either
-  (`seqledger/db.py: UNIQID_ALIASES`), matched case-insensitively, so both work
-  regardless; pin the canonical name once confirmed.
-- Decide the canonical Store/Scratch paths for the master DB and its GUI copy.
+- [User guide](docs/user-guide.md): install, start the GUI, the views, Grab & Go,
+  getting your FASTQs, troubleshooting
+- [Admin guide](docs/admin-guide.md): concepts, install and update, backups,
+  ingest, checks, taxonomy, hosting the GUI, routine runbook, recovery
+- Reference
+  - [Command line](docs/reference/cli.md): every subcommand and flag, exit codes
+  - [Configuration](docs/reference/config.md): per-catalog settings
+  - [Mapfile format](docs/reference/mapfile.md): columns, rules, example
+  - [Status values](docs/reference/statuses.md): what each status and label means
+  - [Data model](docs/reference/data-model.md): tables, columns, example SQL
+- [Glossary](docs/glossary.md): Store, P-drive, Scratch, lTIO, UniqID, and more
+- [CHANGELOG](CHANGELOG.md)
 
 ## Tests
 
 ```bash
-python -m pytest tests/ -q
+conda activate seqledger
+python -m pytest -q
 ```
+
+Or `pip install -e '.[test]'` in any Python 3.10+ environment.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

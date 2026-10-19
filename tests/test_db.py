@@ -6,41 +6,17 @@ import pytest
 from seqledger import db as odb
 
 
-def _cols(conn, table):
-    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
-
-
-def _fresh_db(tmp_path):
-    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
-    odb.init_db(conn)
-    return conn
-
-
-def test_migration_adds_columns_to_old_db(tmp_path):
+def test_init_db_refuses_old_catalog(tmp_path):
     conn = odb.connect(os.path.join(tmp_path, "old.db"))
-    # Simulate a pre-migration catalog: projects/files without owner columns.
-    conn.executescript("""
-        CREATE TABLE projects (project_id TEXT PRIMARY KEY, source TEXT,
-            seq_data_relpath TEXT);
-        CREATE TABLE files (file_pk INTEGER PRIMARY KEY, project_id TEXT,
-            sample_pk INTEGER, filename TEXT, rel_path TEXT, size_bytes INTEGER);
-    """)
-    conn.commit()
-    assert "owner_name" not in _cols(conn, "files")
-
-    odb.init_db(conn)  # runs migrations
-    assert {"seqdata_root", "owner_uid", "owner_name"} <= _cols(conn, "projects")
-    assert {"owner_uid", "owner_name"} <= _cols(conn, "files")
-
-    # idempotent: second run does not error or duplicate
-    odb.init_db(conn)
-    assert {"owner_uid", "owner_name"} <= _cols(conn, "files")
+    conn.execute("CREATE TABLE files (file_pk INTEGER PRIMARY KEY, project_id TEXT, filename TEXT)")
+    with pytest.raises(RuntimeError, match="older seqledger"):
+        odb.init_db(conn)
 
 
 # --- #15: CHECK constraints on freshly-created catalogs ---
 
-def test_check_rejects_bad_files_flags(tmp_path):
-    conn = _fresh_db(tmp_path)
+def test_check_rejects_bad_files_flags(fresh_db):
+    conn = fresh_db
     conn.execute("INSERT INTO projects(project_id) VALUES ('p1')")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
@@ -53,8 +29,8 @@ def test_check_rejects_bad_files_flags(tmp_path):
             "INSERT INTO files(project_id, filename, direction) VALUES ('p1','c.fastq.gz','R3')")
 
 
-def test_check_allows_valid_and_null_files_flags(tmp_path):
-    conn = _fresh_db(tmp_path)
+def test_check_allows_valid_and_null_files_flags(fresh_db):
+    conn = fresh_db
     conn.execute("INSERT INTO projects(project_id) VALUES ('p1')")
     # R1/R2/NULL directions and 0/1/NULL flags are all accepted (rel_path is NOT NULL)
     conn.execute("INSERT INTO files(project_id, filename, rel_path, direction, md5_match, gz_ok) "
@@ -66,8 +42,8 @@ def test_check_allows_valid_and_null_files_flags(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 3
 
 
-def test_check_rejects_bad_backups_and_taxa(tmp_path):
-    conn = _fresh_db(tmp_path)
+def test_check_rejects_bad_backups_and_taxa(fresh_db):
+    conn = fresh_db
     conn.execute("INSERT INTO projects(project_id) VALUES ('p1')")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO backups(project_id, location, verified) "
@@ -113,61 +89,36 @@ def test_connect_ro_refuses_writes(tmp_path):
         ro.execute("INSERT INTO projects(project_id) VALUES ('p2')")
 
 
-_OLD_FILES_DDL = """
-DROP TABLE files;
-CREATE TABLE files (
-  file_pk INTEGER PRIMARY KEY,
-  project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
-  sample_pk INTEGER REFERENCES samples(sample_pk) ON DELETE CASCADE,
-  direction TEXT, filename TEXT NOT NULL, rel_path TEXT, size_bytes INTEGER,
-  owner_uid INTEGER, owner_name TEXT, md5 TEXT, md5_source TEXT, store_md5 TEXT,
-  pdrive_md5 TEXT, md5_match INTEGER, date_hashed TEXT, integrity_status TEXT,
-  gz_ok INTEGER, n_reads INTEGER, integrity_date TEXT,
-  UNIQUE (project_id, filename));
-"""
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_init_db_new_catalog_is_0600(tmp_path):
+    p = os.path.join(tmp_path, "new.db")
+    odb.init_db(odb.connect(p))
+    assert os.stat(p).st_mode & 0o777 == 0o600
 
 
-def test_migrate_files_relpath_unique_rebuild(tmp_path):
-    import sqlite3
-    import pytest
-    conn = _fresh_db(tmp_path)          # current schema (rel_path UNIQUE)
-    conn.executescript(_OLD_FILES_DDL)  # downgrade files to the legacy basename key
-    conn.execute("INSERT INTO projects(project_id) VALUES ('p')")
-    conn.execute("INSERT INTO samples(sample_pk, project_id, sample_id) VALUES (5,'p','s1')")
-    conn.execute("INSERT INTO files(file_pk, project_id, sample_pk, filename, rel_path, md5_match) "
-                 "VALUES (50,'p',5,'x.fastq.gz','p/sub/x.fastq.gz',1)")
-    conn.execute("INSERT INTO files(file_pk, project_id, sample_pk, filename, rel_path) "
-                 "VALUES (51,'p',5,'y.fastq.gz',NULL)")  # legacy NULL rel_path
-    conn.commit()
-    assert ["project_id", "filename"] in odb._files_unique_keys(conn)
-
-    odb.init_db(conn)  # triggers the table rebuild
-
-    keys = odb._files_unique_keys(conn)
-    assert ["project_id", "rel_path"] in keys
-    assert ["project_id", "filename"] not in keys
-    got = {r["file_pk"]: (r["filename"], r["rel_path"], r["md5_match"])
-           for r in conn.execute("SELECT file_pk, filename, rel_path, md5_match FROM files")}
-    assert got[50] == ("x.fastq.gz", "p/sub/x.fastq.gz", 1)   # data + file_pk preserved
-    assert got[51][1] == "y.fastq.gz"                          # NULL rel_path backfilled
-    # same-basename / different rel_path now coexist; duplicate rel_path rejected
-    conn.execute("INSERT INTO files(project_id, sample_pk, filename, rel_path) "
-                 "VALUES ('p',5,'x.fastq.gz','p/other/x.fastq.gz')")
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("INSERT INTO files(project_id, filename, rel_path) "
-                     "VALUES ('p','z.fastq.gz','p/sub/x.fastq.gz')")
-    # idempotent: a second init-db is a no-op
-    odb.init_db(conn)
-    assert ["project_id", "rel_path"] in odb._files_unique_keys(conn)
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_init_db_leaves_existing_catalog_perms(tmp_path):
+    p = os.path.join(tmp_path, "old.db")
+    odb.init_db(odb.connect(p))
+    os.chmod(p, 0o644)
+    odb.init_db(odb.connect(p))
+    assert os.stat(p).st_mode & 0o777 == 0o644
 
 
-def test_migrate_files_relpath_refuses_on_duplicate(tmp_path):
-    import pytest
-    conn = _fresh_db(tmp_path)
-    conn.executescript(_OLD_FILES_DDL)
-    conn.execute("INSERT INTO projects(project_id) VALUES ('p')")
-    conn.execute("INSERT INTO files(project_id, filename, rel_path) VALUES ('p','a.gz','p/x.gz')")
-    conn.execute("INSERT INTO files(project_id, filename, rel_path) VALUES ('p','b.gz','p/x.gz')")
-    conn.commit()
-    with pytest.raises(RuntimeError):  # refuses rather than a mid-rebuild IntegrityError
-        odb.init_db(conn)
+def test_writer_busy_timeout_is_60s(tmp_path):
+    conn = odb.connect(os.path.join(tmp_path, "w.db"))
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 60000
+
+
+def test_ro_uri_escapes_question_and_hash(tmp_path):
+    d = tmp_path / "we?ird#dir"
+    d.mkdir()
+    p = str(d / "cat.db?x=1")
+    odb.init_db(odb.connect(p))
+    raw = sqlite3.connect(odb.ro_uri(p), uri=True)
+    assert raw.execute("SELECT count(*) FROM sqlite_master WHERE name='files'").fetchone()[0] == 1
+    with pytest.raises(sqlite3.OperationalError):
+        raw.execute("CREATE TABLE evil(x)")
+    with pytest.raises(sqlite3.OperationalError):
+        sqlite3.connect(odb.ro_uri(str(d / "missing.db")), uri=True).execute("SELECT 1")
+    assert not (d / "missing.db").exists()

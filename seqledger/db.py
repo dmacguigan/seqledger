@@ -3,6 +3,7 @@
 import os
 import re
 import sqlite3
+import urllib.parse
 
 SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
 
@@ -37,22 +38,48 @@ CONFIG_DEFAULTS = {
 
 
 def get_config(conn, key, default=None):
-    """Config value for key, falling back to CONFIG_DEFAULTS then `default`.
-
-    Tolerates a missing `config` table (an older read-only catalog copy that
-    predates it), so the GUI on a stale Scratch replica still resolves defaults.
-    """
-    try:
-        row = conn.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
-    except sqlite3.OperationalError:
-        row = None
+    """Config value for key, falling back to CONFIG_DEFAULTS then `default`."""
+    row = conn.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
     if row is not None and row["value"] is not None:
         return row["value"]
     return CONFIG_DEFAULTS.get(key, default)
 
 
+# Config keys pasted into generated shell/qsub scripts; values must match SCRIPT_SAFE_RE.
+SCRIPT_CONFIG_KEYS = ("conda_env", "io_queue", "rclone_module", "login_host", "catalog_slug")
+SCRIPT_SAFE_RE = re.compile(r"[A-Za-z0-9._@:/-]+")
+
+
+def check_config_value(key, value):
+    """Raise ValueError if a config value is unsafe to store."""
+    value = str(value)
+    if any(c in value for c in "\n\r\0"):
+        raise ValueError(f"config {key}: value must not contain a newline, carriage return, or NUL")
+    if key in SCRIPT_CONFIG_KEYS and not SCRIPT_SAFE_RE.fullmatch(value):
+        raise ValueError(f"config {key}={value!r}: only letters, digits, and . _ @ : / - are allowed")
+
+
+def check_directive(value):
+    """Return value for an SGE '#$' line; raise ValueError on whitespace/newlines."""
+    value = str(value)
+    if not value or re.search(r"\s|\0", value):
+        raise ValueError(f"unsafe value for a qsub directive: {value!r}")
+    return value
+
+
+def qsub_header(name, log, queue, mem, slots=None):
+    """Shebang plus the SGE '#$' block for an I/O-queue job (mem is GB per slot)."""
+    name, log, queue = (check_directive(v) for v in (name, log, queue))
+    pe = f"#$ -pe mthread {slots}\n" if slots else ""
+    return (f"#!/bin/bash\n#$ -N {name}\n#$ -o {log}\n#$ -j y\n#$ -terse\n#$ -notify\n"
+            f"{pe}#$ -q {queue} -l ioq\n"
+            f"#$ -l mres={mem * (slots or 1)}G,h_data={mem}G,h_vmem={mem}G\n"
+            "#$ -S /bin/bash\n#$ -cwd\n")
+
+
 def set_config(conn, key, value):
     """Upsert one config key (no commit; caller commits)."""
+    check_config_value(key, value)
     conn.execute(
         "INSERT INTO config(key, value, updated_at) VALUES (?, ?, date('now')) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
@@ -62,26 +89,41 @@ def set_config(conn, key, value):
 def resolve_config(conn):
     """All config keys as a dict (defaults merged with any stored rows)."""
     cfg = dict(CONFIG_DEFAULTS)
-    try:
-        for r in conn.execute("SELECT key, value FROM config"):
-            if r["value"] is not None:
-                cfg[r["key"]] = r["value"]
-    except sqlite3.OperationalError:
-        pass
+    for r in conn.execute("SELECT key, value FROM config"):
+        if r["value"] is not None:
+            cfg[r["key"]] = r["value"]
     return cfg
 
 
 def fastq_globs(exts_csv):
-    """Turn a 'fastq.gz,fq.gz' config string into ['*.fastq.gz', '*.fq.gz']."""
-    return ["*." + e.strip().lstrip(".") for e in (exts_csv or "").split(",") if e.strip()]
+    """Turn a 'fastq.gz,fq.gz' config string into ['*.fastq.gz', '*.fq.gz'] (default if empty)."""
+    return (["*." + e.strip().lstrip(".") for e in (exts_csv or "").split(",") if e.strip()]
+            or fastq_globs(CONFIG_DEFAULTS["fastq_extensions"]))
+
+
+def read_text(path):
+    """Read a text file, tolerating UTF-16 (BOM), UTF-8 BOM, and cp1252 exports."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
 
 
 def connect(db_path):
     """Open a SQLite connection with foreign keys on and Row factory."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=60)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def ro_uri(db_path):
+    """SQLite read-only URI for db_path, with ?/# in the path escaped."""
+    return f"file:{urllib.parse.quote(db_path, safe='/')}?mode=ro"
 
 
 def connect_ro(db_path):
@@ -89,9 +131,10 @@ def connect_ro(db_path):
 
     For paths that must not write the shared DB over NFS -- notably the remote
     integrity batch worker (--emit-json), which only reads its file list. mode=ro
-    (not immutable) so it stays correct while the CLI writes the master elsewhere.
+    (not immutable) so it stays correct while the CLI writes the master elsewhere;
+    timeout lets SQLite wait out a concurrent write lock.
     """
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(ro_uri(db_path), uri=True, timeout=15)
     conn.row_factory = sqlite3.Row
     # Defense in depth on top of mode=ro: refuse any write attempt outright.
     # (foreign_keys is irrelevant on a pure-read connection, so it stays off.)
@@ -99,165 +142,23 @@ def connect_ro(db_path):
     return conn
 
 
-# Columns added after the initial schema. Applied to pre-existing DBs on init.
-_MIGRATIONS = [
-    ("projects", "seqdata_root", "TEXT"),
-    ("projects", "owner_uid", "INTEGER"),
-    ("projects", "owner_name", "TEXT"),
-    ("projects", "data_check_status", "TEXT"),
-    ("projects", "data_check_n_missing", "INTEGER"),
-    ("projects", "data_check_n_orphan", "INTEGER"),
-    ("projects", "data_check_date", "TEXT"),
-    ("projects", "metadata_status", "TEXT"),
-    ("projects", "metadata_detail", "TEXT"),
-    ("samples", "flags", "TEXT"),
-    ("files", "owner_uid", "INTEGER"),
-    ("files", "owner_name", "TEXT"),
-    ("files", "integrity_status", "TEXT"),
-    ("files", "gz_ok", "INTEGER"),
-    ("files", "n_reads", "INTEGER"),
-    ("files", "integrity_date", "TEXT"),
-    # WoRMS resolution columns on `taxa` (parallel to the NCBI columns), added by
-    # `taxonomy resolve --source worms`. Existing catalogs pick these up on init-db.
-    ("taxa", "aphia_id", "INTEGER"),
-    ("taxa", "worms_sci_name", "TEXT"),
-    ("taxa", "worms_status", "TEXT"),
-    ("taxa", "worms_match_type", "TEXT"),
-    ("taxa", "worms_rank", "TEXT"),
-    ("taxa", "worms_kingdom", "TEXT"),
-    ("taxa", "worms_phylum", "TEXT"),
-    ("taxa", "worms_class", "TEXT"),
-    ("taxa", "worms_order", "TEXT"),
-    ("taxa", "worms_family", "TEXT"),
-    ("taxa", "worms_genus", "TEXT"),
-    ("taxa", "worms_species", "TEXT"),
-    ("taxa", "worms_lineage", "TEXT"),
-    ("taxa", "worms_alternatives", "TEXT"),
-    ("taxa", "worms_is_marine", "INTEGER"),
-    ("taxa", "worms_confirmed", "INTEGER DEFAULT 0"),
-    ("taxa", "worms_date_resolved", "TEXT"),
-]
-
-
-# New `files` table body used to rebuild an older catalog whose UNIQUE key is the
-# basename (project_id, filename) into the current (project_id, rel_path). KEEP IN
-# SYNC with the files table in schema.sql (same columns/CHECKs; only the table name
-# and the UNIQUE differ). SQLite cannot ALTER a constraint, so we create-copy-swap.
-_FILES_REBUILD_DDL = """
-DROP TABLE IF EXISTS files_new;
-CREATE TABLE files_new (
-    file_pk      INTEGER PRIMARY KEY,
-    project_id   TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
-    sample_pk    INTEGER REFERENCES samples(sample_pk) ON DELETE CASCADE,
-    direction    TEXT CHECK(direction IN ('R1','R2')),
-    filename     TEXT NOT NULL,
-    rel_path     TEXT NOT NULL,
-    size_bytes   INTEGER,
-    owner_uid    INTEGER,
-    owner_name   TEXT,
-    md5          TEXT,
-    md5_source   TEXT,
-    store_md5    TEXT,
-    pdrive_md5   TEXT,
-    md5_match    INTEGER CHECK(md5_match IN (0,1)),
-    date_hashed  TEXT,
-    integrity_status TEXT,
-    gz_ok            INTEGER CHECK(gz_ok IN (0,1)),
-    n_reads          INTEGER,
-    integrity_date   TEXT,
-    UNIQUE (project_id, rel_path)
-);
-"""
-
-
-def _files_unique_keys(conn):
-    """Column lists of every UNIQUE constraint on `files` (origin='u' indexes)."""
-    keys = []
-    for idx in conn.execute("PRAGMA index_list(files)"):
-        if idx["origin"] == "u":
-            keys.append([r["name"] for r in
-                         conn.execute(f"PRAGMA index_info('{idx['name']}')")])
-    return keys
-
-
-def _rebuild_files_relpath_unique(conn):
-    """Re-key `files` from UNIQUE(project_id, filename) to UNIQUE(project_id, rel_path).
-
-    A file's identity is its relative path, not its basename: two files can share a
-    basename in different subdirs of one project, and md5/integrity matching joins on
-    rel_path. Nothing references `files`, so a create-copy-drop-rename is safe; file_pk
-    (and thus samples' file linkage) is preserved. Idempotent: callers only invoke this
-    when the rel_path UNIQUE is absent. Legacy NULL rel_path is backfilled from filename.
-    """
-    # Refuse rather than hit a mid-rebuild IntegrityError: surface any rows that would
-    # collide on the new key so the operator can resolve them (then re-run init-db).
-    dup = conn.execute(
-        """SELECT project_id, COALESCE(rel_path, filename) AS rp, COUNT(*) AS c
-           FROM files GROUP BY project_id, rp HAVING c > 1 LIMIT 1""").fetchone()
-    if dup is not None:
-        raise RuntimeError(
-            "cannot migrate files to UNIQUE(project_id, rel_path): a duplicate "
-            f"(project_id, rel_path) already exists, e.g. project {dup['project_id']!r} / "
-            f"path {dup['rp']!r}. Remove the duplicate file row(s) and re-run init-db.")
-    old_cols = [r["name"] for r in conn.execute("PRAGMA table_info(files)")]
-    conn.executescript(_FILES_REBUILD_DDL)
-    new_cols = {r["name"] for r in conn.execute("PRAGMA table_info(files_new)")}
-    copy = [c for c in old_cols if c in new_cols]
-    select_list = ", ".join(
-        "COALESCE(rel_path, filename)" if c == "rel_path" else c for c in copy)
-    conn.execute(
-        f"INSERT INTO files_new ({', '.join(copy)}) SELECT {select_list} FROM files")
-    conn.execute("DROP TABLE files")
-    conn.execute("ALTER TABLE files_new RENAME TO files")
-    # Recreate the indexes that lived on the old table (schema.sql versions).
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_sample ON files(sample_pk)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_proj_filename "
-                 "ON files(project_id, filename)")
-
-
-def _migrate(conn):
-    """Add any columns missing from an older DB (idempotent)."""
-    # The table/column/decl identifiers interpolated into the f-string DDL below all
-    # come from the hardcoded _MIGRATIONS constant (never user input), so building the
-    # statements with f-strings is safe -- SQLite has no parameter binding for DDL.
-    for table, column, decl in _MIGRATIONS:
-        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
-        if not cols:
-            continue  # table doesn't exist in this DB -> nothing to migrate
-        if column not in cols:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
-    # Settle the R1/R2 column name on 'direction' (was 'role', briefly 'read').
-    fcols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
-    if "direction" not in fcols:
-        if "role" in fcols:
-            conn.execute("ALTER TABLE files RENAME COLUMN role TO direction")
-        elif "read" in fcols:
-            conn.execute("ALTER TABLE files RENAME COLUMN read TO direction")
-        else:
-            # No known legacy name to rename; add the column so downstream queries
-            # (which all reference files.direction) never hit 'no such column'.
-            conn.execute("ALTER TABLE files ADD COLUMN direction TEXT")
-
-    # Re-key files to UNIQUE(project_id, rel_path) if it still uses the old basename
-    # key. Runs after the ADD COLUMN / rename steps so the copied table is complete.
-    fcols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
-    if fcols and "rel_path" in fcols and ["project_id", "rel_path"] not in _files_unique_keys(conn):
-        _rebuild_files_relpath_unique(conn)
-
-    # Partial index for `query mismatches`; created here (not in schema.sql) and
-    # guarded, because it references md5_match, which a partial/older `files` table
-    # may not have (schema.sql's executescript would fail on it).
-    if "md5_match" in {r["name"] for r in conn.execute("PRAGMA table_info(files)")}:
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_files_mismatch "
-                     "ON files(md5_match) WHERE md5_match = 0")
-
-
 def init_db(conn, schema_path=SCHEMA_PATH):
-    """Create tables from schema.sql, then apply migrations (idempotent)."""
+    """Create tables from schema.sql (idempotent on a current catalog)."""
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    new = bool(path) and os.path.getsize(path) == 0
     with open(schema_path) as f:
-        conn.executescript(f.read())
-    _migrate(conn)
+        schema = f.read()
+    ref = sqlite3.connect(":memory:")
+    ref.executescript(schema)
+    for (table,) in ref.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if have and {r[1] for r in ref.execute(f"PRAGMA table_info({table})")} - have:
+            raise RuntimeError(f"catalog table {table!r} is from an older seqledger; "
+                               "run init-db with seqledger 0.1.0 first")
+    conn.executescript(schema)
     conn.commit()
+    if new:
+        os.chmod(path, 0o600)
 
 
 def header_uniqid_column(header):

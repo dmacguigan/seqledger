@@ -1,9 +1,11 @@
 import os
 
+import pytest
+
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import checksums as ochecksums
-from helpers import make_project, write_map_file, write_md5
+from helpers import make_project, write_md5
 
 
 def _setup_project(tmp_path):
@@ -14,10 +16,9 @@ def _setup_project(tmp_path):
         ("i2", "i2_1.fastq.gz", "i2_2.fastq.gz", "Gadus", "U2"),
     ]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
-    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     conn = odb.connect(os.path.join(tmp_path, "cat.db"))
     odb.init_db(conn)
-    oingest.ingest_map_file(conn, map_file, seqdata_root=root)
+    oingest.ingest_tree(conn, root, root)
     return conn, root
 
 
@@ -118,7 +119,7 @@ def test_empty_store_listing_warns_and_leaves_status_incomplete(tmp_path):
     store = write_md5(str(tmp_path / "store.md5"), [])  # truncated to nothing
     pdrive = write_md5(str(tmp_path / "pdrive.md5"), _md5_entries())
 
-    summary = ochecksums.load_checksums(conn, store, pdrive)
+    summary = ochecksums.load_checksums(conn, store, pdrive, force=True)
 
     assert any("Store md5 listing is empty" in w for w in summary["warnings"])
     # No file can be verified with the store side missing; all stay uncompared.
@@ -157,3 +158,103 @@ def test_checksum_matches_by_relpath_not_basename(tmp_path):
         "SELECT rel_path, md5_match FROM files WHERE project_id=?", (pid,))}
     assert got[f"{pid}/laneA/x_1.fastq.gz"] == 1
     assert got[f"{pid}/laneB/x_1.fastq.gz"] == 0   # correctly mismatched, no crosstalk
+
+
+def _setup_two_projects(tmp_path):
+    root = str(tmp_path / "raw_sequence_data")
+    os.makedirs(root, exist_ok=True)
+    for pid in ("projA", "projB"):
+        rows = [("i1", "i1_1.fastq.gz", "i1_2.fastq.gz", "Gadus", f"{pid}U1")]
+        make_project(root, pid, f"{pid}_mapfile.csv", rows)
+    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
+    odb.init_db(conn)
+    oingest.ingest_tree(conn, root, root)
+    full = [("a" * 32, f"{pid}/i1_{d}.fastq.gz")
+            for pid in ("projA", "projB") for d in (1, 2)]
+    s = write_md5(str(tmp_path / "s0.md5"), full)
+    p = write_md5(str(tmp_path / "p0.md5"), full)
+    ochecksums.load_checksums(conn, s, p)
+    return conn
+
+
+def _state(conn, pid):
+    m = [r[0] for r in conn.execute(
+        "SELECT md5_match FROM files WHERE project_id=? ORDER BY file_pk", (pid,))]
+    v = conn.execute(
+        "SELECT verified FROM backups WHERE project_id=?", (pid,)).fetchone()[0]
+    return m, v
+
+
+def _projA_only(tmp_path):
+    entries = [("a" * 32, f"projA/i1_{d}.fastq.gz") for d in (1, 2)]
+    return (write_md5(str(tmp_path / "sA.md5"), entries),
+            write_md5(str(tmp_path / "pA.md5"), entries))
+
+
+def test_listing_for_one_project_leaves_others_untouched(tmp_path):
+    conn = _setup_two_projects(tmp_path)
+    assert _state(conn, "projB") == ([1, 1], 1)
+    s, p = _projA_only(tmp_path)
+    summary = ochecksums.load_checksums(conn, s, p)
+    assert summary["absent"] == 0
+    assert _state(conn, "projA") == ([1, 1], 1)
+    assert _state(conn, "projB") == ([1, 1], 1)
+
+
+def test_full_reset_resets_projects_absent_from_listing(tmp_path):
+    conn = _setup_two_projects(tmp_path)
+    s, p = _projA_only(tmp_path)
+    summary = ochecksums.load_checksums(conn, s, p, full_reset=True, force=True)
+    assert summary["absent"] == 2
+    assert _state(conn, "projA") == ([1, 1], 1)
+    assert _state(conn, "projB") == ([None, None], 0)
+
+
+def test_truncated_listing_aborts_without_commit_unless_force(tmp_path):
+    conn = _setup_two_projects(tmp_path)
+    s = write_md5(str(tmp_path / "s.md5"), [])
+    p = write_md5(str(tmp_path / "p.md5"),
+                  [("a" * 32, f"projA/i1_{d}.fastq.gz") for d in (1, 2)])
+    with pytest.raises(ValueError, match="--force"):
+        ochecksums.load_checksums(conn, s, p)
+    conn.rollback()
+    assert _state(conn, "projA") == ([1, 1], 1)
+    ochecksums.load_checksums(conn, s, p, force=True)
+    assert _state(conn, "projA") == ([None, None], 0)
+    assert _state(conn, "projB") == ([1, 1], 1)
+
+
+def test_uppercase_md5_matches_lowercase(tmp_path):
+    conn, _ = _setup_project(tmp_path)
+    store = write_md5(str(tmp_path / "store.md5"), _md5_entries())
+    pdrive = write_md5(str(tmp_path / "pdrive.md5"),
+                       [(m.upper(), rp) for m, rp in _md5_entries()])
+    ochecksums.load_checksums(conn, store, pdrive)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM files WHERE md5_match=1").fetchone()[0] == 4
+
+
+def test_dot_slash_and_backslash_paths_match(tmp_path):
+    conn, _ = _setup_project(tmp_path)
+    store = write_md5(str(tmp_path / "store.md5"),
+                      [(m, "./" + rp) for m, rp in _md5_entries()])
+    pdrive = write_md5(str(tmp_path / "pdrive.md5"),
+                       [(m, "*" + rp.replace("/", "\\")) for m, rp in _md5_entries()])
+    summary = ochecksums.load_checksums(conn, store, pdrive)
+    assert summary["matched"] == 4
+    assert conn.execute(
+        "SELECT COUNT(*) FROM files WHERE md5_match=1").fetchone()[0] == 4
+
+
+def test_backup_location_config_honored(tmp_path):
+    from seqledger.cli import run_query
+    conn, _ = _setup_project(tmp_path)
+    odb.set_config(conn, "backup_location", "nas")
+    entries = _md5_entries()
+    ochecksums.load_checksums(conn, write_md5(str(tmp_path / "s.md5"), entries),
+                              write_md5(str(tmp_path / "p.md5"), entries))
+    locs = [r[0] for r in conn.execute("SELECT location FROM backups")]
+    assert locs == ["nas"]
+    assert run_query(conn, "unbacked") == []
+    odb.set_config(conn, "backup_location", "pdrive")
+    assert [r["project_id"] for r in run_query(conn, "unbacked")] == ["genohub-1_X"]

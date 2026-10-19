@@ -78,13 +78,13 @@ CREATE TABLE IF NOT EXISTS files (
     integrity_date   TEXT,              -- ISO date of the last integrity check
     -- Physical identity is the relative path, NOT the basename: two files can share
     -- a basename in different subdirs of one project (lane/run splits), and md5/
-    -- integrity matching joins on rel_path. (Was UNIQUE(project_id, filename); older
-    -- catalogs are rebuilt to this by db._migrate.)
+    -- integrity matching joins on rel_path.
     UNIQUE (project_id, rel_path)
 );
 CREATE INDEX IF NOT EXISTS idx_files_sample ON files(sample_pk);
 -- Basename lookups (mapfile R1/R2 matching, display) are non-unique now.
 CREATE INDEX IF NOT EXISTS idx_files_proj_filename ON files(project_id, filename);
+CREATE INDEX IF NOT EXISTS idx_files_mismatch ON files(md5_match) WHERE md5_match = 0;
 
 -- Controlled taxonomy per distinct raw Taxon string (shared across samples).
 -- Populated by `seqledger.py taxonomy resolve` against a local NCBI taxdump.

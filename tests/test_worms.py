@@ -227,6 +227,54 @@ def test_apply_review_skips_bad_aphia_id(tmp_path, monkeypatch):
     assert any("not found in WoRMS" in s for s in skipped)
 
 
+def test_review_csv_prefills_only_exact(tmp_path, monkeypatch):
+    import csv
+    _patch(monkeypatch)
+    results = oworms.resolve_taxa_worms(
+        ["Thunnus thynnus", "Gadus", "Nonexistent blobfish"], str(tmp_path / "tax"))
+    review = str(tmp_path / "r.csv")
+    oworms.write_review_csv_worms(results, review)
+    with open(review, newline="") as fh:
+        rows = {r["taxon"]: r for r in csv.DictReader(fh)}
+    assert rows["Thunnus thynnus"]["confirmed_aphia_id"] == "127029"
+    assert rows["Gadus"]["aphia_id"] == "125732"
+    assert rows["Gadus"]["confirmed_aphia_id"] == ""
+    assert rows["Nonexistent blobfish"]["confirmed_aphia_id"] == ""
+
+
+def test_apply_review_utf8_bom_and_cp1252(tmp_path, monkeypatch):
+    _patch(monkeypatch)
+    conn = _catalog(tmp_path, ["Thunnus thynnus"])
+    taxdir = str(tmp_path / "tax")
+    review = str(tmp_path / "r.csv")
+    for data in ("taxon,confirmed_aphia_id\nThunnus thynnus,127029\n".encode("utf-8-sig"),
+                 "taxon,note,confirmed_aphia_id\nThunnus thynnus,caf\u00e9,127029\n"
+                 .encode("cp1252")):
+        with open(review, "wb") as fh:
+            fh.write(data)
+        assert oworms.apply_review_worms(conn, taxdir, review) == (1, [])
+
+
+def test_apply_review_wrong_file_type(tmp_path, monkeypatch):
+    import pytest
+    _patch(monkeypatch)
+    conn = _catalog(tmp_path, ["Thunnus thynnus"])
+    review = str(tmp_path / "r.csv")
+    with open(review, "w", newline="") as fh:
+        fh.write("taxon,confirmed_taxid\nThunnus thynnus,8237\n")
+    with pytest.raises(ValueError, match="confirmed_aphia_id"):
+        oworms.apply_review_worms(conn, str(tmp_path / "tax"), review)
+
+
+def test_worms_upsert_does_not_stamp_ncbi_date(tmp_path, monkeypatch):
+    _patch(monkeypatch)
+    conn = _catalog(tmp_path, ["Thunnus thynnus"])
+    oworms.resolve_catalog_worms(conn, str(tmp_path / "tax"), scope="new")
+    row = conn.execute("SELECT date_resolved, worms_date_resolved FROM taxa "
+                       "WHERE taxon='Thunnus thynnus'").fetchone()
+    assert row["date_resolved"] is None and row["worms_date_resolved"] is not None
+
+
 # --- #14: only high-confidence WoRMS matches are auto-accepted ----------------
 
 # A loose (phonetic / near_2+) candidate that must NOT be written as authoritative.

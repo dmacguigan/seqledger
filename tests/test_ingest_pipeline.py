@@ -1,14 +1,9 @@
 import os
 
 from seqledger import db as odb
-from seqledger import cli as _cli
-from helpers import make_project, write_map_file
+from seqledger import cli
+from helpers import make_project
 from test_taxonomy import _write_taxdump
-
-
-def _load_cli():
-    """The CLI module (seqledger.cli); .main(argv) is the entry point."""
-    return _cli
 
 
 def test_ingest_runs_taxonomy_and_datafiles_not_integrity(tmp_path, capsys):
@@ -16,12 +11,11 @@ def test_ingest_runs_taxonomy_and_datafiles_not_integrity(tmp_path, capsys):
     os.makedirs(root, exist_ok=True)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
-    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     taxdir = _write_taxdump(str(tmp_path / "tax"))
     db = str(tmp_path / "cat.db")
+    cli.main(["--db", db, "init-db"])
 
-    cli = _load_cli()
-    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
+    cli.main(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root, "--taxdir", taxdir])
 
     conn = odb.connect(db)
     # ingest happened
@@ -36,11 +30,11 @@ def test_ingest_runs_taxonomy_and_datafiles_not_integrity(tmp_path, capsys):
     assert os.path.exists(os.path.join(os.path.dirname(db), "taxonomy_review.csv"))
 
     out = capsys.readouterr().out
-    assert "== ingest ==" in out and "== integrity ==" not in out
-    assert "== taxonomy resolve ==" in out and "ingest complete." in out
+    assert "==" not in out and "[OK]" not in out
+    assert "Species names: 1 looked up" in out
     assert "1 new sample(s)" in out
-    # points the user at the separate integrity step
-    assert "integrity" in out and "--batch" in out
+    # points the user at the separate integrity step; Hydra batch hint only at -v
+    assert "Next: seqledger" in out and "integrity" in out and "--batch" not in out
 
 
 def test_ingest_skip_taxonomy(tmp_path):
@@ -48,11 +42,10 @@ def test_ingest_skip_taxonomy(tmp_path):
     os.makedirs(root, exist_ok=True)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
-    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     db = str(tmp_path / "cat.db")
+    cli.main(["--db", db, "init-db"])
 
-    cli = _load_cli()
-    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--skip-taxonomy"])
+    cli.main(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root, "--skip-taxonomy"])
 
     conn = odb.connect(db)
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
@@ -62,48 +55,23 @@ def test_ingest_skip_taxonomy(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0] == 0
 
 
-def test_ingest_without_seqdata_root_skips_datafiles(tmp_path, capsys):
-    # No --seqdata-root: the data-files check is skipped with a note, but taxonomy
-    # still runs.
-    root = str(tmp_path / "raw_sequence_data")
-    os.makedirs(root, exist_ok=True)
-    rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
-    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
-    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
-    taxdir = _write_taxdump(str(tmp_path / "tax"))
-    db = str(tmp_path / "cat.db")
-
-    cli = _load_cli()
-    cli.main(["--db", db, "ingest", mf, "--taxdir", taxdir])
-
-    out = capsys.readouterr().out
-    assert "skipped: pass --seqdata-root" in out
-    conn = odb.connect(db)
-    assert conn.execute(
-        "SELECT integrity_status FROM files WHERE direction='R1'").fetchone()[0] is None
-    # taxonomy still resolved
-    assert conn.execute(
-        "SELECT taxid FROM taxa WHERE taxon='Gadus morhua'").fetchone()[0] == 8049
-
-
 def test_reingest_unchanged_gates_taxonomy(tmp_path, capsys):
     # A second, identical ingest should not re-run taxonomy.
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
-    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     taxdir = _write_taxdump(str(tmp_path / "tax"))
     db = str(tmp_path / "cat.db")
+    cli.main(["--db", db, "init-db"])
 
-    cli = _load_cli()
-    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
+    cli.main(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root, "--taxdir", taxdir])
     capsys.readouterr()  # discard first run's output
 
-    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
+    cli.main(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root, "--taxdir", taxdir])
     out = capsys.readouterr().out
-    assert "0 new sample(s), 0 changed, 0 new file(s)" in out
-    assert "(no new taxa to resolve)" in out
+    assert "nothing new or changed" in out
+    assert "Species names" not in out and "Next:" not in out
 
     conn = odb.connect(db)
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
@@ -115,18 +83,17 @@ def test_reingest_changed_taxon_reresolves(tmp_path, capsys):
     os.makedirs(root, exist_ok=True)
     taxdir = _write_taxdump(str(tmp_path / "tax"))
     db = str(tmp_path / "cat.db")
-    cli = _load_cli()
+    cli.main(["--db", db, "init-db"])
 
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv",
                  [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")])
-    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
-    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
+    cli.main(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root, "--taxdir", taxdir])
     capsys.readouterr()
 
     # Rewrite the CSV with a corrected species name, re-ingest.
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv",
                  [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus macrocephalus", "U1")])
-    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--taxdir", taxdir])
+    cli.main(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root, "--taxdir", taxdir])
     out = capsys.readouterr().out
     assert "0 new sample(s), 1 changed" in out
 
@@ -143,22 +110,25 @@ def test_reingest_reports_dropped_sample_as_orphan(tmp_path, capsys):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     db = str(tmp_path / "cat.db")
-    cli = _load_cli()
+    cli.main(["--db", db, "init-db"])
 
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", [
         ("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1"),
         ("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "Gadus morhua", "U2"),
     ])
-    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
-    # No --seqdata-root: keep this focused on orphan detection, no disk warnings.
-    cli.main(["--db", db, "ingest", mf, "--skip-taxonomy"])
+    cli.main(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root,
+              "--skip-taxonomy"])
     capsys.readouterr()
 
     # Drop s2 from the CSV, re-ingest.
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", [
         ("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1"),
     ])
-    cli.main(["--db", db, "ingest", mf, "--skip-taxonomy"])
+    cli.main(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root,
+              "--skip-taxonomy"])
+    assert "1 sample(s) in catalog, not in mapfile" in capsys.readouterr().out
+    cli.main(["--db", db, "-vv", "ingest", "--seqdata-root", root, "--metadata-root", root,
+              "--skip-taxonomy"])
     out = capsys.readouterr().out
     assert "sample s2 in catalog but not in this CSV" in out
 
@@ -175,14 +145,13 @@ def test_ingest_prune_refreshes_data_files_report(tmp_path, capsys):
     # them missing).
     root = str(tmp_path / "raw_sequence_data")
     db = str(tmp_path / "cat.db")
-    cli = _load_cli()
+    cli.main(["--db", db, "init-db"])
 
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1"),
             ("bad1", "bad1_1.fastq.gz", "bad1_2.fastq.gz", "Gadus morhua", "U2")]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows,
                  disk_files=["s1_1.fastq.gz", "s1_2.fastq.gz"])
-    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
-    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root, "--skip-taxonomy"])
+    cli.main(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root, "--skip-taxonomy"])
 
     conn = odb.connect(db)
     assert conn.execute("SELECT COUNT(*) FROM data_check_issues").fetchone()[0] == 2
@@ -195,7 +164,7 @@ def test_ingest_prune_refreshes_data_files_report(tmp_path, capsys):
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows[:1],
                  disk_files=["s1_1.fastq.gz", "s1_2.fastq.gz"])
     capsys.readouterr()
-    cli.main(["--db", db, "ingest", mf, "--seqdata-root", root,
+    cli.main(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root,
               "--skip-taxonomy", "--prune", "--yes"])
 
     conn = odb.connect(db)
@@ -204,3 +173,29 @@ def test_ingest_prune_refreshes_data_files_report(tmp_path, capsys):
     assert conn.execute("SELECT data_check_n_missing FROM projects").fetchone()[0] == 0
     assert conn.execute("SELECT data_check_status FROM projects").fetchone()[0] == "ok"
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 2
+
+
+def test_ingest_previews_vanished_project_then_prunes(tmp_path, capsys):
+    root = str(tmp_path / "raw_sequence_data")
+    os.makedirs(root, exist_ok=True)
+    db = str(tmp_path / "cat.db")
+    cli.main(["--db", db, "init-db"])
+    for pid in ("genohub-1_A", "genohub-2_B"):
+        make_project(root, pid, f"{pid}_mapfile.csv",
+                     [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")])
+    base = ["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root,
+            "--skip-taxonomy"]
+    cli.main(base)
+    __import__("shutil").rmtree(os.path.join(root, "genohub-2_B"))
+    os.remove(os.path.join(root, "genohub-2_B_mapfile.csv"))
+    capsys.readouterr()
+
+    rc, args = cli.run(base)
+    assert rc == 0 and args.prunable == (0, 1)
+    assert ("1 project(s) gone from disk and mapfiles: genohub-2_B (kept;"
+            in capsys.readouterr().out)
+    conn = odb.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
+
+    cli.main(base + ["--prune-projects", "--yes"])
+    assert [r[0] for r in conn.execute("SELECT project_id FROM projects")] == ["genohub-1_A"]

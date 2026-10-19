@@ -16,7 +16,6 @@ import os
 import re
 import sqlite3
 import sys
-import time
 
 import pandas as pd
 import streamlit as st
@@ -27,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from seqledger import rclone as orclone  # noqa: E402
 from seqledger import mitopilot as omito  # noqa: E402
 from seqledger import db as odb  # noqa: E402
+from seqledger import validate as ovalidate  # noqa: E402
 
 NCBI_TAX_URL = "https://www.ncbi.nlm.nih.gov/datasets/taxonomy/"
 RANK_COLS = ["tax_domain", "tax_kingdom", "tax_phylum", "tax_class",
@@ -37,13 +37,15 @@ RANK_LABELS = ["domain", "kingdom", "phylum", "class",
 # taxa.match_type ordered best -> worst, with an accessible good->uncertain color
 # ramp (works on light + dark). Samples with no taxa row fall into 'unresolved'.
 MATCH_ORDER = ["confirmed", "exact", "fuzzy_species", "fuzzy_genus",
-               "fuzzy_higher", "unresolved"]
+               "fuzzy_higher", "ambiguous", "unresolved"]
 MATCH_LABELS = {"confirmed": "confirmed", "exact": "exact",
                 "fuzzy_species": "fuzzy (species)", "fuzzy_genus": "fuzzy (genus)",
-                "fuzzy_higher": "fuzzy (higher)", "unresolved": "unresolved"}
+                "fuzzy_higher": "fuzzy (higher)", "ambiguous": "ambiguous (homonym)",
+                "unresolved": "unresolved"}
 MATCH_COLORS = {"confirmed": "#0B7268", "exact": "#3C8A57",
                 "fuzzy_species": "#C9A227", "fuzzy_genus": "#C77D11",
-                "fuzzy_higher": "#B5532A", "unresolved": "#7A8A86"}
+                "fuzzy_higher": "#B5532A", "ambiguous": "#8E6BB0",
+                "unresolved": "#7A8A86"}
 
 # WoRMS (World Register of Marine Species) resolution, populated by
 # `taxonomy resolve --source worms`. WoRMS's top rank is Kingdom (no domain), so its
@@ -53,16 +55,20 @@ WORMS_RANK_COLS = ["worms_kingdom", "worms_phylum", "worms_class", "worms_order"
                    "worms_family", "worms_genus", "worms_species"]
 WORMS_RANK_LABELS = ["kingdom", "phylum", "class", "order",
                      "family", "genus", "species"]
-# WoRMS TAXAMATCH match types, best -> worst.
-WORMS_MATCH_ORDER = ["confirmed", "exact", "phonetic", "near_1", "near_2", "near_3",
-                     "match_quarantine", "unresolved"]
+# WoRMS match types as stored by worms.py, best -> worst. Loose TAXAMATCH matches
+# are stored with a 'review_' prefix and left unaccepted.
+WORMS_MATCH_ORDER = ["confirmed", "exact", "near_1", "review_phonetic", "review_near_2",
+                     "review_near_3", "review_match_quarantine", "unresolved"]
 WORMS_MATCH_LABELS = {"confirmed": "confirmed", "exact": "exact",
-                      "phonetic": "phonetic (sounds-like)", "near_1": "near (1 edit)",
-                      "near_2": "near (2 edits)", "near_3": "near (3 edits)",
-                      "match_quarantine": "quarantined", "unresolved": "unresolved"}
-WORMS_MATCH_COLORS = {"confirmed": "#0B7268", "exact": "#3C8A57",
-                      "phonetic": "#C9A227", "near_1": "#C9A227", "near_2": "#C77D11",
-                      "near_3": "#B5532A", "match_quarantine": "#B5532A",
+                      "near_1": "near (1 edit)",
+                      "review_phonetic": "review: phonetic (sounds-like)",
+                      "review_near_2": "review: near (2 edits)",
+                      "review_near_3": "review: near (3 edits)",
+                      "review_match_quarantine": "review: quarantined",
+                      "unresolved": "unresolved"}
+WORMS_MATCH_COLORS = {"confirmed": "#0B7268", "exact": "#3C8A57", "near_1": "#C9A227",
+                      "review_phonetic": "#C77D11", "review_near_2": "#C77D11",
+                      "review_near_3": "#B5532A", "review_match_quarantine": "#B5532A",
                       "unresolved": "#7A8A86"}
 
 # Registry the Taxonomy view switches between with its source toggle. Each entry is
@@ -83,14 +89,10 @@ DB_PATH = os.environ.get("SEQLEDGER_DB", "catalog.db")
 # Full absolute path when the seqdata_root was captured at ingest, else the relpath.
 _FULL_PATH = "COALESCE(p.seqdata_root || '/' || f.rel_path, f.rel_path)"
 
-# data_check_issues.kind -> (short label, one-line explanation). Legacy rows
-# ('missing'/'orphan', written before the kind rename) map to the same text so
-# older catalogs still read clearly without a re-validate.
+# data_check_issues.kind -> (short label, one-line explanation).
 _ISSUE_LABEL = {
     "missing from disk":    "missing from disk",
-    "missing":              "missing from disk",
     "missing from mapfile": "missing from mapfile",
-    "orphan":               "missing from mapfile",
     # Integrity-check failures (files.integrity_status / n_reads), surfaced in the
     # same per-project issues table as the disk/mapfile checks.
     "gzip error":           "gzip error",
@@ -99,9 +101,7 @@ _ISSUE_LABEL = {
 }
 _ISSUE_DETAIL = {
     "missing from disk":    "Sequence file is listed in the mapfile but was not found on disk.",
-    "missing":              "Sequence file is listed in the mapfile but was not found on disk.",
     "missing from mapfile": "Sequence file is present on disk but is not referenced by any mapfile row.",
-    "orphan":               "Sequence file is present on disk but is not referenced by any mapfile row.",
     "gzip error":           "File is not valid gzip or is truncated (failed decompression / `gunzip -t`).",
     "format error":         "File decompresses but is not valid FASTQ (line count not a multiple of 4).",
     "empty (0 reads)":      "File passed the gzip/FASTQ check but contains 0 reads (empty file or failed transfer?).",
@@ -111,97 +111,61 @@ _ISSUE_DETAIL = {
 # per-project sentence is stored in metadata_detail; this is the at-a-glance label.
 _MAPFILE_LABEL = {
     "ok":              "OK",
-    "unknown":         "unknown",
     "missing_mapfile": "no mapfile",
     "missing_seqdata": "no data folder",
     "broken_mapfile":  "broken mapfile",
     "invalid_mapfile": "no usable rows",
     "flagged":         "flagged rows",
 }
-_MAPFILE_DETAIL = {
-    "unknown": "This catalog copy predates the mapfile-status check, or the status "
-               "isn't set. Re-ingest (or re-sync the GUI copy) to populate it.",
-    "missing_mapfile": "A project folder is on disk but has no '<project>_mapfile.csv' "
-                       "in the metadata directory. Files were cataloged from disk; "
-                       "sample metadata (taxon, UniqID) is missing until a mapfile is added.",
-    "missing_seqdata": "A mapfile exists but no matching project folder was found in the "
-                       "sequence-data directory. Samples were cataloged from the mapfile, "
-                       "but no files are on disk.",
-    "broken_mapfile":  "The mapfile is present but its header is malformed (expected "
-                       "ID,R1,R2,Taxon,UniqID). Files were cataloged from disk; sample "
-                       "metadata was skipped until the mapfile is fixed.",
-    "invalid_mapfile": "The mapfile header is valid but no rows could be loaded (all had "
-                       "empty or duplicate IDs). Files were cataloged from disk. Fix the "
-                       "mapfile and re-ingest.",
-    "flagged":         "The mapfile loaded, but some rows needed repair: empty Taxon/UniqID "
-                       "were filled with 'NA', and empty-ID or duplicate-ID rows were "
-                       "skipped. The affected samples are marked in the 'flags' column. Fix "
-                       "the mapfile and re-ingest to clear them.",
+# Tables -> columns the GUI queries; an older catalog copy missing any is refused.
+_REQUIRED_SCHEMA = {
+    "projects": ["project_id", "source", "description", "seq_data_relpath",
+                 "seqdata_root", "owner_name", "date_ingested", "metadata_status",
+                 "metadata_detail", "data_check_status", "data_check_n_missing",
+                 "data_check_n_orphan", "data_check_date"],
+    "samples": ["sample_pk", "project_id", "sample_id", "taxon", "uniq_id", "flags"],
+    "files": ["project_id", "sample_pk", "direction", "filename", "rel_path",
+              "size_bytes", "owner_name", "md5_match", "integrity_status", "n_reads",
+              "integrity_date"],
+    "taxa": ["taxon", "match_type", "taxid", "sci_name", "lineage", "aphia_id",
+             "worms_sci_name", "worms_status", "worms_match_type", "worms_lineage"]
+            + RANK_COLS + WORMS_RANK_COLS,
+    "data_check_issues": ["project_id", "kind", "filename"],
+    "backups": ["project_id", "location", "verified"],
+    "config": ["key", "value"],
 }
 
 
-def _ro_connect(db_path):
-    """Open the catalog read-only (the GUI never writes).
-
-    mode=ro (not immutable) so it stays correct whether the DB is a static Scratch
-    replica OR the live master read directly on the I/O queue (`gui --qsub`), where
-    the CLI may be writing concurrently -- ro respects locking; immutable would not.
-    It also prevents a typo'd path from auto-creating an empty DB file.
-    """
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    con.row_factory = sqlite3.Row
-    # The GUI may read the live master while the CLI writes (gui --qsub). A generous
-    # busy_timeout lets SQLite wait out a transient write lock instead of raising.
-    con.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-    return con
-
-
-# Lock-contention handling for reads against the live master. busy_timeout (above)
-# waits out a short write lock inside SQLite; this adds a small app-level retry on top
-# so a stubborn lock surfaces a friendly notice rather than a raw traceback.
-_BUSY_TIMEOUT_MS = 15000
-_LOCK_RETRIES = 3
-_LOCK_BACKOFF = 0.5  # seconds; grows linearly per attempt
-
-
-class _CatalogLocked(Exception):
-    """Raised when the catalog stays locked past the retry budget (caught in main)."""
-
-
-def _is_locked_error(exc):
-    """True for a transient 'database is locked'/'busy' contention worth retrying,
-    vs. a genuine operational error (bad SQL, missing column) that should propagate."""
-    return (isinstance(exc, sqlite3.OperationalError)
-            and ("locked" in str(exc).lower() or "busy" in str(exc).lower()))
-
-
-def _with_retry(fn):
-    """Run a read, retrying briefly on a lock/busy error. Raises _CatalogLocked once
-    the retry budget is spent so the caller can show a friendly message."""
-    for attempt in range(_LOCK_RETRIES):
-        try:
-            return fn()
-        except sqlite3.OperationalError as e:
-            if not _is_locked_error(e):
-                raise
-            time.sleep(_LOCK_BACKOFF * (attempt + 1))
-    raise _CatalogLocked()
+def _missing_schema(db_path):
+    """List of required tables / table.columns absent from the catalog."""
+    con = odb.connect_ro(db_path)
+    try:
+        tables = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        missing = []
+        for table, cols in _REQUIRED_SCHEMA.items():
+            if table not in tables:
+                missing.append(table)
+                continue
+            have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+            missing += [f"{table}.{c}" for c in cols if c not in have]
+        return missing
+    finally:
+        con.close()
 
 
 def _sql(db_path, query):
-    def run():
-        con = _ro_connect(db_path)
-        try:
-            return pd.read_sql_query(query, con)
-        finally:
-            con.close()
-    return _with_retry(run)
+    con = odb.connect_ro(db_path)
+    try:
+        return pd.read_sql_query(query, con)
+    finally:
+        con.close()
 
 
 def _config(db_path, key):
     """Per-catalog config value (falls back to seqledger defaults)."""
     try:
-        con = _ro_connect(db_path)
+        con = odb.connect_ro(db_path)
         try:
             return odb.get_config(con, key)
         finally:
@@ -238,10 +202,6 @@ def _uniqid_link_col():
 
 @st.cache_data(ttl=60)
 def load_samples(db_path, mtime):
-    # Tolerate a catalog copy that predates the samples.flags migration (the GUI
-    # opens read-only and never migrates -- e.g. an older synced Scratch copy).
-    flags = "s.flags" if "flags" in _table_columns(db_path, "samples") else "NULL"
-    # Tolerate a catalog copy predating the WoRMS columns (older read-only replica).
     # worms_url embeds the accepted name in a URL '#'-fragment so the link column can
     # display the name as its label (a LinkColumn display_text regex), exactly like
     # ncbi_url -- no separate name/link columns. worms_name is kept for search + CSV.
@@ -250,12 +210,9 @@ def load_samples(db_path, mtime):
         "t.worms_match_type AS worms_match, t.aphia_id AS aphia_id, "
         "t.worms_lineage AS worms_lineage, "
         f"CASE WHEN t.aphia_id IS NOT NULL THEN '{WORMS_TAX_URL}' || t.aphia_id "
-        "|| '#' || COALESCE(t.worms_sci_name, s.taxon) END AS worms_url"
-        if "aphia_id" in _table_columns(db_path, "taxa")
-        else "NULL AS worms_name, NULL AS worms_status, NULL AS worms_match, "
-             "NULL AS aphia_id, NULL AS worms_lineage, NULL AS worms_url")
+        "|| '#' || COALESCE(t.worms_sci_name, s.taxon) END AS worms_url")
     return _with_uniqid_url(_sql(db_path, f"""
-        SELECT s.project_id, s.sample_id, s.taxon, s.uniq_id, {flags} AS flags,
+        SELECT s.project_id, s.sample_id, s.taxon, s.uniq_id, s.flags,
                p.source, p.seq_data_relpath AS data_dir,
                COALESCE(b.verified, 0) AS backup_verified,
                t.sci_name AS tax_name, t.match_type AS tax_match,
@@ -264,21 +221,23 @@ def load_samples(db_path, mtime):
                     THEN '{NCBI_TAX_URL}' || t.taxid || '/#'
                          || COALESCE(t.sci_name, s.taxon) END AS ncbi_url,
                {worms_sel},
-               (SELECT {_FULL_PATH} FROM files f
+               (SELECT GROUP_CONCAT(fp, '; ') FROM (
+                  SELECT {_FULL_PATH} AS fp FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
-                    AND f.direction = 'R1') AS r1_path,
+                    AND f.direction = 'R1' ORDER BY f.rel_path)) AS r1_path,
                (SELECT f.owner_name FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
                     AND f.direction = 'R1') AS r1_owner,
-               (SELECT {_FULL_PATH} FROM files f
+               (SELECT GROUP_CONCAT(fp, '; ') FROM (
+                  SELECT {_FULL_PATH} AS fp FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
-                    AND f.direction = 'R2') AS r2_path,
+                    AND f.direction = 'R2' ORDER BY f.rel_path)) AS r2_path,
                (SELECT f.owner_name FROM files f
                   WHERE f.project_id = s.project_id AND f.sample_pk = s.sample_pk
                     AND f.direction = 'R2') AS r2_owner
         FROM samples s
         JOIN projects p ON p.project_id = s.project_id
-        LEFT JOIN backups b ON b.project_id = s.project_id AND b.location = 'pdrive'
+        LEFT JOIN backups b ON b.project_id = s.project_id AND b.location = '{_config(db_path, 'backup_location').replace("'", "''")}'
         LEFT JOIN taxa t ON t.taxon = s.taxon
         ORDER BY s.project_id, s.sample_id"""))
 
@@ -286,12 +245,8 @@ def load_samples(db_path, mtime):
 @st.cache_data(ttl=60)
 def load_taxonomy(db_path, mtime):
     # Select both the NCBI and WoRMS rank/match columns so the view's source toggle
-    # can switch client-side. Guard each column for an older copy that predates the
-    # WoRMS migration (missing -> NULL), so the query never hits 'no such column'.
-    taxa_cols = _table_columns(db_path, "taxa")
-    def col(c):
-        return f"t.{c}" if c in taxa_cols else f"NULL AS {c}"
-    extra = ", ".join(col(c) for c in RANK_COLS + ["worms_match_type"] + WORMS_RANK_COLS)
+    # can switch client-side.
+    extra = ", ".join(f"t.{c}" for c in RANK_COLS + ["worms_match_type"] + WORMS_RANK_COLS)
     return _sql(db_path, f"""
         SELECT s.project_id, s.sample_id, s.taxon, t.taxid, t.match_type,
                {extra}
@@ -300,28 +255,9 @@ def load_taxonomy(db_path, mtime):
         ORDER BY s.project_id, s.sample_id""")
 
 
-def _table_columns(db_path, table):
-    def run():
-        con = _ro_connect(db_path)
-        try:
-            return {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
-        finally:
-            con.close()
-    return _with_retry(run)
-
-
 @st.cache_data(ttl=60)
 def load_projects(db_path, mtime):
-    # Tolerate catalogs created before the metadata_status/detail migration: the
-    # GUI opens the DB read-only and never migrates, so fall back to defaults when
-    # those columns are absent (older synced copy on Scratch, etc.).
-    # Missing status coalesces to 'unknown', NOT 'ok': turning "we don't know" into
-    # "healthy" would hide real mapfile problems on an old/unmigrated copy.
-    cols = _table_columns(db_path, "projects")
-    mstatus = ("COALESCE(p.metadata_status, 'unknown')"
-               if "metadata_status" in cols else "'unknown'")
-    mdetail = "p.metadata_detail" if "metadata_detail" in cols else "NULL"
-    return _sql(db_path, f"""
+    return _sql(db_path, """
         SELECT p.project_id, p.source, p.description,
                (SELECT COUNT(*) FROM samples s WHERE s.project_id = p.project_id) AS n_samples,
                (SELECT COUNT(*) FROM files f WHERE f.project_id = p.project_id) AS n_files,
@@ -342,8 +278,8 @@ def load_projects(db_path, mtime):
                (SELECT MAX(f.integrity_date) FROM files f
                   WHERE f.project_id = p.project_id) AS integrity_date,
                p.owner_name, p.seq_data_relpath AS data_dir,
-               {mstatus} AS metadata_status,
-               {mdetail} AS metadata_detail,
+               p.metadata_status,
+               p.metadata_detail,
                p.data_check_date, p.date_ingested
         FROM projects p
         ORDER BY p.project_id""")
@@ -392,30 +328,6 @@ def load_integrity_issues(db_path, mtime):
 def backup_label(v):
     """Plain-english P-drive backup state from the 1/0 backups.verified flag."""
     return "Verified" if v == 1 else "Not verified"
-
-
-def data_files_label(row):
-    status = row["data_check_status"]
-    if status == "ok":
-        return "OK"
-    if status != "issues":
-        return "unchecked"
-    parts = []
-    if row["data_check_n_missing"]:
-        parts.append(f"{int(row['data_check_n_missing'])} missing from disk")
-    if row["data_check_n_orphan"]:
-        parts.append(f"{int(row['data_check_n_orphan'])} missing from mapfile")
-    return ", ".join(parts) or "issues"
-
-
-def checksum_label(row):
-    if row["n_files"] == 0:
-        return "no files"
-    if row["n_mismatch"]:
-        return f"{int(row['n_mismatch'])} mismatch"
-    if row["n_uncompared"]:
-        return f"incomplete ({int(row['n_uncompared'])} uncompared)"
-    return "verified"
 
 
 def mapfile_label(row):
@@ -469,7 +381,11 @@ def load_file_paths(db_path, mtime):
     return _sql(db_path, f"""
         SELECT f.project_id, s.sample_id, f.direction, f.filename,
                p.seqdata_root, f.rel_path, {_FULL_PATH} AS full_path,
-               f.size_bytes, f.n_reads
+               f.size_bytes, f.n_reads,
+               COALESCE(f.integrity_status, 'unchecked') AS integrity_status,
+               EXISTS (SELECT 1 FROM data_check_issues i
+                       WHERE i.project_id = f.project_id AND i.filename = f.rel_path
+                         AND i.kind = 'missing from disk') AS missing_on_disk
         FROM files f
         JOIN projects p ON p.project_id = f.project_id
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
@@ -508,10 +424,11 @@ def _csv_safe_cell(v):
 
 def _csv_safe_df(df):
     """Copy of df with string cells sanitized against CSV formula injection. Only
-    object-dtype columns are scanned, so numeric/Int64 columns are untouched."""
+    string-dtype columns (object or str) are scanned, so numeric/Int64 columns are
+    untouched."""
     out = df.copy()
     for c in out.columns:
-        if out[c].dtype == object:
+        if pd.api.types.is_string_dtype(out[c].dtype):
             out[c] = out[c].map(_csv_safe_cell)
     return out
 
@@ -591,6 +508,8 @@ def samples_view(df, files_df):
     on_screen = ["project_id", "sample_id", "taxon",
                  "ncbi_url", "tax_match", "worms_url", "worms_match", "worms_status",
                  "uniq_id", "uniq_id_url", "flags", "backup"]
+    tax_lab = show["tax_match"].map(MATCH_LABELS).fillna(show["tax_match"])
+    worms_lab = show["worms_match"].map(WORMS_MATCH_LABELS).fillna(show["worms_match"])
     # Label each filter box with the header the user sees, and search the DISPLAYED
     # value: the link columns show a name (after the URL '#'), not the raw URL; the
     # UniqID link icon has no text, so filter it by the adjacent UniqID value.
@@ -601,12 +520,16 @@ def samples_view(df, files_df):
                 "worms_status": "WoRMS_status", "uniq_id_url": "uniq_id_link"},
         display={"ncbi_url": _link_text(show["ncbi_url"]),
                  "worms_url": _link_text(show["worms_url"]),
+                 "tax_match": tax_lab, "worms_match": worms_lab,
                  "uniq_id_url": show["uniq_id"]})
     st.caption(f"{len(show)} of {len(df)} samples (full R1/R2 paths, taxid + "
                "lineage are in the CSV export). Select a row to list its files below.")
+    disp = show[on_screen].assign(tax_match=tax_lab.loc[show.index],
+                                  worms_match=worms_lab.loc[show.index])
     event = st.dataframe(
-        show[on_screen], width="stretch", hide_index=True,
-        on_select="rerun", selection_mode="single-row", key="samples_table",
+        disp, width="stretch", hide_index=True,
+        on_select="rerun", selection_mode="single-row",
+        key=f"samples_table_{hash(tuple(show.index))}",
         column_config={
             # Each source's matched name is a link (label = the name, carried in the
             # URL '#'-fragment) to its taxonomy page; the "* match" column is that
@@ -620,6 +543,7 @@ def samples_view(df, files_df):
     _download(show, f"{_config(DB_PATH, 'catalog_slug')}_samples.csv")
 
     sel = event.selection.rows if event and event.selection else []
+    sel = [i for i in sel if i < len(show)]
     if not sel:
         return
     r = show.iloc[sel[0]]
@@ -664,30 +588,34 @@ def projects_view(df, issues, integ_issues):
 
     show = view.copy()
     show["mapfile"] = show.apply(mapfile_label, axis=1) if len(show) else []
-    show["data_files"] = show.apply(data_files_label, axis=1) if len(show) else []
-    show["checksum"] = show.apply(checksum_label, axis=1) if len(show) else []
+    show["data_files"] = show.apply(lambda r: ovalidate.data_label(
+        {"status": r["data_check_status"], "n_missing": r["data_check_n_missing"],
+         "n_orphan": r["data_check_n_orphan"]}), axis=1) if len(show) else []
+    show["checksum"] = show.apply(ovalidate.checksum_label, axis=1) if len(show) else []
     show["integrity"] = show.apply(integrity_label, axis=1) if len(show) else []
     cols = ["project_id", "source", "description", "n_samples", "n_files",
             "mapfile", "data_files", "checksum", "integrity", "owner_name", "data_dir",
             "date_ingested"]
     show = _column_filters(show, cols, "projects")
     st.caption(f"{len(show)} of {len(df)} projects. 'mapfile' flags a folder with no "
-               "mapfile, a mapfile with no folder, or a broken mapfile. Select a row for "
+               "mapfile, a mapfile with no folder, a broken mapfile, flagged rows, or "
+               "no usable rows. Select a row for "
                "its mapfile explanation + data-files & integrity issues below. "
                "'owner_name' is the filesystem owner (a personal identifier).")
     event = st.dataframe(show[cols], width="stretch", hide_index=True,
                          on_select="rerun", selection_mode="single-row",
-                         key="projects_table")
+                         key=f"projects_table_{hash(tuple(show.index))}")
     _download(show, f"{_config(DB_PATH, 'catalog_slug')}_projects.csv")
 
     sel = event.selection.rows if event and event.selection else []
+    sel = [i for i in sel if i < len(show)]
     if sel:
         prow = show.iloc[sel[0]]
         pid = prow["project_id"]
         mstatus = prow["metadata_status"]
         if mstatus != "ok":
-            detail = prow.get("metadata_detail") or _MAPFILE_DETAIL.get(mstatus, "")
-            st.warning(f"**Mapfile issue ({_MAPFILE_LABEL.get(mstatus, mstatus)}):** {detail}")
+            st.warning(f"**Mapfile issue ({_MAPFILE_LABEL.get(mstatus, mstatus)}):** "
+                       f"{prow['metadata_detail']}")
         # Disk/mapfile checks (data_check_issues) and integrity-check failures live in
         # different tables but are the same question to a user ("what's wrong with this
         # project's files?"), so surface both here instead of hiding integrity errors
@@ -746,11 +674,13 @@ def files_view(df, samples_df):
                "'owner_name' is the filesystem owner (a personal identifier).")
     event = st.dataframe(
         show[on_screen], width="stretch", hide_index=True,
-        on_select="rerun", selection_mode="single-row", key="files_table",
+        on_select="rerun", selection_mode="single-row",
+        key=f"files_table_{hash(tuple(show.index))}",
         column_config={"n_reads": "reads", "integrity_date": "checked"})
     _download(show, f"{_config(DB_PATH, 'catalog_slug')}_files.csv")
 
     sel = event.selection.rows if event and event.selection else []
+    sel = [i for i in sel if i < len(show)]
     if not sel:
         return
     r = show.iloc[sel[0]]
@@ -841,7 +771,12 @@ def _composition_counts(db_path, mtime, chosen, rank_col, source, depth, include
 
 
 def taxonomy_view(db_path, mtime):
-    import plotly.express as px
+    try:
+        import plotly.express as px
+    except ImportError:
+        st.error("The Taxonomy view needs plotly. Install it with: conda env update "
+                 "-f environment.yml  (or: pip install 'seqledger[gui]')")
+        return
 
     df = load_taxonomy(db_path, mtime)  # cached; used only for the project list
     with st.sidebar:
@@ -875,7 +810,10 @@ def taxonomy_view(db_path, mtime):
     st.caption(f"{source}: {n_samples} samples across {n_proj} project(s); "
                f"run `{resolve_cmd}` to (re)populate. Unranked -> 'unknown'.")
     if not n_samples:
-        st.info(f"No resolved {source} taxonomy yet. Run `seqledger {resolve_cmd}`.")
+        if df.empty:
+            st.info("No samples in this catalog yet.")
+        else:
+            st.info(f"No resolved {source} taxonomy yet. Run `seqledger {resolve_cmd}`.")
         return
 
     # --- Hierarchy chart: sunburst or treemap ---
@@ -1065,6 +1003,34 @@ def _cart_key(project_id, sample_id):
     return f"{project_id}\t{sample_id}"
 
 
+_PROBLEM_KINDS = ("corrupt", "empty", "missing")
+_SCRIPT_PREVIEW_FILES = 20
+
+
+def _file_problem(r):
+    """One file's state for the cart: missing | corrupt | empty | ok | unchecked."""
+    if r.get("missing_on_disk"):
+        return "missing"
+    status = r.get("integrity_status")
+    if status in ("gzip_error", "format_error"):
+        return "corrupt"
+    if status == "ok":
+        n = r.get("n_reads")
+        return "empty" if n is not None and not pd.isna(n) and n == 0 else "ok"
+    return "unchecked"
+
+
+def _files_ok(problems):
+    """Per-sample summary of its files' _file_problem values."""
+    problems = list(problems)
+    if not problems:
+        return "no files"
+    parts = [f"{problems.count(k)} {k}" for k in _PROBLEM_KINDS if k in problems]
+    if "unchecked" in problems:
+        parts.append("unchecked")
+    return ", ".join(parts) or "ok"
+
+
 def custom_table_view(samples_df, paths_df):
     """Build a custom sample table by searching + selecting, then export / copy.
 
@@ -1120,7 +1086,7 @@ def custom_table_view(samples_df, paths_df):
         return
 
     st.subheader("Search results")
-    st.caption(f"{len(view)} match(es). Select rows and click **Add to custom table**. "
+    st.caption(f"{len(view)} match(es). Select rows and click **Add selected**. "
                f"Grab & Go table currently holds {len(cart)} sample(s).")
     cols = ["project_id", "sample_id", "taxon", "tax_name", "uniq_id", "uniq_id_url"]
     event = st.dataframe(
@@ -1173,10 +1139,17 @@ def custom_table_view(samples_df, paths_df):
         table = table.merge(counts, on=["project_id", "sample_id"], how="left")
         table[_col] = table[_col].astype("Int64")
 
+    # Files backing the cart samples, each tagged corrupt/empty/missing/ok/unchecked.
+    fpaths = paths_df[paths_df.set_index(["project_id", "sample_id"]).index.isin(keyset)].copy()
+    fpaths["problem"] = [_file_problem(r) for r in fpaths.to_dict("records")]
+    ok_by = {k: _files_ok(g) for k, g in fpaths.groupby(["project_id", "sample_id"])["problem"]}
+    table["files_ok"] = [ok_by.get(k, "no files")
+                         for k in zip(table["project_id"], table["sample_id"])]
+
     tcols = ["project_id", "sample_id", "taxon",
              "ncbi_url", "taxid", "tax_match",
              "worms_url", "worms_match", "worms_status",
-             "total_size", "r1_reads", "r2_reads",
+             "total_size", "r1_reads", "r2_reads", "files_ok",
              "uniq_id", "uniq_id_url", "r1_path", "r2_path"]
     tcols = [c for c in tcols if c in table.columns]
     tevent = st.dataframe(
@@ -1197,9 +1170,12 @@ def custom_table_view(samples_df, paths_df):
             r = table.iloc[i]
             cart.pop(_cart_key(r["project_id"], r["sample_id"]), None)
         st.rerun()
-    # Files backing the selected samples: paths + sizes for rclone, R1/R2
-    # basenames for the MitoPilot map file.
-    fpaths = paths_df[paths_df.set_index(["project_id", "sample_id"]).index.isin(keyset)]
+    bad = fpaths["problem"].isin(_PROBLEM_KINDS)
+    if bad.any():
+        st.warning(f"{int(bad.sum())} of {len(fpaths)} files in the cart are corrupt, empty, "
+                   "or missing on disk; they will fail to copy or copy bad data.")
+        if st.checkbox("Exclude problem files from the copy job and map", value=True):
+            fpaths = fpaths[~bad]
     rows = fpaths.to_dict("records")
 
     id_choices = {"Sample ID": "sample_id", "UniqID": "uniq_id"}
@@ -1214,7 +1190,7 @@ def custom_table_view(samples_df, paths_df):
         "worms_match": "WoRMS_match", "worms_status": "WoRMS_status",
         "worms_lineage": "WoRMS_lineage",
         "uniq_id": "uniq_id",
-        "r1_reads": "r1_reads", "r2_reads": "r2_reads",
+        "r1_reads": "r1_reads", "r2_reads": "r2_reads", "files_ok": "files_ok",
         "total_size": "seq_data_size_gb",
         "r1_path": "r1_path", "r2_path": "r2_path"}
     export_cols = [c for c in export_map if c in table.columns]
@@ -1230,11 +1206,13 @@ def custom_table_view(samples_df, paths_df):
     mp_rows = omito.build_map_rows(table.to_dict("records"), rows,
                                    id_field=id_choices[id_label])
     mp_df = pd.DataFrame(mp_rows, columns=omito.MITOPILOT_COLUMNS)
+    # Not _csv_safe_df: MitoPilot reads this with read.csv and needs ID/R1/R2 verbatim.
     c2.download_button("Download MitoPilot map file",
                        mp_df.to_csv(index=False).encode(),
                        "mitopilot_mapfile.csv", "text/csv",
-                       help="CSV with ID, R1, R2, Taxon (R1/R2 are filenames; give "
-                            "MitoPilot the copied data dir as its data_path).")
+                       help="CSV with ID, R1, R2, Taxon. R1/R2 are paths relative to "
+                            "the copy destination (or to the Store seqdata root); give "
+                            "MitoPilot DEST as data_path.")
     mp_issues = omito.issues(mp_rows)
     if mp_issues["n_empty_id"] or mp_issues["duplicate_ids"] or mp_issues["n_missing_reads"]:
         msgs = []
@@ -1248,6 +1226,13 @@ def custom_table_view(samples_df, paths_df):
             msgs.append(f"{mp_issues['n_missing_reads']} sample(s) missing an R1/R2 filename")
         st.warning("MitoPilot needs a unique ID and both reads per sample — "
                    + "; ".join(msgs) + ". Try a different ID column, or fix the catalog.")
+    if mp_issues["n_lane_split"]:
+        ids = mp_issues["lane_split_ids"]
+        shown = ", ".join(ids[:20]) + (", ..." if len(ids) > 20 else "")
+        st.warning(f"MitoPilot takes one file per read direction. {len(ids)} samples in "
+                   "the cart are lane-split (several R1 or R2 files); only the first file "
+                   "of each is in the map. Merge lanes first or run them separately. "
+                   f"({shown})")
 
     total, n_files, n_unknown = orclone.estimate_size(rows)
 
@@ -1258,8 +1243,11 @@ def custom_table_view(samples_df, paths_df):
     m2.metric("Estimated size", orclone.human_size(total))
     m3.metric("Unknown-size files", n_unknown)
     if n_unknown:
-        st.caption(f"{n_unknown} file(s) have no recorded size (never stat'd on disk); "
-                   "the estimate excludes them, so the real total is larger.")
+        n_gone = sum(1 for r in rows if pd.isna(r.get("size_bytes")) and r.get("missing_on_disk"))
+        why = [f"{n} {label}" for n, label in ((n_unknown - n_gone, "never stat'd"),
+                                               (n_gone, "missing on disk")) if n]
+        st.caption(f"{n_unknown} file(s) have no recorded size ({', '.join(why)}); "
+                   "the estimate excludes them.")
 
     dest = st.text_input("Destination (directory or rclone remote:path)",
                          placeholder="/pool/public/genomics/<user>/selected_data")
@@ -1279,16 +1267,22 @@ def custom_table_view(samples_df, paths_df):
         st.info("Enter a destination above to generate the copy script.")
         return
 
-    script = orclone.build_copy_script(
-        groups, dest.strip(), transfers=transfers, slots=transfers, mem=mem,
-        est_bytes=total, n_files=n_files,
-        rclone_module=_config(DB_PATH, "rclone_module"),
-        io_queue=_config(DB_PATH, "io_queue"))
-    st.caption("Copy this into a `.job` file on Hydra and submit with "
+    stamp = orclone.timestamp()
+    kw = dict(dest=dest.strip(), transfers=transfers, slots=transfers, mem=mem,
+              est_bytes=total, n_files=n_files,
+              rclone_module=_config(DB_PATH, "rclone_module"),
+              io_queue=_config(DB_PATH, "io_queue"), stamp=stamp)
+    script = orclone.build_copy_script(groups, **kw)
+    n_copy = sum(len(rels) for _, rels in groups)
+    st.caption("Download the script to a `.job` file on Hydra and submit with "
                "`qsub <file>.job` from the login node (lTIO: 6 slots/user, 2 concurrent).")
-    st.code(script, language="bash")
+    with st.expander(f"Script preview ({n_copy} files total; full list in the download)"):
+        if n_copy > _SCRIPT_PREVIEW_FILES:
+            st.caption(f"Showing the first {_SCRIPT_PREVIEW_FILES} of {n_copy} files.")
+        st.code(orclone.build_copy_script(
+            orclone.head_groups(groups, _SCRIPT_PREVIEW_FILES), **kw), language="bash")
     st.download_button("Download submission script", script.encode(),
-                       "seqledger_rclone_copy.job", "text/x-shellscript")
+                       f"seqledger_rclone_copy_{stamp}.job", "text/x-shellscript")
 
 
 def _catalog_caption(db_path, mtime):
@@ -1310,9 +1304,15 @@ def main():
     mtime = os.path.getmtime(DB_PATH)
     st.caption(_catalog_caption(DB_PATH, mtime))
 
-    view_name = st.sidebar.radio(
-        "View", ["Projects", "Samples", "Files", "Taxonomy", "Grab & Go"])
     try:
+        missing = _missing_schema(DB_PATH)
+        if missing:
+            st.error("This catalog copy is older than this GUI (missing: "
+                     f"{', '.join(missing)}). Ask your data manager to run "
+                     "'seqledger init-db' on the master catalog and re-sync this copy.")
+            st.stop()
+        view_name = st.sidebar.radio(
+            "View", ["Projects", "Samples", "Files", "Taxonomy", "Grab & Go"])
         if view_name == "Samples":
             samples_view(load_samples(DB_PATH, mtime), load_files(DB_PATH, mtime))
         elif view_name == "Projects":
@@ -1325,10 +1325,10 @@ def main():
             taxonomy_view(DB_PATH, mtime)
         else:
             custom_table_view(load_samples(DB_PATH, mtime), load_file_paths(DB_PATH, mtime))
-    except _CatalogLocked:
-        # A concurrent CLI write held the lock past our retry budget; show a friendly
-        # notice and stop rather than surfacing a raw 'database is locked' traceback.
-        st.warning("Catalog is being updated — retry shortly.")
+    except sqlite3.OperationalError as e:
+        if "locked" not in str(e).lower() and "busy" not in str(e).lower():
+            raise
+        st.warning("Catalog is being updated, retry shortly.")
         st.stop()
 
 

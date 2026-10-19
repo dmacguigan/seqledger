@@ -1,26 +1,19 @@
 """Per-catalog config table + get/set/resolve helpers."""
 
 import os
-import sqlite3
 
 from seqledger import db as odb
 
 
-def _fresh(tmp_path):
-    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
-    odb.init_db(conn)
-    return conn
-
-
-def test_defaults_when_unset(tmp_path):
-    conn = _fresh(tmp_path)
+def test_defaults_when_unset(fresh_db):
+    conn = fresh_db
     assert odb.get_config(conn, "conda_env") == "seqledger"
     assert odb.get_config(conn, "io_queue") == "lTIO.sq"
     assert odb.get_config(conn, "nope", "fallback") == "fallback"
 
 
-def test_set_and_get_overrides_default(tmp_path):
-    conn = _fresh(tmp_path)
+def test_set_and_get_overrides_default(fresh_db):
+    conn = fresh_db
     odb.set_config(conn, "conda_env", "otherlab")
     odb.set_config(conn, "catalog_name", "Deep Sea Catalog")
     conn.commit()
@@ -30,21 +23,10 @@ def test_set_and_get_overrides_default(tmp_path):
     assert cfg["io_queue"] == "lTIO.sq"  # untouched -> default
 
 
-def test_missing_config_table_falls_back(tmp_path):
-    # An older read-only catalog copy predating the config table must not crash.
-    p = os.path.join(tmp_path, "old.db")
-    con = sqlite3.connect(p)
-    con.execute("CREATE TABLE projects (project_id TEXT PRIMARY KEY)")
-    con.commit()
-    con.row_factory = sqlite3.Row
-    assert odb.get_config(con, "conda_env") == "seqledger"
-    assert odb.resolve_config(con)["io_queue"] == "lTIO.sq"
-
-
-def test_fresh_schema_loads_and_resolves_defaults(tmp_path):
+def test_fresh_schema_loads_and_resolves_defaults(fresh_db):
     # Guard for #15: the new CHECK constraints in schema.sql must not break a fresh
     # init_db, and every config default still resolves on the resulting catalog.
-    conn = _fresh(tmp_path)
+    conn = fresh_db
     cfg = odb.resolve_config(conn)
     for key, default in odb.CONFIG_DEFAULTS.items():
         assert cfg[key] == default
@@ -53,7 +35,7 @@ def test_fresh_schema_loads_and_resolves_defaults(tmp_path):
 def test_fastq_globs():
     assert odb.fastq_globs("fastq.gz,fq.gz") == ["*.fastq.gz", "*.fq.gz"]
     assert odb.fastq_globs(".fastq.gz") == ["*.fastq.gz"]
-    assert odb.fastq_globs("") == []
+    assert odb.fastq_globs("") == ["*.fastq.gz", "*.fq.gz"]
 
 
 def test_ingest_uses_configured_roots(tmp_path, capsys):
@@ -70,9 +52,9 @@ def test_ingest_uses_configured_roots(tmp_path, capsys):
     # roots set only at init-db
     cli.main(["--db", db, "init-db", "--seqdata-root", seq, "--metadata-root", meta])
     # ingest with NO root flags -> must use the configured roots
-    cli.main(["--db", db, "ingest", "--skip-taxonomy"])
-    out = capsys.readouterr().out
-    assert "using configured seqdata-root" in out
-    assert "using configured metadata-root" in out
+    cli.main(["--db", db, "ingest", "--skip-taxonomy", "-v"])
+    err = capsys.readouterr().err
+    assert "using configured seqdata-root" in err
+    assert "using configured metadata-root" in err
     conn = odb.connect(db)
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1

@@ -168,14 +168,19 @@ def check_data_files(conn, project_id, seq_data_relpath, seqdata_root):
 
     Returns dict: status ('ok'|'issues'|'unchecked'), n_missing, n_orphan,
     missing (mapfile R1/R2 not on disk), orphan (disk fastq.gz not in mapfile).
-    'unchecked' when the data dir is unreachable. When seqdata_root is None it
+    'unchecked' when the data dir is unreachable (with a "detail" when the root
+    exists but the project folder does not). n_unmapped counts cataloged files
+    not linked to any sample; for a project with a mapfile they count as orphans.
+    When seqdata_root is None it
     falls back to the project's stored projects.seqdata_root (matching integrity),
     so each project scans under the root it was ingested from.
     """
+    row = conn.execute(
+        "SELECT seqdata_root, metadata_status FROM projects WHERE project_id=?",
+        (project_id,)).fetchone()
     if seqdata_root is None:
-        row = conn.execute(
-            "SELECT seqdata_root FROM projects WHERE project_id=?", (project_id,)).fetchone()
         seqdata_root = row["seqdata_root"] if row else None
+    has_mapfile = bool(row) and row["metadata_status"] in ("ok", "flagged")
     # Compare by REL_PATH (physical identity), not basename: two files can share a
     # basename in different subdirs, and the DB now keys files on rel_path.
     db_files = {r["rel_path"] for r in conn.execute(
@@ -185,21 +190,52 @@ def check_data_files(conn, project_id, seq_data_relpath, seqdata_root):
                 "missing": [], "orphan": []}
     data_dir = os.path.join(seqdata_root, seq_data_relpath)
     if not os.path.isdir(data_dir):
-        return {"status": "unchecked", "n_missing": None, "n_orphan": None,
-                "missing": [], "orphan": []}
+        res = {"status": "unchecked", "n_missing": None, "n_orphan": None,
+               "missing": [], "orphan": []}
+        if os.path.isdir(seqdata_root):
+            res["detail"] = f"data folder not found: {data_dir}"
+        return res
     # Recursive: FASTQ may be nested in subdirs (matches ingest's discovery), and
     # the extension set comes from the catalog config (default fastq.gz + fq.gz).
     # Disk paths are made relative to seqdata_root, the same convention as files.rel_path.
-    globs = fastq_globs(get_config(conn, "fastq_extensions")) or ["*.fastq.gz", "*.fq.gz"]
+    globs = fastq_globs(get_config(conn, "fastq_extensions"))
     disk = set()
     for pat in globs:
         disk.update(os.path.relpath(p, seqdata_root)
-                    for p in glob.glob(os.path.join(data_dir, "**", pat), recursive=True))
+                    for p in glob.glob(os.path.join(glob.escape(data_dir), "**", pat), recursive=True))
+    unmapped = {r["rel_path"] for r in conn.execute(
+        "SELECT rel_path FROM files WHERE project_id=? AND sample_pk IS NULL", (project_id,))}
     missing = sorted(db_files - disk)
-    orphan = sorted(disk - db_files)
+    orphan = sorted((disk - db_files) | (unmapped & disk if has_mapfile else set()))
     status = "ok" if not missing and not orphan else "issues"
     return {"status": status, "n_missing": len(missing), "n_orphan": len(orphan),
-            "missing": missing, "orphan": orphan}
+            "missing": missing, "orphan": orphan, "n_unmapped": len(unmapped)}
+
+
+def data_label(d):
+    """One-line files-on-disk status from check_data_files (or the stored counts)."""
+    if d["status"] == "ok":
+        n = d.get("n_unmapped")
+        return f"OK, {n} file(s) not linked to any sample (no mapfile)" if n else "OK"
+    if d["status"] != "issues":
+        return f"unchecked ({d['detail']})" if d.get("detail") else "unchecked"
+    parts = []
+    if d.get("n_missing"):
+        parts.append(f"{int(d['n_missing'])} file(s) in mapfile not on disk")
+    if d.get("n_orphan"):
+        parts.append(f"{int(d['n_orphan'])} file(s) on disk, not in mapfile")
+    return ", ".join(parts) or "issues"
+
+
+def checksum_label(cs):
+    """One-line Store vs P-drive status from n_files / n_mismatch / n_uncompared."""
+    if not cs["n_files"]:
+        return "no files"
+    if cs["n_mismatch"]:
+        return f"{int(cs['n_mismatch'])} file(s) differ between Store and P-drive"
+    if cs["n_uncompared"]:
+        return f"backup not yet verified ({int(cs['n_uncompared'])} file(s))"
+    return "backup verified"
 
 
 def check_checksums(conn, project_id):
@@ -283,7 +319,7 @@ def validate_catalog(conn, seqdata_root=None):
         root = seqdata_root or p["seqdata_root"]
         if root:
             data = check_data_files(conn, project_id, p["seq_data_relpath"], root)
-            if data["status"] != "unchecked":
+            if data["status"] != "unchecked" or data.get("detail"):
                 to_persist.append((project_id, data))
         else:
             row = conn.execute(

@@ -3,7 +3,7 @@ import os
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import taxonomy as otax
-from helpers import make_project, write_map_file
+from helpers import make_project
 
 # Tiny synthetic taxdump:
 # root -> Eukaryota -> Actinopterygii -> Gadidae -> {Gadus, Urophycis}
@@ -165,10 +165,9 @@ def test_resolve_catalog_and_apply(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1"),
             ("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "Zzz qqq", "U2")]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
-    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     conn = odb.connect(str(tmp_path / "cat.db"))
     odb.init_db(conn)
-    oingest.ingest_map_file(conn, mf, seqdata_root=root)
+    oingest.ingest_tree(conn, root, root)
 
     results = otax.resolve_catalog(conn, taxdir)
     assert len(results) == 2
@@ -393,10 +392,8 @@ def test_download_default_timeout_is_bounded(tmp_path, monkeypatch):
 
 
 def test_download_timeout_raises_clear_error(tmp_path, monkeypatch):
-    import socket
-
     def fake_urlopen(url, timeout=None):
-        raise socket.timeout("timed out")
+        raise TimeoutError("timed out")
 
     monkeypatch.setattr(otax.urllib.request, "urlopen", fake_urlopen)
     try:
@@ -405,3 +402,122 @@ def test_download_timeout_raises_clear_error(tmp_path, monkeypatch):
         assert "Failed to download" in str(e)
     else:
         assert False, "expected a RuntimeError on timeout"
+
+
+# --- review CSV prefill, encodings, wrong file type ---------------------------
+
+def test_review_csv_prefills_only_exact(tmp_path):
+    import csv
+    taxdir = _write_taxdump(str(tmp_path / "tax"))
+    results = otax.resolve_taxa(["Gadus morhua", "Gadus morhuaa", "Zzz qqq"], taxdir)
+    path = str(tmp_path / "review.csv")
+    otax.write_review_csv(results, path)
+    with open(path, newline="") as f:
+        rows = {r["taxon"]: r for r in csv.DictReader(f)}
+    assert rows["Gadus morhua"]["confirmed_taxid"] == "8049"
+    assert rows["Gadus morhuaa"]["taxid"] == "8049"
+    assert rows["Gadus morhuaa"]["confirmed_taxid"] == ""
+    assert rows["Zzz qqq"]["confirmed_taxid"] == ""
+
+
+def _apply_bytes(tmp_path, data):
+    taxdir = _write_taxdump(str(tmp_path / "tax"))
+    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
+    odb.init_db(conn)
+    csv_path = os.path.join(tmp_path, "review.csv")
+    with open(csv_path, "wb") as f:
+        f.write(data)
+    return otax.apply_review(conn, taxdir, csv_path)
+
+
+def test_apply_review_utf8_bom(tmp_path):
+    data = "taxon,confirmed_taxid\nGadus morhua,8049\n".encode("utf-8-sig")
+    assert _apply_bytes(tmp_path, data) == (1, [])
+
+
+def test_apply_review_cp1252(tmp_path):
+    data = "taxon,note,confirmed_taxid\nGadus morhua,caf\u00e9,8049\n".encode("cp1252")
+    assert _apply_bytes(tmp_path, data) == (1, [])
+
+
+def test_apply_review_wrong_file_type(tmp_path):
+    import pytest
+    data = b"taxon,confirmed_aphia_id\nGadus morhua,125732\n"
+    with pytest.raises(ValueError, match="confirmed_taxid"):
+        _apply_bytes(tmp_path, data)
+
+
+# --- WoRMS-first taxa still count as never NCBI-resolved ----------------------
+
+def test_worms_only_row_still_ncbi_new(tmp_path):
+    from seqledger import cli as ocli
+    from seqledger import worms as oworms
+    taxdir = _write_taxdump(str(tmp_path / "tax"))
+    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
+    odb.init_db(conn)
+    conn.execute("INSERT INTO projects(project_id) VALUES ('P1')")
+    conn.execute("INSERT INTO samples(project_id, sample_id, taxon) "
+                 "VALUES ('P1','s1','Gadus morhua')")
+    d = oworms._blank("Gadus morhua", "Gadus morhua")
+    d.update(aphia_id=126436, worms_match_type="exact")
+    otax._write_taxa(conn, [d], oworms._WORMS_DB_COLS, "worms_")
+    row = conn.execute("SELECT date_resolved FROM taxa WHERE taxon='Gadus morhua'").fetchone()
+    assert row["date_resolved"] is None
+    assert [r["taxon"] for r in ocli.run_query(conn, "taxa")] == ["Gadus morhua"]
+    assert ocli._has_unresolved_taxa(conn)
+    res = otax.resolve_catalog(conn, taxdir, scope="new")
+    assert [r["taxon"] for r in res] == ["Gadus morhua"]
+    row = conn.execute("SELECT taxid, aphia_id FROM taxa WHERE taxon='Gadus morhua'").fetchone()
+    assert row["taxid"] == 8049 and row["aphia_id"] == 126436
+    assert not ocli._has_unresolved_taxa(conn)
+    assert ocli.run_query(conn, "taxa") == []
+
+
+# --- genus homonym on the genus-anchored fuzzy path ---------------------------
+
+HOM_SP_NODES = HOM_NODES + [(37577, 37698, "species")]
+HOM_SP_NAMES = HOM_NAMES + [(37577, "Morus bassanus", "scientific name")]
+
+
+def test_genus_homonym_fuzzy_path_is_ambiguous(tmp_path):
+    taxdir = _write_dump(str(tmp_path / "tax"), HOM_SP_NODES, HOM_SP_NAMES)
+    d = _resolve(taxdir, "Morus bassanuss")
+    assert d["match_type"] == "ambiguous"
+    assert d["taxid"] is None
+    assert "Morus [37698]" in d["alternatives"] and "Morus [3497]" in d["alternatives"]
+
+
+def test_genus_homonym_fuzzy_path_uses_context(tmp_path):
+    taxdir = _write_dump(str(tmp_path / "tax"), HOM_SP_NODES, HOM_SP_NAMES)
+    d = _resolve(taxdir, "Sulidae Morus bassanuss")
+    assert d["match_type"] == "fuzzy_species" and d["taxid"] == 37577
+    d = _resolve(taxdir, "Moraceae Morus zzzzzz")
+    assert d["match_type"] == "fuzzy_genus" and d["taxid"] == 3497
+
+
+# --- review file naming --------------------------------------------------------
+
+def test_review_path_dated_when_exists(tmp_path):
+    from datetime import date
+    from seqledger import cli as ocli
+    base = str(tmp_path)
+    first = ocli._review_path(base, "taxonomy_review")
+    assert first == os.path.join(base, "taxonomy_review.csv")
+    open(first, "w").close()
+    dated = os.path.join(base, f"taxonomy_review_{date.today().isoformat()}.csv")
+    assert ocli._review_path(base, "taxonomy_review") == dated
+    open(dated, "w").close()
+    assert ocli._review_path(base, "taxonomy_review") == dated[:-4] + "_2.csv"
+
+
+def test_resolve_no_results_writes_no_review(tmp_path, capsys):
+    from types import SimpleNamespace
+    from seqledger import cli as ocli
+    taxdir = _write_taxdump(str(tmp_path / "tax"))
+    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
+    odb.init_db(conn)
+    args = SimpleNamespace(force_download=False, rebuild_index=False,
+                           db=os.path.join(tmp_path, "cat.db"))
+    ocli._resolve_ncbi(otax, conn, args, taxdir, "new", str(tmp_path))
+    assert not os.path.exists(os.path.join(tmp_path, "taxonomy_review.csv"))
+    assert "review + edit" not in capsys.readouterr().out

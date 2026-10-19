@@ -12,9 +12,10 @@ so each `rclone copy` uses a --files-from list of paths relative to that root,
 which recreates the same tree under the destination.
 """
 
+import datetime
 import shlex
 
-RCLONE_MODULE = "tools/rclone/1.66.0"
+from .db import CONFIG_DEFAULTS, qsub_header
 
 
 def _missing(v):
@@ -64,12 +65,28 @@ def estimate_size(file_rows):
     return total, n, n_unknown
 
 
+def head_groups(groups, n):
+    """First n rel_paths across groups (in order), keeping the group structure."""
+    out = []
+    for root, rels in groups:
+        if n <= 0:
+            break
+        out.append((root, rels[:n]))
+        n -= len(rels)
+    return out
+
+
+def timestamp():
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
 LTIO_MAX_SLOTS = 6  # lTIO caps a user at 6 slots; requesting more never schedules.
 
 
 def build_copy_script(groups, dest, transfers=4, slots=4, mem=4,
                       job_name="seqledger_rclone_copy", est_bytes=None, n_files=None,
-                      rclone_module=RCLONE_MODULE, io_queue="lTIO.sq"):
+                      rclone_module=CONFIG_DEFAULTS["rclone_module"],
+                      io_queue=CONFIG_DEFAULTS["io_queue"], stamp=None):
     """Return a Hydra qsub script that rclone-copies the grouped files to dest.
 
     groups: list of (src_root, [rel_path, ...]) from group_by_root.
@@ -80,10 +97,12 @@ def build_copy_script(groups, dest, transfers=4, slots=4, mem=4,
     SGE slots are clamped to LTIO_MAX_SLOTS so the job always schedules; rclone still
     uses --transfers concurrent transfers (I/O-bound, decoupled from CPU slots).
     lTIO caps: 72h wall, 8G/slot, 6 slots and 2 concurrent jobs per user.
+    The log is <job_name>_<stamp>.log (stamp defaults to now) so reruns don't
+    overwrite it; the job exits non-zero if any rclone copy fails.
     """
+    log_name = f"{job_name}_{stamp or timestamp()}.log"
     dest = dest or "REPLACE_WITH_DESTINATION"
     slots = max(1, min(slots, LTIO_MAX_SLOTS))
-    mres = slots * mem
     header_est = ""
     if est_bytes is not None:
         header_est = (f"# estimated transfer: {human_size(est_bytes)}"
@@ -91,36 +110,24 @@ def build_copy_script(groups, dest, transfers=4, slots=4, mem=4,
 
     blocks = []
     for i, (root, rels) in enumerate(groups, start=1):
-        listing = "\n".join(rels)
-        blocks.append(f"""# --- source {i}: {root} ---
+        listing = " \\\n    ".join(shlex.quote(r) for r in rels)
+        blocks.append(f"""# --- source {i} ---
 SRC={shlex.quote(root)}
 LIST=$(mktemp)
-cat > "$LIST" <<'FILES'
-{listing}
-FILES
+printf '%s\\n' \\
+    {listing} > "$LIST"
 rclone copy "$SRC" "$DEST" --files-from "$LIST" \\
-    --transfers {transfers} --checksum --progress
+    --transfers {transfers} --checksum || {{ rc=$?; echo "ERROR: copy from $SRC failed (rc=$rc)" >&2; rc_fail=$rc; }}
 rm -f "$LIST"
 """)
     body = "\n".join(blocks) if blocks else "echo 'no files selected'; exit 1\n"
 
-    return f"""#!/bin/bash
-#$ -N {job_name}
-#$ -o {job_name}.log
-#$ -j y
-#$ -terse
-#$ -notify
-#$ -pe mthread {slots}
-#$ -q {io_queue} -l ioq
-#$ -l mres={mres}G,h_data={mem}G,h_vmem={mem}G
-#$ -S /bin/bash
-#$ -cwd
-
+    return qsub_header(job_name, log_name, io_queue, mem, slots) + f"""
 {header_est}echo + `date` $JOB_NAME running on $HOSTNAME in $QUEUE with jobID=$JOB_ID
 # -notify sends SIGUSR1/2 before a wall-cap kill; resubmitting the SAME script
 # resumes (rclone --checksum skips files already copied).
 trap 'echo "= `date` notified (approaching the 72h wall) -- stopping; resubmit this script to resume"; exit 2' SIGUSR1 SIGUSR2
-module load {rclone_module}
+module load {shlex.quote(rclone_module)}
 
 DEST={shlex.quote(dest)}
 # Fail early (before touching /store) if the destination is unset or unusable.
@@ -138,6 +145,8 @@ case "$DEST" in
         fi ;;
 esac
 
+rc_fail=0
 {body}
 echo = `date` $JOB_NAME done
+exit $rc_fail
 """

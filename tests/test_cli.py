@@ -182,7 +182,7 @@ def _fake_qsub(rc):
 
 def test_batch_submit_shows_configured_queue(tmp_path, monkeypatch, capsys):
     db, _ = _ingested(tmp_path)
-    _run(["--db", db, "init-db", "--io-queue", "myQ.q"])
+    _run(["--db", db, "init-db", "--set", "io_queue=myQ.q"])
     monkeypatch.setattr(cli.subprocess, "run", _fake_qsub(0))
     capsys.readouterr()
     assert _run(["--db", db, "integrity", "--batch",

@@ -67,15 +67,9 @@ def _resolve_root(conn, value, key, label, verbose=0):
     return None
 
 
-# init-db flag name -> config key. Flags let a lab retarget the tool without
-# editing source; unset keys keep today's defaults (odb.CONFIG_DEFAULTS).
-_INIT_CONFIG_FLAGS = {
-    "name": "catalog_name", "slug": "catalog_slug",
-    "seqdata_root": "seqdata_root", "metadata_root": "metadata_root",
-    "conda_env": "conda_env", "rclone_module": "rclone_module",
-    "login_host": "login_host", "io_queue": "io_queue",
-    "backup_location": "backup_location", "fastq_ext": "fastq_extensions",
-}
+# init-db flag name -> config key; other keys go through --set KEY=VALUE.
+_INIT_CONFIG_FLAGS = {"name": "catalog_name", "seqdata_root": "seqdata_root",
+                      "metadata_root": "metadata_root"}
 
 
 def cmd_init_db(args):
@@ -869,26 +863,19 @@ def build_parser():
     pdb = sub.add_parser(
         "init-db", parents=[dbp],
         help="create/upgrade the catalog schema; optionally set per-catalog config",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Create/upgrade the catalog schema and set config. "
-                    "--show only prints the config (read-only).")
+                    "--show only prints the config (read-only).",
+        epilog="other config keys (set with --set KEY=VALUE):\n" + "\n".join(
+            f"  {k} (default: {v})" for k, v in odb.CONFIG_DEFAULTS.items()
+            if k not in _INIT_CONFIG_FLAGS.values()))
     pdb.add_argument("--name", help="catalog display name (GUI title / CLI banner)")
-    pdb.add_argument("--slug", help="export-filename prefix (e.g. 'oceandna')")
     pdb.add_argument("--seqdata-root", dest="seqdata_root",
                      help="default root of raw_sequence_data for this catalog")
     pdb.add_argument("--metadata-root", dest="metadata_root",
                      help="default dir of per-project '<project>_mapfile.csv' files")
-    pdb.add_argument("--conda-env", dest="conda_env",
-                     help="conda env activated inside generated qsub jobs")
-    pdb.add_argument("--rclone-module", dest="rclone_module",
-                     help="module load'ed in generated rclone copy jobs")
-    pdb.add_argument("--login-host", dest="login_host", help="Hydra login host for GUI tunnels")
-    pdb.add_argument("--io-queue", dest="io_queue", help="qsub queue for batch/rclone/gui jobs")
-    pdb.add_argument("--backup-location", dest="backup_location",
-                     help="label of the 'verified backup' location (e.g. 'pdrive')")
-    pdb.add_argument("--fastq-ext", dest="fastq_ext",
-                     help="comma-separated FASTQ suffixes to discover (e.g. 'fastq.gz,fq.gz')")
     pdb.add_argument("--set", action="append", metavar="KEY=VALUE",
-                     help="set any config key directly (repeatable)")
+                     help="set any config key (repeatable; keys listed below)")
     pdb.add_argument("--show", action="store_true",
                      help="print the resolved config and exit (read-only; ignores other flags)")
     pdb.set_defaults(func=cmd_init_db)

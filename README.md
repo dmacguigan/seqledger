@@ -110,9 +110,9 @@ the examples further down are just one lab's settings).
 ```bash
 # 1. create a catalog + set this deployment's config (all flags optional)
 seqledger --db <YOUR_CATALOG>.db init-db \
-    --name "<Your Lab> sequence catalog" --slug <yourlab> \
+    --name "<Your Lab> sequence catalog" --set catalog_slug=<yourlab> \
     --seqdata-root <SEQDATA_ROOT> --metadata-root <METADATA_ROOT> \
-    --conda-env <ENV> --login-host <LOGIN_HOST>
+    --set conda_env=<ENV> --set login_host=<LOGIN_HOST>
 
 # 2. ingest: auto-discover project folders + their <project>_mapfile.csv.
 #    The roots come from the config set in step 1, so no need to repeat them
@@ -187,7 +187,7 @@ node, where `<conda_env>` is the catalog's `conda_env` [config](#configuration)
 value (default `seqledger`). Your env name must match it. If a deployment uses a
 different name, either create your env with that name, or pass `--conda-env <name>`
 (and, for the whole catalog, set it once with
-`seqledger --db … init-db --conda-env <name>`).
+`seqledger --db … init-db --set conda_env=<name>`).
 
 ## Layout
 
@@ -444,7 +444,7 @@ travels with it; generated qsub/rclone scripts bake the values in.
 
 ```bash
 seqledger --db catalog.db init-db --show          # print resolved config (read-only)
-seqledger --db catalog.db init-db --name "..." --conda-env myenv
+seqledger --db catalog.db init-db --name "..." --set conda_env=myenv
 seqledger --db catalog.db init-db --set io_queue=sThM.q   # any key
 ```
 

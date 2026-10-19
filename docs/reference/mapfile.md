@@ -83,10 +83,11 @@ cataloged from disk with no samples, and `ingest` counts it as rejected.
   exact name against every FASTQ found anywhere under the project folder (all
   subfolders). Which files count as FASTQs is set by `fastq_extensions`
   (default `fastq.gz,fq.gz`, see [config](config.md)).
-- If the same file name exists in two subfolders (say `Run1/` and `Run2/`), a
-  bare name picks the one that sorts last by path, with a warning. To name a
-  specific one, write the path under the project folder with forward slashes:
-  `Run1/S01_R1.fastq.gz`.
+- If the same file name exists in several subfolders (say `Run1/` to `Run4/`,
+  one library sequenced over several runs), a bare name links every copy to
+  that row's sample, with a warning. Read counts are summed across them. To
+  name one copy only, write the path under the project folder with forward
+  slashes: `Run1/S01_R1.fastq.gz`.
 - A listed file that is not on disk is still cataloged (with no size) and reported
   as "in mapfile, not on disk".
 - A FASTQ on disk that the mapfile does not list is not cataloged; it is reported

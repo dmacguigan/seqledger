@@ -127,10 +127,10 @@ def _discover_disk_files(data_dir, seqdata_root, globs):
     fastq_extensions, e.g. *.fastq.gz + *.fq.gz). Returns (by_basename, all_files,
     collisions), where each info is {"filename","rel_path","size","uid","name"} and
     rel_path is relative to seqdata_root:
-      by_basename -- {basename: info} for mapfile R1/R2 lookup (a colliding basename
-                     keeps the last found and is listed in `collisions`); also keyed
-                     by the subpath under data_dir ('Run1/x.fastq.gz'), so a mapfile
-                     can name one of several same-named files.
+      by_basename -- {basename: [info, ...]} for mapfile R1/R2 lookup (a basename
+                     in several subdirs lists every match and goes in `collisions`);
+                     also keyed by the subpath under data_dir ('Run1/x.fastq.gz'),
+                     so a mapfile can name just one of them.
       all_files   -- one info per file (keyed physically by rel_path), so a caller
                      that catalogs everything (diskonly projects) keeps BOTH files
                      when two share a basename in different subdirs.
@@ -152,8 +152,8 @@ def _discover_disk_files(data_dir, seqdata_root, globs):
                 "size": size, "uid": uid, "name": name}
         if fn in by_basename:
             collisions.append(fn)
-        by_basename[fn] = info
-        by_basename[os.path.relpath(p, data_dir).replace(os.sep, "/")] = info
+        by_basename.setdefault(fn, []).append(info)
+        by_basename[os.path.relpath(p, data_dir).replace(os.sep, "/")] = [info]
         all_files.append(info)
     return by_basename, all_files, collisions
 
@@ -353,13 +353,14 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
     usable = [p for p in plans if p["load"]]
     skipped = [p for p in plans if not p["load"]]
 
-    # A bare name is ambiguous when several subdirs hold it; a subpath entry is not.
+    # A bare name found in several subdirs (same library over several runs) links
+    # every copy to the row's sample; a subpath entry ('Run1/x.fastq.gz') names one.
     bare = {p[k] for p in usable for k in ("r1", "r2") if p[k] and "/" not in p[k]}
-    for fn in collisions:
+    for fn in sorted(set(collisions)):
         if fn in bare:
-            findings.append(Finding(WARN, f"'{fn}' appears in more than one subdirectory; "
-                                           "the last one found was cataloged (name it "
-                                           f"with its subfolder, e.g. 'Run1/{fn}')"))
+            findings.append(Finding(WARN, f"'{fn}' is in {len(disk[fn])} subdirectories; "
+                                           "all were cataloged under the same sample "
+                                           f"(to pick one, write e.g. 'Run1/{fn}')"))
 
     # Nothing loadable (every row skipped / no rows): don't write a project row here.
     # ingest_tree falls back to _ingest_diskonly (invalid_mapfile).
@@ -436,18 +437,19 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
                                         f"({seen_files[filename]} and {claim}); "
                                         "only the last row's sample/direction is kept"))
             seen_files[filename] = claim
-            info = disk.get(filename) if disk else None
-            rel_path = info["rel_path"] if info else os.path.join(seq_data_relpath, filename)
-            size = info["size"] if info else None
-            uid = info["uid"] if info else None
-            name = info["name"] if info else None
-            was_new, target = _upsert_file(
-                conn, project_id, sample_pk, direction, os.path.basename(filename), rel_path,
-                size_bytes=size, owner_uid=uid, owner_name=name,
-                disk_confirmed=info is not None, on_disk=on_disk)
-            kept_paths.add(target)
-            if was_new:
-                stats["new_files"] += 1
+            infos = disk.get(filename, []) if disk else []
+            if not infos:  # not on disk: flat guess, no size/owner
+                infos = [{"rel_path": os.path.join(seq_data_relpath, filename),
+                          "size": None, "uid": None, "name": None}]
+            for info in infos:
+                was_new, target = _upsert_file(
+                    conn, project_id, sample_pk, direction, os.path.basename(filename),
+                    info["rel_path"], size_bytes=info["size"], owner_uid=info["uid"],
+                    owner_name=info["name"], disk_confirmed=info["size"] is not None,
+                    on_disk=on_disk)
+                kept_paths.add(target)
+                if was_new:
+                    stats["new_files"] += 1
 
     stats["orphan_samples"] = sorted(set(existing) - csv_ids)
     status = "warn" if (n_flagged or skipped or overall_status(findings) != "pass") else "pass"

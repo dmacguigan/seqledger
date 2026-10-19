@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Mapfile `R1`/`R2` may name a file by its path under the project folder
-  (`Run1/x_R1.fastq.gz`), so same-named FASTQs in different subfolders can each
-  be assigned to a sample. The duplicate-name warning now suggests this.
+- A mapfile `R1`/`R2` name found in several subfolders (one library over
+  several runs) now links every copy to that sample instead of keeping the last
+  one and reporting the rest as "on disk, not in mapfile". To pick one copy,
+  name it by its path under the project folder (`Run1/x_R1.fastq.gz`).
 
 ## [0.2.1] - 2026-10-19
 

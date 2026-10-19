@@ -34,6 +34,7 @@ CONFIG_DEFAULTS = {
     "io_queue":        "lTIO.sq",                          # qsub queue for batch/rclone/gui
     "backup_location": "pdrive",                            # 'verified backup' location label
     "fastq_extensions": "fastq.gz,fq.gz",                  # comma-sep FASTQ suffixes
+    "dismiss_log":     "",                                 # GUI dismissals log (set by init-db)
 }
 
 

@@ -80,6 +80,8 @@ by an adversarial review. Highlights (specifics may still shift):
   not yet verified" (was incomplete/uncompared), "bad FASTQ line count" (was
   format-error), "R1 and R2 read counts differ" (was read-count parity).
   `query -h` explains the column names.
+- Internal: NCBI and WoRMS taxonomy share one set of scope, review-CSV, and
+  apply helpers. No user-visible change.
 
 ### Fixed
 

@@ -393,10 +393,8 @@ def test_download_default_timeout_is_bounded(tmp_path, monkeypatch):
 
 
 def test_download_timeout_raises_clear_error(tmp_path, monkeypatch):
-    import socket
-
     def fake_urlopen(url, timeout=None):
-        raise socket.timeout("timed out")
+        raise TimeoutError("timed out")
 
     monkeypatch.setattr(otax.urllib.request, "urlopen", fake_urlopen)
     try:
@@ -464,8 +462,7 @@ def test_worms_only_row_still_ncbi_new(tmp_path):
                  "VALUES ('P1','s1','Gadus morhua')")
     d = oworms._blank("Gadus morhua", "Gadus morhua")
     d.update(aphia_id=126436, worms_match_type="exact")
-    oworms._upsert_worms(conn, d, "2026-01-01")
-    conn.commit()
+    otax._write_taxa(conn, [d], oworms._WORMS_DB_COLS, "worms_")
     row = conn.execute("SELECT date_resolved FROM taxa WHERE taxon='Gadus morhua'").fetchone()
     assert row["date_resolved"] is None
     assert [r["taxon"] for r in oquery.unresolved_taxa(conn)] == ["Gadus morhua"]

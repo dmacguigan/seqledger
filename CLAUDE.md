@@ -14,7 +14,7 @@
 
 ## Database schema changes
 
-- The schema lives in `seqledger/schema.sql`; `init-db` applies it and runs in-place migrations in `seqledger/db.py`. Any table or column change edits both, and the migration must be idempotent (safe to re-run on an already-migrated catalog).
+- The schema lives in `seqledger/schema.sql`. There are no migrations: `init-db` applies schema.sql and refuses a catalog made by an older seqledger. Any table or column change edits schema.sql.
 - Document every schema change in CHANGELOG.md and remind users to back up the catalog before `init-db`.
 
 ## Testing

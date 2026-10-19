@@ -187,7 +187,7 @@ node, where `<conda_env>` is the catalog's `conda_env` [config](#configuration)
 value (default `seqledger`). Your env name must match it. If a deployment uses a
 different name, either create your env with that name, or pass `--conda-env <name>`
 (and, for the whole catalog, set it once with
-`seqledger --db … init-db --set conda_env=<name>`).
+`seqledger --db ... init-db --set conda_env=<name>`).
 
 ## Layout
 

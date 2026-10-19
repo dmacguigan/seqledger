@@ -142,6 +142,12 @@ def connect_ro(db_path):
     return conn
 
 
+def _unique_keys(conn, table):
+    """Column tuples of every UNIQUE constraint on table (indexes with origin 'u')."""
+    return {tuple(r[2] for r in conn.execute(f"PRAGMA index_info('{idx[1]}')"))
+            for idx in conn.execute(f"PRAGMA index_list({table})") if idx[3] == "u"}
+
+
 def init_db(conn, schema_path=SCHEMA_PATH):
     """Create tables from schema.sql (idempotent on a current catalog)."""
     path = conn.execute("PRAGMA database_list").fetchone()[2]
@@ -152,7 +158,8 @@ def init_db(conn, schema_path=SCHEMA_PATH):
     ref.executescript(schema)
     for (table,) in ref.execute("SELECT name FROM sqlite_master WHERE type='table'"):
         have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-        if have and {r[1] for r in ref.execute(f"PRAGMA table_info({table})")} - have:
+        if have and ({r[1] for r in ref.execute(f"PRAGMA table_info({table})")} - have
+                     or _unique_keys(ref, table) != _unique_keys(conn, table)):
             raise RuntimeError(f"catalog table {table!r} is from an older seqledger; "
                                "run init-db with seqledger 0.1.0 first")
     conn.executescript(schema)

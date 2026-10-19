@@ -125,8 +125,10 @@ the catalog's `conda_env` to match ([config](reference/config.md)), and make sur
 
 1. Read the new entries in [CHANGELOG.md](../CHANGELOG.md).
 2. [Back up the catalog](#back-up).
-3. `cd seqledger && git pull`. The install is editable, so no reinstall is needed
-   unless dependencies changed; then run `conda env update -f environment.yml`.
+3. `cd seqledger && git pull`, then `pip install -e '.[gui]' --no-deps` so
+   `seqledger --version` reports the new release (the editable install picks up
+   code changes by itself, but not the version). If dependencies changed, run
+   `conda env update -f environment.yml` instead.
 4. Run `seqledger init-db`. It creates any new tables and is safe to re-run. It
    does not migrate old tables: if it stops with `catalog table '<name>' is from
    an older seqledger`, run `init-db` once with the 0.1.0 code, which still

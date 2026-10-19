@@ -1,5 +1,7 @@
 # seqledger
 
+[![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
+
 seqledger is a catalog of a lab's raw sequencing data (FASTQ files). It keeps one
 SQLite database that records every project, sample, and file, checks that the
 files are intact and backed up, and resolves sample names against NCBI and WoRMS

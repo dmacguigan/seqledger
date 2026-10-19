@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `init-db` now also refuses a catalog whose `files` table still has the old
+  basename unique key (it only checked for missing columns), so `ingest` no
+  longer fails with "ON CONFLICT clause does not match". Fix: run `init-db` once
+  with the 0.1.0 code (`git checkout f3174b6`), then again with the current code.
+
 ## [0.2.0] - 2026-10-19
 
 ### Added

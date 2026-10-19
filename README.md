@@ -120,9 +120,3 @@ Or `pip install -e '.[test]'` in any Python 3.10+ environment.
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-## Citing
-
-If seqledger helps your work, please cite the repository:
-MacGuigan, D. seqledger: a catalog for raw sequencing data on HPC clusters.
-https://github.com/dmacguigan/seqledger

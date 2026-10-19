@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-19
+
 ### Added
 
 - `seqledger` with no subcommand in a terminal opens a text menu for common
@@ -146,4 +148,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `init-db --set` refuses unknown config keys and lists the known ones.
 - `--debug` works after the subcommand, like `--db` and `-v`.
 
-[Unreleased]: https://github.com/dmacguigan/seqledger/compare/main...devel
+[Unreleased]: https://github.com/dmacguigan/seqledger/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/dmacguigan/seqledger/compare/f3174b6...v0.2.0

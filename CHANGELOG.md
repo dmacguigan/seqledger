@@ -7,186 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-A hardening pass across the CLI, ingest/integrity pipeline, and browse GUI, driven
-by an adversarial review. Highlights (specifics may still shift):
-
 ### Added
 
-- `LICENSE` file (MIT) at the repository root, matching the `pyproject.toml`
-  license declaration.
-- This `CHANGELOG.md`.
-- Plain `ingest` (auto-discovery) now lists projects gone from both disk and the
-  mapfile folder, so `--prune-projects` has a preview before it deletes them.
-- `seqledger` with no subcommand in a terminal opens a text menu for the common
+- `seqledger` with no subcommand in a terminal opens a text menu for common
   tasks; each step prints the equivalent command. Off a terminal (cron, pipes)
   it still prints usage and exits 2.
+- `--version` flag.
+- Plain `ingest` lists projects gone from both disk and the mapfile folder, so
+  `--prune-projects` has a preview before it deletes them.
+- `docs/` user guide, admin guide, reference pages, and glossary; README is now
+  a short landing page.
+- `LICENSE` (MIT), this `CHANGELOG.md`, `CITATION.cff`, and `CONTRIBUTING.md`.
 
 ### Changed
 
-- **File identity is now the relative path, not the basename.** The `files`
-  table is keyed on `UNIQUE(project_id, rel_path)` (was `project_id, filename`),
-  so two FASTQ files that share a basename in different subdirectories of one
-  project (lane/run splits) are both cataloged, and md5 verification joins on the
-  full path instead of cross-contaminating same-named files.
-- Documentation corrected to describe the integrity check accurately: it
-  decompresses every byte (equivalent to `gzip -t`, catching truncation, CRC
-  errors, and bit-rot) and verifies the total line count is a multiple of 4, but
-  does **not** validate per-record `@`/`+` framing.
-- Documentation clarifies that the map file's required columns are a fixed set
-  (`ID`, `R1`, `R2`, `Taxon`, `UniqID`/`UniqueID`), matched case-insensitively.
-- The GUI now binds `127.0.0.1` only (locally and under `--qsub`), so other
-  cluster users can no longer reach it over the network. The printed tunnel is
-  now `ssh -N -L <port>:127.0.0.1:<port> -J <you>@<login_host> <you>@<node>`,
-  and off the cluster only the `http://localhost:<port>` link is printed.
-- CLI commands now exit non-zero on failures and refusals (ingest FAIL, integrity
-  gzip/format errors, checksums mismatches, validate issues: 1; refused prune or
-  failed `integrity --batch` submission: 2), so cron jobs can detect problems.
-- `--db` is accepted after the subcommand too (e.g. `seqledger query summary --db x.db`).
-- `init-db --show` is read-only: it prints the config without creating, migrating,
-  or changing the catalog.
-- Grab & Go: the copy script is shown as a short preview (first 20 files); the
-  full script is in the download. The job log and download names carry a
-  timestamp, rclone no longer floods the log with `--progress`, and the job exits
-  non-zero if any copy fails.
-- Grab & Go: a `files_ok` column flags corrupt, empty, missing, or unchecked
-  files per sample, with a warning and an option (on by default) to leave
-  problem files out of the copy job and MitoPilot map.
-- `gui --qsub` now requests 6 GB by default (was 2 GB, which a large catalog
-  exceeds). Raise `--mem` if the job dies at once.
-- `gui --qsub` deletes its own job, log, and ready files in `~/.seqledger_gui/`
-  that are older than 7 days.
-- Taxonomy review CSVs pre-fill `confirmed_taxid` / `confirmed_aphia_id` only for
-  exact matches, so applying an untouched CSV no longer confirms fuzzy guesses.
-- `taxonomy resolve` no longer overwrites an existing review CSV: it writes
-  `<name>_YYYY-MM-DD.csv` (then `_2`, `_3`) and prints the path. No review CSV is
-  written when nothing was resolved.
-- `--redo` help and docs now say confirmed taxa are kept (re-resolved for the
-  review CSV only, not overwritten).
-- CLI output trimmed: progress counters go to stderr and only on a terminal (no
-  more carriage-return lines in cron or qsub logs); the "using configured root"
-  note goes to stderr; `checksums` warnings print in sorted order; a missing
-  mapfile is reported once; the "next: integrity" and taxonomy "review + edit"
-  hints are shown only when there is something new to check or review.
-- New `-v` / `-vv` flags (before or after the subcommand). By default `ingest`,
-  `checksums`, `validate`, and `integrity` print one short summary: counts, a
-  Problems list capped at 10 projects, and one "Next:" step when there is one; no
-  section banners or per-project OK rows. `-v` lists every project, `-vv` every
-  per-file warning, sorted by path. `integrity` now names damaged files and
-  `checksums` names files whose md5 differs (up to 10 by default).
-- Plainer wording in CLI output: "on disk, not in mapfile" (was orphan), "backup
-  not yet verified" (was incomplete/uncompared), "bad FASTQ line count" (was
-  format-error), "R1 and R2 read counts differ" (was read-count parity).
+- New `-v` / `-vv` flags (before or after the subcommand): `-v` lists every
+  project, `-vv` every per-file warning, sorted by path.
+- By default `ingest`, `checksums`, `validate`, and `integrity` print one short
+  summary: counts, a Problems list capped at 10 projects, and one "Next:" step.
+  `integrity` names damaged files and `checksums` mismatched ones (up to 10).
+- Progress counters and the "using configured root" note go to stderr, progress
+  only on a terminal. `checksums` warnings are sorted, a missing mapfile is
+  reported once, and "next" hints show only when there is something to do.
+- Plainer wording: "on disk, not in mapfile" (was orphan), "backup not yet
+  verified", "bad FASTQ line count", "R1 and R2 read counts differ".
   `query -h` explains the column names.
-- Internal: NCBI and WoRMS taxonomy share one set of scope, review-CSV, and
-  apply helpers. No user-visible change.
 - `init-db` keeps only `--name`, `--seqdata-root`, `--metadata-root`, `--set`,
-  and `--show`. The `--slug`, `--conda-env`, `--rclone-module`, `--login-host`,
-  `--io-queue`, `--backup-location`, and `--fastq-ext` flags are gone; use
-  `--set KEY=VALUE` (e.g. `--set conda_env=myenv`). `init-db -h` lists the keys.
-- The GUI no longer retries reads itself when the catalog is locked; SQLite
-  waits up to 15 s for a concurrent write, then the GUI shows "Catalog is being
-  updated, retry shortly."
+  and `--show`; other settings use `--set KEY=VALUE` (e.g. `--set
+  conda_env=myenv`). `init-db -h` lists the keys.
+- `init-db --show` is read-only: it never creates or changes the catalog.
+- File identity is the relative path, not the basename (`UNIQUE(project_id,
+  rel_path)`), so same-named FASTQ files in different subdirectories are both
+  cataloged and md5 checks no longer mix them up.
+- Taxonomy review CSVs pre-fill `confirmed_taxid` / `confirmed_aphia_id` only
+  for exact matches, so applying an untouched CSV no longer confirms fuzzy guesses.
+- `taxonomy resolve` never overwrites a review CSV: it writes
+  `<name>_YYYY-MM-DD.csv` (then `_2`, `_3`), and none when nothing was resolved.
+- `--redo` help and docs say confirmed taxa are kept (re-resolved for the review
+  CSV only).
+- CLI commands exit non-zero on failures (1) and on refused prunes or failed
+  `integrity --batch` submissions (2), so cron jobs can detect problems.
+- `--db` is accepted after the subcommand too.
+- The GUI binds `127.0.0.1` only, locally and under `--qsub`. The printed tunnel
+  is `ssh -N -L <port>:127.0.0.1:<port> -J <you>@<login_host> <you>@<node>`.
+- The GUI waits up to 15 s on a locked catalog, then shows "Catalog is being
+  updated, retry shortly." instead of retrying itself.
+- `gui --qsub` requests 6 GB by default (was 2 GB) and deletes its own job, log,
+  and ready files in `~/.seqledger_gui/` older than 7 days.
+- Grab & Go: a `files_ok` column flags corrupt, empty, missing, or unchecked files,
+  with an option (on by default) to leave them out of the copy job and MitoPilot map.
+- Grab & Go: the copy script preview shows the first 20 files; job log and
+  download names are timestamped; rclone drops `--progress`; the job exits
+  non-zero if any copy fails.
+- Docs describe the integrity check accurately (full decompress plus line count
+  a multiple of 4; no per-record framing check) and the fixed map file columns.
+- Internal: NCBI and WoRMS taxonomy share one set of scope, review-CSV, and apply
+  helpers.
 
 ### Removed
 
-- Legacy schema migrations (added columns, `role` to `direction` rename, the
-  `files` rel_path rebuild). A catalog must have run `init-db` with a 2026
-  release (0.1.0) before upgrading; older catalogs are refused with a message.
-  `idx_files_mismatch` now lives in `schema.sql`. **Back up the catalog before
-  `init-db`.**
-- The two-column map file mode of `ingest` (positional `map_file`). Ingest
-  always auto-discovers from `--seqdata-root` and `--metadata-root`.
+- Legacy schema migrations. A catalog must have run `init-db` with 0.1.0 before
+  upgrading; older catalogs are refused with a message. **Back up the catalog
+  before `init-db`.**
+- The two-column map file mode of `ingest` (positional `map_file`). Ingest always
+  auto-discovers from `--seqdata-root` and `--metadata-root`.
 - GUI fallbacks for catalog copies missing newer columns or the `config` table,
   and the legacy `missing`/`orphan` issue kinds.
 - `requirements.txt`; use `pip install -e .[test]` or `environment.yml`.
 
 ### Fixed
 
-- `query` with no results prints "(none)" to stderr, so stdout holds only the
-  table and pipes do not get a fake data row.
-- Prune refusals no longer tell users to "pass force=True" (there is no such CLI
-  flag); they say to check the mount, mapfile folder, or mapfile instead.
-- GUI: a selected row in the Samples, Projects, or Files table is cleared when the
-  filters change, instead of crashing or showing the wrong record.
-- GUI: a project with no stored mapfile detail shows the standard explanation
-  instead of "nan".
-- GUI: an older catalog copy missing tables or columns now shows a clear "run
-  init-db and re-sync" message instead of a database error.
-- GUI: match-type legends cover every stored value (WoRMS `review_*` types, NCBI
-  `ambiguous`), and the Samples table shows the same readable labels as the charts.
-- GUI: the Taxonomy view explains how to install plotly when it is missing, and
-  says "No samples in this catalog yet." on an empty catalog.
-
-- The `backup_location` config is now honored by `checksums`, `query unbacked`,
-  and the GUI backup column (it was hardcoded to `pdrive`).
-- Ctrl-C during a local `integrity` run now stops at once and saves the results
-  checked so far.
-- `validate` marks a project `unchecked` (with "data folder not found") when its
-  data folder is gone, instead of keeping a stale `ok`. An unmounted root is
-  still skipped.
-- `validate` counts cataloged files not linked to any sample: for a project with
-  a mapfile they are reported as missing from the mapfile; for a project with no
-  mapfile the count is printed.
+- `query` with no results prints "(none)" to stderr, so stdout holds only the table.
+- Commands other than `init-db` no longer create an empty catalog at a mistyped
+  `--db` path; they point at `--db` / `SEQLEDGER_DB`.
+- `ingest --prune` / `--prune-projects` guard against a missing or unmounted root,
+  delete file rows by relative path, and refuse to drop over half of a project's
+  samples (projects with more than 2).
+- Prune refusals give the real reason and say to check the mount, mapfile folder,
+  or mapfile (no more "pass force=True").
+- Re-ingesting a project whose mapfile is missing or broken keeps its file rows
+  linked to their samples, R1/R2 direction, and mapfile name.
+- A FASTQ file moved to another subdirectory keeps its catalog row and md5 and
+  integrity history.
+- Project folders or roots with glob characters (e.g. `[1]`) have their files found.
+- A mapfile row with more cells than the header is flagged instead of silently
+  shifting columns.
+- An offline first `ingest` skips the taxonomy step with a message instead of a
+  traceback when the NCBI taxdump download fails.
+- `checksums` no longer resets backup verification for projects absent from the
+  md5 listing (use `--full`), and aborts on a truncated listing unless `--force`.
+- `checksums` matches uppercase md5 hex (PowerShell `Get-FileHash`) and paths with
+  a leading `./` or backslashes.
+- Checksum and integrity correctness fixes (comparison and per-file results).
+- The `backup_location` config is honored by `checksums`, `query unbacked`, and
+  the GUI backup column (was hardcoded to `pdrive`).
+- `integrity` re-checks a file whose size changed; a re-ingest that sees a new
+  size clears the old integrity result and backup match.
 - `integrity` no longer flags a file whose last read is empty as a format error.
-
-- Config values and filenames are now shell-quoted in generated qsub and rclone
-  scripts, and newlines, carriage returns, and NUL are rejected in config values
-  and FASTQ filenames, closing command injection via the catalog or a mapfile.
-- New catalogs are created with mode `0600` (owner-only); existing catalogs keep
-  their permissions.
-- The read-only connection URI now escapes the catalog path, so a `?` or `#` in
-  the path can no longer drop `mode=ro`; the GUI connection is also query-only.
-- The CLI now waits up to 60 s for a locked catalog (was 5 s), and a local
-  `integrity` run commits at least every 30 s so it no longer starves other
-  writers. The GUI waits about 15 s on a locked catalog (was about 50 s) and shows
-  a "retrying" message while it waits.
-- `gui --qsub` reports failure (with the job log path) instead of printing a
-  tunnel when the Streamlit server never started.
-- MitoPilot map R1/R2 are now paths relative to the copy destination (matching
-  the copied layout), not bare filenames, so `data_path = DEST` works.
+- Unreadable files (permissions, I/O errors) are reported `unchecked`, not corrupt.
+- Ctrl-C during a local `integrity` run stops at once and saves results so far.
+- `integrity --batch` no longer reuses results from a completed run, `--collect`
+  writes only to the result file's project and never over a newer result, and the
+  configured I/O queue is reported (not a hardcoded `lTIO.sq`).
+- `validate` marks a project `unchecked` when its data folder is gone (an
+  unmounted root is still skipped).
+- `validate` counts cataloged files not linked to any sample.
+- `taxonomy apply` reads Excel-saved review CSVs (UTF-8 with BOM, or cp1252) and
+  stops with a clear error on the other source's review CSV.
+- A taxon first resolved by WoRMS is still resolved against NCBI and listed by
+  `query taxa` until it is.
+- Taxonomy edge cases: a genus shared by two kingdoms is flagged `ambiguous` on
+  the fuzzy species path too, instead of silently picking one.
+- MitoPilot map R1/R2 are paths relative to the copy destination, so
+  `data_path = DEST` works.
 - Lane-split samples are flagged in Grab & Go (MitoPilot gets only the first file
   per direction), and the Samples R1/R2 path columns list every lane file.
+- `gui --qsub` reports failure with the job log path when Streamlit never started.
+- GUI: a selected table row is cleared when filters change, instead of crashing
+  or showing the wrong record.
+- GUI: an older catalog copy missing tables or columns shows a "run init-db and
+  re-sync" message instead of a database error.
+- GUI: a project with no stored mapfile detail shows the standard explanation
+  instead of "nan".
+- GUI: match-type legends cover every stored value, and the Samples table uses
+  the same labels as the charts.
+- GUI: the Taxonomy view explains how to install plotly when missing, and says
+  "No samples in this catalog yet." on an empty catalog.
+- Security: config values and filenames are shell-quoted in generated qsub and
+  rclone scripts; newlines, carriage returns, and NUL are rejected in them.
+- Security: exported CSVs and map files are sanitized against spreadsheet formula
+  injection (also on pandas 3).
+- Security: new catalogs are created mode `0600`; the read-only connection URI
+  escapes the catalog path, and the GUI connection is query-only.
+- The CLI waits up to 60 s for a locked catalog (was 5 s), and a local
+  `integrity` run commits at least every 30 s so it does not starve other writers.
 
-- `ingest --prune` / `--prune-projects` safety guards, so a missing or unmounted
-  root cannot wipe the catalog.
-- SQLite-lock resilience in the GUI when reading a catalog that is being written.
-- GUI CSV exports were not sanitized against spreadsheet formula injection on pandas 3.
-- Checksum and integrity correctness fixes (comparison and per-file result
-  handling).
-- Taxonomy resolution hardening for edge-case and ambiguous names.
-- CSV-injection sanitization on exported map files and tables.
-- `checksums` no longer resets backup verification for projects absent from the
-  md5 listing (use `--full` for a catalog-wide reset), and aborts without changes
-  on a truncated listing unless `--force`.
-- `checksums` matches uppercase md5 hex (PowerShell `Get-FileHash`) and paths
-  with a leading `./` or backslashes.
-- `integrity` re-checks a file whose size changed since its last check; a re-ingest
-  that sees a new size clears the old integrity result and backup match.
-- `integrity --batch` no longer reuses results from a completed run, and `--collect`
-  only writes to the result file's own project and never overwrites a newer result.
-- Files that cannot be read (permissions, I/O errors) are reported `unchecked`
-  instead of corrupt.
-- Commands other than `init-db` no longer create an empty catalog at a mistyped
-  `--db` path; they stop with a message pointing at `--db` / `SEQLEDGER_DB`.
-- `ingest --prune-projects` prints the real reason it refused to prune.
-- `integrity --batch` reports the configured I/O queue, not a hardcoded `lTIO.sq`.
-- An offline first `ingest` no longer prints a traceback when the NCBI taxdump
-  download fails; the taxonomy step is skipped with a message.
-- Re-ingesting a project whose mapfile is missing, broken, or has no usable rows
-  no longer unlinks its files from their samples; existing file rows keep their
-  sample and R1/R2 direction, and the project keeps its mapfile name.
-- A FASTQ file moved to another subdirectory keeps its catalog row and history
-  (md5 and integrity results) instead of leaving a stale duplicate row.
-- `ingest --prune` deletes file rows by relative path and reports the true number
-  of rows removed. It refuses to drop more than half of a project's samples (when
-  the project has more than 2), which usually means a truncated mapfile.
-- Project folders or roots whose names contain glob characters (e.g. `[1]`) now
-  have their files found.
-- A mapfile row with more cells than the header (often an unquoted comma) is
-  flagged with a warning instead of silently shifting columns.
-- `taxonomy apply` reads review CSVs saved by Excel (UTF-8 with BOM, or cp1252),
-  and stops with a clear error when given the other source's review CSV.
-- A taxon first resolved by WoRMS is now still resolved against NCBI and listed
-  by `query taxa` until it is.
-- A genus name shared by two kingdoms is flagged `ambiguous` on the fuzzy species
-  path too, instead of silently picking one.
+[Unreleased]: https://github.com/dmacguigan/seqledger/compare/main...devel

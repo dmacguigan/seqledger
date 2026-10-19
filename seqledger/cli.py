@@ -22,6 +22,7 @@ import tarfile
 from datetime import date
 from urllib.error import URLError
 
+from seqledger import __version__
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import checksums as ochecksums
@@ -815,6 +816,7 @@ def build_parser():
                    help="show the full traceback on error instead of a one-line message")
     p.add_argument("-v", "--verbose", action="count", default=0,
                    help="more detail: -v per project, -vv per file")
+    p.add_argument("--version", action="version", version=f"seqledger {__version__}")
     # Also accept --db / -v after the subcommand; SUPPRESS keeps the top-level value when absent.
     dbp = argparse.ArgumentParser(add_help=False)
     dbp.add_argument("--db", default=argparse.SUPPRESS, help="path to catalog SQLite DB")

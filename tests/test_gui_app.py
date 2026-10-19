@@ -532,16 +532,19 @@ def test_projects_dismiss_all_then_show_and_undo(tmp_path, monkeypatch):
     log, _ = dismiss.read(dismiss.default_log_path(p))
     assert len(log) == 3
     # mapfile dismiss
+    at.text_input(key="note_mapfile").set_value("**bold** [x](y)")
     _button(at, "Dismiss mapfile issue").click().run()
     _select(at, _table_key(at, "projects_table_"), [0])
     assert at.dataframe[0].value.iloc[0]["mapfile"] == "OK *"
     assert not at.warning
-    assert any("Mapfile: OK *" in i.value for i in at.info)
+    assert any("Mapfile: OK *" in i.value and "\\*\\*bold\\*\\* \\[x\\]\\(y\\)" in i.value
+               for i in at.info)
     # show dismissed -> rows back with who/when, undo one
     at.sidebar.checkbox[-1].check().run()
     _select(at, _table_key(at, "projects_table_"), [0])
     issues = at.dataframe[1].value
     assert len(issues) == 3 and set(issues["dismissed_by"]) != {""}
+    assert all(i.endswith(" (dismissed)") for i in issues["issue"])
     assert at.dataframe[0].value.iloc[0]["mapfile"] == "flagged rows (dismissed)"
     at.sidebar.checkbox[0].check().run()   # Only mapfile issues: tests live labels
     assert len(at.dataframe[0].value) == 0
@@ -570,11 +573,23 @@ def test_projects_sidebar_reports_unreadable_lines(tmp_path, monkeypatch):
     at = _apptest(monkeypatch, p, "Projects")
     assert any("1 unreadable line(s)" in c.value for c in at.sidebar.caption)
 
+def _capture_downloads(monkeypatch):
+    import streamlit as st
+    got = {}
+    monkeypatch.setattr(st, "download_button",
+                        lambda label, data, name, *a, **kw: got.__setitem__(name, data))
+    return got
+
+def _download_frame(got, suffix):
+    import io
+    return pd.read_csv(io.BytesIO(next(v for k, v in got.items() if k.endswith(suffix))))
+
 def test_samples_dismiss_flags(tmp_path, monkeypatch):
     from seqledger import dismiss
     p = _issues_catalog(tmp_path)
     con = sqlite3.connect(p); con.execute("UPDATE samples SET flags='na_uniqid' WHERE sample_id='s1'")
     con.commit(); con.close()
+    got = _capture_downloads(monkeypatch)
     at = _apptest(monkeypatch, p, "Samples")
     key = _table_key(at, "samples_table_")
     i = list(at.dataframe[0].value["sample_id"]).index("s1")
@@ -582,11 +597,18 @@ def test_samples_dismiss_flags(tmp_path, monkeypatch):
     _button(at, "Dismiss flags for this sample").click().run()
     assert at.dataframe[0].value.iloc[i]["flags"] == "OK *"
     assert dismiss.sample_key("P1", "s1", "na_uniqid") in dismiss.read(dismiss.default_log_path(p))[0]
+    csv = _download_frame(got, "_samples.csv")
+    assert csv.loc[csv["sample_id"] == "s1", "flags"].iloc[0] == "na_uniqid"
+    assert any("turn on 'Show dismissed' to see it" in c.value for c in at.caption)
     at.sidebar.checkbox[-1].check().run()
     assert at.dataframe[0].value.iloc[i]["flags"] == "na_uniqid (dismissed)"
+    at.sidebar.radio[0].set_value("Grab & Go").run()
+    at.sidebar.radio[0].set_value("Samples").run()
+    assert at.sidebar.checkbox[-1].value is True
 
 def test_files_dismiss_integrity_and_md5(tmp_path, monkeypatch):
     p = _issues_catalog(tmp_path)
+    got = _capture_downloads(monkeypatch)
     at = _apptest(monkeypatch, p, "Files")
     key = _table_key(at, "files_table_")
     df = at.dataframe[0].value
@@ -598,7 +620,75 @@ def test_files_dismiss_integrity_and_md5(tmp_path, monkeypatch):
     _select(at, key, [j])
     _button(at, "Dismiss md5 mismatch").click().run()
     assert at.dataframe[0].value.iloc[j]["backup"] == "OK *"
+    csv = _download_frame(got, "_files.csv").set_index("filename")
+    assert csv.loc["s2_R1.fastq.gz", "integrity"] == "gzip_error"
+    assert csv.loc["s2_R2.fastq.gz", "backup"] == "Mismatch"
+    assert any("turn on 'Show dismissed' to see it" in c.value for c in at.caption)
     # the integrity filter no longer returns the dismissed file
     sel = next(s for s in at.sidebar.selectbox if s.label == "Integrity")
     sel.set_value("gzip_error").run()
     assert "s2_R1.fastq.gz" not in list(at.dataframe[0].value["filename"])
+
+def _labels():
+    dl, cl, il, fo = (app.ovalidate.data_label, app.ovalidate.checksum_label,
+                      app.integrity_label, app._files_ok)
+    ints = {"n_files": 3, "n_integrity_ok": 3, "n_integrity_bad": 0, "n_integrity_empty": 0}
+    cs = {"n_files": 3, "n_mismatch": 0, "n_uncompared": 0}
+    return [
+        (dl({"status": "ok"}), "ok"),
+        (dl({"status": "unchecked"}), "pending"),
+        (dl({"status": "unchecked", "detail": "data folder not found: /x"}), "pending"),
+        (dl({"status": "issues", "n_missing": 1, "n_orphan": 0}), "error"),
+        (dl({"status": "issues", "n_missing": 0, "n_orphan": 2}), "warning"),
+        (dl({"status": "issues", "n_missing": 1, "n_orphan": 2}), "error"),
+        (cl({**cs, "n_files": 0}), "pending"),
+        (cl({**cs, "n_mismatch": 1}), "error"),
+        (cl({**cs, "n_uncompared": 2}), "pending"),
+        (cl(cs), "ok"),
+        (il({**ints, "n_files": 0}), "pending"),
+        (il({**ints, "n_integrity_ok": 2, "n_integrity_bad": 1}), "error"),
+        (il({**ints, "n_integrity_empty": 1}), "error"),
+        (il({**ints, "n_integrity_ok": 0}), "pending"),
+        (il({**ints, "n_integrity_ok": 2}), "pending"),
+        (il(ints), "ok"),
+    ] + [(app._MAPFILE_LABEL[k], v) for k, v in (
+        ("ok", "ok"), ("missing_mapfile", "error"), ("missing_seqdata", "error"),
+        ("broken_mapfile", "error"), ("invalid_mapfile", "error"), ("flagged", "warning"))
+    ] + [
+        (fo([]), "pending"), (fo(["ok"]), "ok"), (fo(["ok", "dismissed"]), "dismissed"),
+        (fo(["missing"]), "error"), (fo(["missing", "unchecked"]), "error"),
+        (fo(["missing", "dismissed"]), "error"), (fo(["empty"]), "error"),
+        (fo(["corrupt", "dismissed"]), "error"), (fo(["unchecked"]), "pending"),
+        ("Verified", "ok"), ("Mismatch", "error"), ("Not compared", "pending"),
+        ("ok", "ok"), ("gzip_error", "error"), ("format_error", "error"), ("unchecked", "pending"),
+        ("missing from disk", "error"), ("missing from mapfile", "warning"),
+        ("md5 mismatch", "error"), ("empty (0 reads)", "error"),
+        ("gzip error (dismissed)", "dismissed"), ("missing from mapfile (dismissed)", "dismissed"),
+    ]
+
+@pytest.mark.parametrize("label,severity", _labels())
+def test_severity_of_real_labels(label, severity):
+    assert app._severity(label) == severity
+
+def test_tint_skips_styler_on_large_frames():
+    big = pd.DataFrame("x", index=range(10001), columns=[f"c{i}" for i in range(11)])
+    assert isinstance(app._tint(big, ["c0"]), pd.DataFrame)
+    assert not isinstance(app._tint(pd.DataFrame({"c0": ["x"]}), ["c0"]), pd.DataFrame)
+
+def test_projects_unavailable_log_hides_dismiss(tmp_path, monkeypatch):
+    p = _issues_catalog(tmp_path)
+    con = sqlite3.connect(p)
+    con.execute("INSERT OR REPLACE INTO config(key, value) VALUES ('dismiss_log', ?)",
+                (str(tmp_path / "nope" / ".x.tsv"),))
+    con.commit(); con.close()
+    at = _apptest(monkeypatch, p, "Projects")
+    _select(at, _table_key(at, "projects_table_"), [0])
+    assert not at.exception
+    assert any("Dismissals unavailable" in c.value for c in at.sidebar.caption)
+    assert len(at.dataframe) == 2
+    assert not any(b.label.startswith(("Dismiss", "Undo")) for b in at.button)
+
+def test_projects_only_checksum_keeps_uncompared(tmp_path, monkeypatch):
+    at = _apptest(monkeypatch, _make_catalog(tmp_path), "Projects")
+    next(c for c in at.sidebar.checkbox if c.label == "Only checksum issues").check().run()
+    assert list(at.dataframe[0].value["project_id"]) == ["P1"]

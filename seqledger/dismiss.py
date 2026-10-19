@@ -33,22 +33,27 @@ def file_key(project_id, rel_path, kind):
     return ("file", project_id, rel_path, kind)
 
 
-def append(path, action, key, user, note=""):
+def append_many(path, action, keys, user, note=""):
     if action not in ("dismiss", "undo"):
         raise ValueError("action must be dismiss or undo, got %r" % (action,))
-    scope, project_id, item, kind = key
     time = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    row = "\t".join([time, flatten(user), action, scope, project_id, item, kind, flatten(note)]) + "\n"
+    rows = "".join("\t".join([time, flatten(user), action, scope, project_id, item, kind,
+                              flatten(note)]) + "\n"
+                   for scope, project_id, item, kind in keys)
     new = not os.path.exists(path)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o664)
     try:
         if new:
             os.chmod(path, 0o664)
         if os.fstat(fd).st_size == 0:
-            row = HEADER + "\n" + row
-        os.write(fd, row.encode("utf-8"))
+            rows = HEADER + "\n" + rows
+        os.write(fd, rows.encode("utf-8"))
     finally:
         os.close(fd)
+
+
+def append(path, action, key, user, note=""):
+    append_many(path, action, [key], user, note)
 
 
 def read(path):
@@ -71,6 +76,8 @@ def read(path):
             key = (scope, project_id, item, kind)
             if action == "dismiss":
                 dismissed[key] = {"time": time, "user": user, "note": note}
-            else:
+            elif action == "undo":
                 dismissed.pop(key, None)
+            else:
+                n_bad += 1
     return dismissed, n_bad

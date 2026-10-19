@@ -187,29 +187,40 @@ def load_dismissals(path, mtime, size):
     return dismiss.read(path)
 
 
+_UNAVAILABLE = "Dismissals unavailable"
+
+
 def _dismiss_state():
     path = _dismiss_log_path(DB_PATH)
+    unavailable = f"{_UNAVAILABLE}: cannot read {path}"
+    if not os.path.isdir(os.path.dirname(os.path.abspath(path))):
+        return path, {}, unavailable
     try:
         s = os.stat(path) if os.path.exists(path) else None
         dismissed, n_bad = load_dismissals(path, s and s.st_mtime, s and s.st_size)
     except OSError:
-        return path, {}, f"Dismissals unavailable: cannot read {path}"
+        return path, {}, unavailable
     return path, dismissed, (f"{n_bad} unreadable line(s) in {path}" if n_bad else None)
 
 
 def _dismiss_sidebar():
-    _, dismissed, problem = _dismiss_state()
-    show = st.checkbox("Show dismissed", key="show_dismissed")
+    """(dismissed, show_dismissed, available, log_path)"""
+    path, dismissed, problem = _dismiss_state()
+    show = st.checkbox("Show dismissed", key="show_dismissed",
+                       value=st.session_state.get("show_dismissed_value", False))
+    st.session_state["show_dismissed_value"] = show
     if problem:
         st.caption(problem)
-    return dismissed, show
+    return dismissed, show, not (problem or "").startswith(_UNAVAILABLE), path
+
+
+def _md(text):
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|<>~$:])", r"\\\1", str(text))
 
 
 def _record(log_path, action, keys, note):
-    user = getpass.getuser()
     try:
-        for key in keys:
-            dismiss.append(log_path, action, key, user, note)
+        dismiss.append_many(log_path, action, keys, getpass.getuser(), note)
     except OSError:
         st.error(f"Could not record the dismissal: {log_path} is not writable. "
                  f"Ask your data manager to run: chmod 664 {log_path}")
@@ -497,7 +508,8 @@ def _severity(label):
     s = label.removesuffix(" *")
     if s in _PENDING_LABELS or s.startswith(_PENDING_PREFIXES):
         return "pending"
-    if s in _ERROR_LABELS or any(p in s for p in _ERROR_PARTS):
+    if s in _ERROR_LABELS or any(p in s for p in _ERROR_PARTS) or \
+            re.search(r"\b\d+ missing\b", s):
         return "error"
     if s in ("flagged rows", "missing from mapfile") or "not in mapfile" in s or \
             all(t.strip() in ovalidate.FLAG_MESSAGES for t in s.split(";")):
@@ -506,6 +518,8 @@ def _severity(label):
 
 
 def _tint(df, columns):
+    if df.size > 100000:
+        return df
     return df.style.map(lambda v: _TINT[_severity(v)],
                         subset=[c for c in columns if c in df.columns])
 
@@ -659,6 +673,10 @@ def _mark_files(df, dismissed, show_dismissed):
     return out
 
 
+def _raw(show, src, cols):
+    return show.assign(**{c: src.loc[show.index, c] for c in cols})
+
+
 def _sample_flags_key(r):
     f = r["flags"]
     return dismiss.sample_key(r["project_id"], r["sample_id"], f) \
@@ -672,7 +690,7 @@ def samples_view(df, files_df):
         chosen = st.multiselect("Project", projects)
         backup = st.selectbox("Backup status", ["All", "Verified", "Not verified"])
         search = st.text_input("Search (sample, taxon, UniqID)")
-        dismissed, show_dismissed = _dismiss_sidebar()
+        dismissed, show_dismissed, available, log_path = _dismiss_sidebar()
 
     view = df
     if chosen:
@@ -710,7 +728,8 @@ def samples_view(df, files_df):
                  "tax_match": tax_lab, "worms_match": worms_lab,
                  "uniq_id_url": show["uniq_id"]})
     st.caption(f"{len(show)} of {len(df)} samples (full R1/R2 paths, taxid + "
-               "lineage are in the CSV export). Select a row to list its files below.")
+               "lineage are in the CSV export). Select a row to list its files below. "
+               "* an issue here was dismissed; turn on 'Show dismissed' to see it.")
     disp = show[on_screen].assign(tax_match=tax_lab.loc[show.index],
                                   worms_match=worms_lab.loc[show.index])
     event = st.dataframe(
@@ -727,7 +746,7 @@ def samples_view(df, files_df):
             "worms_match": "WoRMS_match",
             "worms_status": "WoRMS_status",
             "uniq_id_url": _uniqid_link_col()})
-    _download(show, f"{_config(DB_PATH, 'catalog_slug')}_samples.csv")
+    _download(_raw(show, df, ["flags"]), f"{_config(DB_PATH, 'catalog_slug')}_samples.csv")
 
     sel = event.selection.rows if event and event.selection else []
     sel = [i for i in sel if i < len(show)]
@@ -735,8 +754,7 @@ def samples_view(df, files_df):
         return
     r = show.iloc[sel[0]]
     pid, sid = r["project_id"], r["sample_id"]
-    log_path = _dismiss_log_path(DB_PATH)
-    fkey = _sample_flags_key(df.loc[r.name])
+    fkey = _sample_flags_key(df.loc[r.name]) if available else None
     if fkey and fkey not in dismissed:
         note = st.text_input("Note", key="note_flags")
         if st.button("Dismiss flags for this sample") and \
@@ -756,7 +774,7 @@ def samples_view(df, files_df):
                   .reset_index(drop=True), ["backup", "integrity"]),
             width="stretch", hide_index=True,
             column_config={"n_reads": "reads", "integrity_date": "checked"})
-        _download(fsub, f"{sid}_files.csv")
+        _download(_raw(fsub, files_df, ["backup", "integrity"]), f"{sid}_files.csv")
     else:
         st.info("No files cataloged for this sample.")
 
@@ -772,8 +790,7 @@ def projects_view(df, issues, integ_issues, md5_issues):
         data_only = st.checkbox("Only data-files issues")
         cs_only = st.checkbox("Only checksum issues")
         integ_only = st.checkbox("Only integrity issues")
-        dismissed, show_dismissed = _dismiss_sidebar()
-    log_path = _dismiss_log_path(DB_PATH)
+        dismissed, show_dismissed, available, log_path = _dismiss_sidebar()
     all_issues = _mark_issues(pd.concat([issues, integ_issues, md5_issues], ignore_index=True),
                               dismissed)
     by_pid = dict(list(all_issues.groupby("project_id")))
@@ -797,7 +814,7 @@ def projects_view(df, issues, integ_issues, md5_issues):
     if data_only:
         view = view[bad("data_files")]
     if cs_only:
-        view = view[bad("checksum")]
+        view = view[bad("checksum") | (view["n_uncompared"].fillna(0) > 0)]
     if integ_only:
         view = view[bad("integrity")]
 
@@ -831,13 +848,17 @@ def projects_view(df, issues, integ_issues, md5_issues):
         if hit is None:
             st.warning(f"**Mapfile issue ({_MAPFILE_LABEL.get(mstatus, mstatus)}):** "
                        f"{prow['metadata_detail']}")
-            note = st.text_input("Note", key="note_mapfile")
-            if st.button("Dismiss mapfile issue") and _record(log_path, "dismiss", [mkey], note):
-                st.rerun()
+            if available:
+                note = st.text_input("Note", key="note_mapfile")
+                if st.button("Dismiss mapfile issue") and \
+                        _record(log_path, "dismiss", [mkey], note):
+                    st.rerun()
         else:
-            extra = ": " + hit["note"] if hit["note"] else ""
-            st.info(f"Mapfile: OK * (dismissed by {hit['user']} on {hit['time'][:10]}{extra})")
-            if show_dismissed and st.button("Undo") and _record(log_path, "undo", [mkey], ""):
+            extra = ": " + _md(hit["note"]) if hit["note"] else ""
+            st.info(f"Mapfile: OK * (dismissed by {_md(hit['user'])} on "
+                    f"{hit['time'][:10]}{extra})")
+            if available and show_dismissed and st.button("Undo") and \
+                    _record(log_path, "undo", [mkey], ""):
                 st.rerun()
 
     # Disk/mapfile checks, integrity failures, and md5 mismatches live in different
@@ -855,6 +876,7 @@ def projects_view(df, issues, integ_issues, md5_issues):
                     "`validate --seqdata-root` and `integrity --collect` to refresh.")
         return
     rows["issue"] = rows["kind"].map(_ISSUE_LABEL).fillna(rows["kind"])
+    rows.loc[rows["dismissed"], "issue"] += " (dismissed)"
     rows["detail"] = rows["kind"].map(_ISSUE_DETAIL).fillna("")
     icols = ["issue", "detail", "filename", "full_path", "sample_id",
              "direction", "taxon", "uniq_id", "uniq_id_url"]
@@ -866,6 +888,8 @@ def projects_view(df, issues, integ_issues, md5_issues):
         column_config={"full_path": "expected_path",
                        "uniq_id_url": _uniqid_link_col()})
     _download(rows, f"{pid}_data_issues.csv")
+    if not available:
+        return
     picked = rows.iloc[[i for i in (ev.selection.rows if ev and ev.selection else [])
                         if i < len(rows)]]
     live_sel, dis_sel = picked[~picked["dismissed"]], picked[picked["dismissed"]]
@@ -895,7 +919,7 @@ def files_view(df, samples_df):
         integrity = st.selectbox(
             "Integrity", ["All", "ok", "gzip_error", "format_error", "unchecked"])
         search = st.text_input("Search (sample, filename)")
-        dismissed, show_dismissed = _dismiss_sidebar()
+        dismissed, show_dismissed, available, log_path = _dismiss_sidebar()
     live = _mark_files(df, dismissed, False)
     view = _mark_files(df, dismissed, True) if show_dismissed else live
     if chosen:
@@ -917,14 +941,16 @@ def files_view(df, samples_df):
                            labels={"n_reads": "reads", "integrity_date": "checked"})
     st.caption(f"{len(show)} of {len(df)} files. "
                "Select a row to show its sample info below. "
-               "'owner_name' is the filesystem owner (a personal identifier).")
+               "'owner_name' is the filesystem owner (a personal identifier). "
+               "* an issue here was dismissed; turn on 'Show dismissed' to see it.")
     event = st.dataframe(
         _tint(show[on_screen].reset_index(drop=True), ["backup", "integrity"]),
         width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row",
         key=f"files_table_{hash(tuple(show.index))}",
         column_config={"n_reads": "reads", "integrity_date": "checked"})
-    _download(show, f"{_config(DB_PATH, 'catalog_slug')}_files.csv")
+    _download(_raw(show, df, ["backup", "integrity"]),
+              f"{_config(DB_PATH, 'catalog_slug')}_files.csv")
 
     sel = event.selection.rows if event and event.selection else []
     sel = [i for i in sel if i < len(show)]
@@ -932,9 +958,8 @@ def files_view(df, samples_df):
         return
     r = show.iloc[sel[0]]
     pid, sid = r["project_id"], r["sample_id"]
-    log_path = _dismiss_log_path(DB_PATH)
     keys = [(kind, dismiss.file_key(pid, r["rel_path"], kind))
-            for _, kind in _file_issues(df.loc[r.name])]
+            for _, kind in _file_issues(df.loc[r.name])] if available else []
     live_keys = [(k, key) for k, key in keys if key not in dismissed]
     if live_keys:
         note = st.text_input("Note", key="note_file")

@@ -55,3 +55,21 @@ def test_append_rejects_bad_action_and_propagates_oserror(tmp_path):
     with pytest.raises(OSError):
         dismiss.append(str(tmp_path / "missing_dir" / "l.tsv"),
                        "dismiss", dismiss.file_key("P", "f", "gzip error"), "u")
+
+def test_read_unknown_action_is_bad_line(tmp_path):
+    p = tmp_path / "log.tsv"
+    p.write_text(dismiss.HEADER + "\n"
+                 "t\tu\tdismiss\tfile\tP1\tP1/a.gz\tgzip error\t\n"
+                 "t\tu\thide\tfile\tP1\tP1/a.gz\tgzip error\t\n")
+    d, n_bad = dismiss.read(str(p))
+    assert set(d) == {("file", "P1", "P1/a.gz", "gzip error")}
+    assert n_bad == 1
+
+def test_append_many_writes_one_header_and_all_lines(tmp_path):
+    p = str(tmp_path / "log.tsv")
+    keys = [dismiss.file_key("P1", f"P1/{c}.gz", "gzip error") for c in "abc"]
+    dismiss.append_many(p, "dismiss", keys, "dan", "n")
+    lines = open(p).read().splitlines()
+    assert lines[0] == dismiss.HEADER and lines.count(dismiss.HEADER) == 1
+    assert [ln.split("\t")[5] for ln in lines[1:]] == ["P1/a.gz", "P1/b.gz", "P1/c.gz"]
+    assert set(dismiss.read(p)[0]) == set(keys)

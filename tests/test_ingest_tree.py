@@ -454,8 +454,8 @@ def test_moved_file_keeps_row_and_history(tmp_path, fresh_db):
 
 
 def test_prune_deletes_by_rel_path_and_counts_rows(tmp_path, fresh_db):
-    # Same basename in two lanes plus junk; only the paths the mapfile resolves to
-    # survive a prune, and every deleted row is counted.
+    # Same basename in two lanes plus junk; a bare mapfile name resolves to both
+    # lanes, only the unreferenced junk is pruned, and every deleted row is counted.
     root, meta = _roots(tmp_path)
     pid = "genohub-1_X"
     for sub in ("L1", "L2"):
@@ -466,8 +466,8 @@ def test_prune_deletes_by_rel_path_and_counts_rows(tmp_path, fresh_db):
     _write_mapfile(meta, pid, ["s1,s1_R1.fastq.gz,s1_R2.fastq.gz,Gadus,U1"])
     res = oingest.ingest_tree(conn, root, meta, prune=True)
     rp = {r["rel_path"] for r in conn.execute("SELECT rel_path FROM files")}
-    assert rp == {f"{pid}/L2/s1_R1.fastq.gz", f"{pid}/L2/s1_R2.fastq.gz"}
-    assert res[0][3]["pruned_files"] == 4
+    assert rp == {f"{pid}/{sub}/s1_{d}.fastq.gz" for sub in ("L1", "L2") for d in ("R1", "R2")}
+    assert res[0][3]["pruned_files"] == 2
 
 
 def test_glob_metachar_project_name(tmp_path, fresh_db):
@@ -540,3 +540,47 @@ def test_prune_dry_run_lists_without_deleting(tmp_path, fresh_db):
     res = oingest.prune_missing_projects(conn, seq, meta, dry_run=True)
     assert res["pruned"] == ["genohub-2_B"] and res["skipped"] is False
     assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
+
+
+def test_mapfile_subpath_disambiguates_same_basename(tmp_path, fresh_db):
+    # Same basename in Run1 and Run2; mapfile names each with its subfolder.
+    from seqledger import validate as ov
+    seq, meta = _roots(tmp_path)
+    pid = "genohub-1_X"
+    rows = [("s1", "Run1/x_R1.fastq.gz", "Run1/x_R2.fastq.gz", "Gadus", "U1"),
+            ("s2", "Run2/x_R1.fastq.gz", "Run2/x_R2.fastq.gz", "Gadus", "U2")]
+    make_project(seq, pid, f"{pid}_mapfile.csv", rows)
+    conn = fresh_db
+    results = oingest.ingest_tree(conn, seq, meta)
+    assert results[0][2] == "pass", [str(f) for f in results[0][1]]
+    rows_db = conn.execute(
+        "SELECT filename, rel_path, size_bytes FROM files ORDER BY rel_path").fetchall()
+    assert [(r["filename"], r["rel_path"]) for r in rows_db] == [
+        ("x_R1.fastq.gz", f"{pid}/Run1/x_R1.fastq.gz"),
+        ("x_R2.fastq.gz", f"{pid}/Run1/x_R2.fastq.gz"),
+        ("x_R1.fastq.gz", f"{pid}/Run2/x_R1.fastq.gz"),
+        ("x_R2.fastq.gz", f"{pid}/Run2/x_R2.fastq.gz")]
+    assert all(r["size_bytes"] > 0 for r in rows_db)
+    assert ov.check_data_files(conn, pid, pid, seq)["status"] == "ok"
+
+
+def test_bare_name_in_several_subdirs_links_all_to_sample(tmp_path, fresh_db):
+    # One mapfile row, same filenames in Run1..Run3: all files link to that sample.
+    from seqledger import validate as ov
+    seq, meta = _roots(tmp_path)
+    pid = "genohub-1_X"
+    rows = [("s1", "x_R1.fastq.gz", "x_R2.fastq.gz", "Gadus", "U1")]
+    make_project(seq, pid, f"{pid}_mapfile.csv", rows, disk_files=[])
+    for run in ("Run1", "Run2", "Run3"):
+        write_gz(os.path.join(seq, pid, run, "x_R1.fastq.gz"))
+        write_gz(os.path.join(seq, pid, run, "x_R2.fastq.gz"))
+    conn = fresh_db
+    results = oingest.ingest_tree(conn, seq, meta)
+    msgs = [str(f) for f in results[0][1]]
+    assert any("3 subdirectories" in m for m in msgs), msgs
+    linked = conn.execute(
+        "SELECT f.direction, f.rel_path FROM files f JOIN samples s ON s.sample_pk=f.sample_pk "
+        "WHERE s.sample_id='s1' ORDER BY f.rel_path").fetchall()
+    assert [(r["direction"], r["rel_path"]) for r in linked] == [
+        (d, f"{pid}/{run}/x_{d}.fastq.gz") for run in ("Run1", "Run2", "Run3") for d in ("R1", "R2")]
+    assert ov.check_data_files(conn, pid, pid, seq)["status"] == "ok"

@@ -1,10 +1,10 @@
-# Handoff: seqledger review-driven hardening, Phases 1, 2, 2b, and 3 complete
+# Handoff: seqledger review-driven hardening, Phases 1 to 4 complete
 
 - **Branch:** `devel`, cut from `main` at `f3174b6`.
-- **Tip:** see `git log devel` (Phase 3 merged 2026-10-18). **Not pushed. No PR.**
-- **Tests:** `python -m pytest -q` gives 298 passed, 1 skipped (the skip needs plotly). The base miniforge3 `python` on this machine has every dependency; there is no `seqledger` conda env here.
+- **Tip:** see `git log devel` (Phase 4 merged 2026-10-19). **Not pushed. No PR.**
+- **Tests:** `python -m pytest -q` gives 302 passed, 1 skipped (the skip needs plotly). The base miniforge3 `python` on this machine has every dependency; there is no `seqledger` conda env here.
 - **Date:** 2026-10-15
-- **Status:** Phases 1, 2, 2b, and 3 are merged. Phase 4 (docs) is next.
+- **Status:** all four phases of the review-driven fix plan are merged. Next step is the maintainer's: push `devel`, decide on a release.
 
 ## How work is organised
 
@@ -63,6 +63,12 @@ Repro and PoC scripts from the reviews are in the session scratchpad only (not i
 - `chore/ponytail-legacy`: legacy migrations, role-to-direction rename and files rebuild deleted; `idx_files_mismatch` lives in schema.sql; `init_db` compares each table against schema.sql and raises "run init-db with seqledger 0.1.0 first" on an old catalog. Two-column map-file mode deleted (ingest always auto-discovers; `--seqdata-root` and `--metadata-root` required or configured). GUI `_table_columns` shims, `_MAPFILE_DETAIL`, and 'unknown' status fill deleted. `db.read_text` is the one tolerant reader. uid lookup via `functools.lru_cache`. Tests: `fresh_db` fixture in conftest, `helpers.ingested_project`, `helpers.write_gz`, pyproject `pythonpath`. requirements.txt deleted (use `pip install -e .[test]`).
 - `chore/ponytail-safe`: query.py deleted, `cmd_query` is a dict dispatch plus `run_query(conn, what, term)`; GUI lock retry code replaced by `connect_ro` timeout 15 s and one except in main; init-db flags cut to `--name`, `--seqdata-root`, `--metadata-root`, `--set`, `--show` (removed: `--slug`, `--conda-env`, `--rclone-module`, `--login-host`, `--io-queue`, `--backup-location`, `--fastq-ext`; the epilog lists keys from `CONFIG_DEFAULTS`); `db.qsub_header` shared by batch, rclone, and GUI job scripts; defaults read from `CONFIG_DEFAULTS` (`RCLONE_MODULE`, `LOGIN_HOST`, `_DEFAULT_FASTQ_GLOBS` gone); `validate.data_label`/`checksum_label` shared by CLI and GUI; CLAUDE.md schema bullet reworded.
 - Not done from the audit, by maintainer decision: items 2 (Treemap), 7 (regex toggle), 11 (sidebar search). Not done, unassigned: 9, 12, 16, 19 to 27, 29, 34, 36 to 43, 51, 52.
+
+### Phase 4 (three branches, merged 2026-10-19)
+
+- `docs/housekeeping`: CHANGELOG `[Unreleased]` regrouped (Added / Changed / Removed / Fixed, user-facing first, compare link `main...devel`); `--version` (reads installed metadata, falls back to `0.1.0-dev`); `CITATION.cff`; `CONTRIBUTING.md` (public version of the CLAUDE.md workflow); CONTRIBUTORS.md ASCII.
+- `docs/split-readme`: README is a 126-line landing page. New `docs/user-guide.md` (GUI users, incl. a "Getting your FASTQs" walkthrough), `docs/admin-guide.md` (install, backup/restore, ingest, checks, taxonomy, GUI hosting, runbook, cron, logs, one-writer rule, recovery), `docs/reference/{cli,config,mapfile,statuses,data-model}.md`, `docs/glossary.md`. `cli.md` embeds the real 80-column `--help` output; refresh it whenever help text changes. All ASCII, links checked, example SQL run against a demo catalog.
+- `fix/help-text`: 14 help-text and GUI string fixes from the docs writer's verification pass; `--debug` accepted after the subcommand; `--set` refuses unknown keys; Ctrl-C in any command prints "interrupted" and exits 130; taxdump size says 72 MB everywhere.
 
 ## Done: Phase 2b, CLI output and interactive mode (for reference, the original plan)
 

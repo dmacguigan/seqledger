@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Ocean DNA sequence data catalog CLI.
 
 Subcommands:
@@ -1027,7 +1026,3 @@ def run(argv=None):
 
 def main(argv=None):
     return run(argv)[0]
-
-
-if __name__ == "__main__":
-    sys.exit(main())

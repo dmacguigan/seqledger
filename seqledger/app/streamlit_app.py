@@ -633,6 +633,38 @@ def _column_filters(df, cols, key, labels=None, display=None):
     return _filter_by_columns(df, active, display)
 
 
+_CORRUPT = {"gzip_error": "gzip error", "format_error": "format error"}
+
+
+def _file_issues(r):
+    """[(column, kind)] for one files row's integrity/backup problems."""
+    out = []
+    if r["integrity"] in _CORRUPT:
+        out.append(("integrity", _CORRUPT[r["integrity"]]))
+    elif r["integrity"] == "ok" and r["n_reads"] == 0:
+        out.append(("integrity", "empty (0 reads)"))
+    if r["backup"] == "Mismatch":
+        out.append(("backup", "md5 mismatch"))
+    return out
+
+
+def _mark_files(df, dismissed, show_dismissed):
+    out = df.copy()
+    if not dismissed:
+        return out
+    for idx, r in zip(df.index, df.to_dict("records")):
+        for col, kind in _file_issues(r):
+            if dismiss.file_key(r["project_id"], r["rel_path"], kind) in dismissed:
+                out.at[idx, col] = kind + " (dismissed)" if show_dismissed else "OK *"
+    return out
+
+
+def _sample_flags_key(r):
+    f = r["flags"]
+    return dismiss.sample_key(r["project_id"], r["sample_id"], f) \
+        if isinstance(f, str) and f.strip() else None
+
+
 def samples_view(df, files_df):
     with st.sidebar:
         st.header("Filters")
@@ -640,6 +672,7 @@ def samples_view(df, files_df):
         chosen = st.multiselect("Project", projects)
         backup = st.selectbox("Backup status", ["All", "Verified", "Not verified"])
         search = st.text_input("Search (sample, taxon, UniqID)")
+        dismissed, show_dismissed = _dismiss_sidebar()
 
     view = df
     if chosen:
@@ -656,6 +689,9 @@ def samples_view(df, files_df):
 
     show = view.copy()
     show["backup"] = show["backup_verified"].map(backup_label)
+    for idx, r in zip(show.index, show.to_dict("records")):
+        if _sample_flags_key(r) in dismissed:
+            show.at[idx, "flags"] = r["flags"] + " (dismissed)" if show_dismissed else "OK *"
     on_screen = ["project_id", "sample_id", "taxon",
                  "ncbi_url", "tax_match", "worms_url", "worms_match", "worms_status",
                  "uniq_id", "uniq_id_url", "flags", "backup"]
@@ -678,8 +714,8 @@ def samples_view(df, files_df):
     disp = show[on_screen].assign(tax_match=tax_lab.loc[show.index],
                                   worms_match=worms_lab.loc[show.index])
     event = st.dataframe(
-        disp, width="stretch", hide_index=True,
-        on_select="rerun", selection_mode="single-row",
+        _tint(disp.reset_index(drop=True), ["flags", "backup"]), width="stretch",
+        hide_index=True, on_select="rerun", selection_mode="single-row",
         key=f"samples_table_{hash(tuple(show.index))}",
         column_config={
             # Each source's matched name is a link (label = the name, carried in the
@@ -699,14 +735,25 @@ def samples_view(df, files_df):
         return
     r = show.iloc[sel[0]]
     pid, sid = r["project_id"], r["sample_id"]
-    fsub = files_df[(files_df["project_id"] == pid)
-                    & (files_df["sample_id"] == sid)].copy()
+    log_path = _dismiss_log_path(DB_PATH)
+    fkey = _sample_flags_key(df.loc[r.name])
+    if fkey and fkey not in dismissed:
+        note = st.text_input("Note", key="note_flags")
+        if st.button("Dismiss flags for this sample") and \
+                _record(log_path, "dismiss", [fkey], note):
+            st.rerun()
+    elif fkey and show_dismissed and st.button("Undo") and \
+            _record(log_path, "undo", [fkey], ""):
+        st.rerun()
+    fsub = _mark_files(files_df[(files_df["project_id"] == pid)
+                                & (files_df["sample_id"] == sid)], dismissed, show_dismissed)
     st.subheader(f"Files for sample {sid} ({pid})")
     if len(fsub):
         fsub["size"] = fsub["size_bytes"].map(human_size)
         st.dataframe(
-            fsub[["direction", "filename", "full_path", "size", "owner_name",
-                  "backup", "integrity", "n_reads", "integrity_date"]],
+            _tint(fsub[["direction", "filename", "full_path", "size", "owner_name",
+                        "backup", "integrity", "n_reads", "integrity_date"]]
+                  .reset_index(drop=True), ["backup", "integrity"]),
             width="stretch", hide_index=True,
             column_config={"n_reads": "reads", "integrity_date": "checked"})
         _download(fsub, f"{sid}_files.csv")
@@ -848,13 +895,15 @@ def files_view(df, samples_df):
         integrity = st.selectbox(
             "Integrity", ["All", "ok", "gzip_error", "format_error", "unchecked"])
         search = st.text_input("Search (sample, filename)")
-    view = df
+        dismissed, show_dismissed = _dismiss_sidebar()
+    live = _mark_files(df, dismissed, False)
+    view = _mark_files(df, dismissed, True) if show_dismissed else live
     if chosen:
         view = view[view["project_id"].isin(chosen)]
     if backup != "All":
-        view = view[view["backup"] == backup]
+        view = view[live.loc[view.index, "backup"] == backup]
     if integrity != "All":
-        view = view[view["integrity"] == integrity]
+        view = view[live.loc[view.index, "integrity"] == integrity]
     if search:
         s = search.lower()
         mask = (_contains(view["sample_id"], s) | _contains(view["filename"], s))
@@ -870,7 +919,8 @@ def files_view(df, samples_df):
                "Select a row to show its sample info below. "
                "'owner_name' is the filesystem owner (a personal identifier).")
     event = st.dataframe(
-        show[on_screen], width="stretch", hide_index=True,
+        _tint(show[on_screen].reset_index(drop=True), ["backup", "integrity"]),
+        width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row",
         key=f"files_table_{hash(tuple(show.index))}",
         column_config={"n_reads": "reads", "integrity_date": "checked"})
@@ -882,6 +932,20 @@ def files_view(df, samples_df):
         return
     r = show.iloc[sel[0]]
     pid, sid = r["project_id"], r["sample_id"]
+    log_path = _dismiss_log_path(DB_PATH)
+    keys = [(kind, dismiss.file_key(pid, r["rel_path"], kind))
+            for _, kind in _file_issues(df.loc[r.name])]
+    live_keys = [(k, key) for k, key in keys if key not in dismissed]
+    if live_keys:
+        note = st.text_input("Note", key="note_file")
+        for kind, key in live_keys:
+            if st.button(f"Dismiss {kind}") and _record(log_path, "dismiss", [key], note):
+                st.rerun()
+    if show_dismissed:
+        for kind, key in keys:
+            if key in dismissed and st.button(f"Undo {kind}") and \
+                    _record(log_path, "undo", [key], ""):
+                st.rerun()
     ssub = samples_df[(samples_df["project_id"] == pid)
                       & (samples_df["sample_id"] == sid)]
     st.subheader(f"Sample info: {sid} ({pid})")

@@ -549,3 +549,36 @@ def test_projects_sidebar_reports_unreadable_lines(tmp_path, monkeypatch):
     (tmp_path / ".cat_dismissed.tsv").write_text("junk\n")
     at = _apptest(monkeypatch, p, "Projects")
     assert any("1 unreadable line(s)" in c.value for c in at.sidebar.caption)
+
+def test_samples_dismiss_flags(tmp_path, monkeypatch):
+    from seqledger import dismiss
+    p = _issues_catalog(tmp_path)
+    con = sqlite3.connect(p); con.execute("UPDATE samples SET flags='na_uniqid' WHERE sample_id='s1'")
+    con.commit(); con.close()
+    at = _apptest(monkeypatch, p, "Samples")
+    key = _table_key(at, "samples_table_")
+    i = list(at.dataframe[0].value["sample_id"]).index("s1")
+    _select(at, key, [i])
+    _button(at, "Dismiss flags for this sample").click().run()
+    assert at.dataframe[0].value.iloc[i]["flags"] == "OK *"
+    assert dismiss.sample_key("P1", "s1", "na_uniqid") in dismiss.read(dismiss.default_log_path(p))[0]
+    at.sidebar.checkbox[-1].check().run()
+    assert at.dataframe[0].value.iloc[i]["flags"] == "na_uniqid (dismissed)"
+
+def test_files_dismiss_integrity_and_md5(tmp_path, monkeypatch):
+    p = _issues_catalog(tmp_path)
+    at = _apptest(monkeypatch, p, "Files")
+    key = _table_key(at, "files_table_")
+    df = at.dataframe[0].value
+    i = list(df["filename"]).index("s2_R1.fastq.gz")   # gzip_error
+    _select(at, key, [i])
+    _button(at, "Dismiss gzip error").click().run()
+    assert at.dataframe[0].value.iloc[i]["integrity"] == "OK *"
+    j = list(at.dataframe[0].value["filename"]).index("s2_R2.fastq.gz")   # md5 mismatch
+    _select(at, key, [j])
+    _button(at, "Dismiss md5 mismatch").click().run()
+    assert at.dataframe[0].value.iloc[j]["backup"] == "OK *"
+    # the integrity filter no longer returns the dismissed file
+    sel = next(s for s in at.sidebar.selectbox if s.label == "Integrity")
+    sel.set_value("gzip_error").run()
+    assert "s2_R1.fastq.gz" not in list(at.dataframe[0].value["filename"])

@@ -4,17 +4,16 @@ import os
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import validate as oval
-from helpers import make_project, write_map_file
+from helpers import make_project
 
 
 def _setup(tmp_path, rows, disk_files=None):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows, disk_files=disk_files)
-    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     conn = odb.connect(os.path.join(tmp_path, "cat.db"))
     odb.init_db(conn)
-    oingest.ingest_map_file(conn, map_file, seqdata_root=root)
+    oingest.ingest_tree(conn, root, root)
     return conn, root
 
 
@@ -106,21 +105,20 @@ def test_prune_clears_rows_dropped_from_csv(tmp_path):
     root = str(tmp_path / "raw_sequence_data")
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows,
                  disk_files=["s1_1.fastq.gz", "s1_2.fastq.gz"])
-    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     conn = odb.connect(str(tmp_path / "cat.db"))
     odb.init_db(conn)
-    oingest.ingest_map_file(conn, map_file, seqdata_root=root)
+    oingest.ingest_tree(conn, root, root)
     assert oval.validate_catalog(conn, seqdata_root=root)["genohub-1_X"]["data"]["n_missing"] == 4
 
     # user removes the two bad rows; without --prune the stale rows still flag missing
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows[:1],
                  disk_files=["s1_1.fastq.gz", "s1_2.fastq.gz"])
-    oingest.ingest_map_file(conn, map_file, seqdata_root=root)
+    oingest.ingest_tree(conn, root, root)
     assert oval.validate_catalog(conn, seqdata_root=root)["genohub-1_X"]["data"]["n_missing"] == 4
 
     # re-ingest with prune -> stale samples/files gone, project clean (force: 2 of 3
     # samples dropped trips the >50% prune cap)
-    res = oingest.ingest_map_file(conn, map_file, seqdata_root=root, prune=True, force=True)
+    res = oingest.ingest_tree(conn, root, root, prune=True, force=True)
     assert res[0][3]["pruned_samples"] == ["bad1", "bad2"]
     data = oval.validate_catalog(conn, seqdata_root=root)["genohub-1_X"]["data"]
     assert data["status"] == "ok" and data["n_missing"] == 0
@@ -134,8 +132,7 @@ def test_prune_drops_file_renamed_in_place(tmp_path):
     conn, root = _setup(tmp_path, rows)
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv",
                  [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
-    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
-    res = oingest.ingest_map_file(conn, map_file, seqdata_root=root, prune=True)
+    res = oingest.ingest_tree(conn, root, root, prune=True)
     assert res[0][3]["pruned_files"] == 1
     got = {r["filename"] for r in conn.execute("SELECT filename FROM files")}
     assert got == {"s1_1.fastq.gz", "s1_2.fastq.gz"}

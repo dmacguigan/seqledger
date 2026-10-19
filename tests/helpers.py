@@ -34,16 +34,6 @@ def make_project(root, project_dir, mapfile_name, rows, disk_files=None, header=
     return mapfile_path, project_dir
 
 
-def write_map_file(root, entries):
-    """Write the two-column map file (metadata csv, data dir)."""
-    path = os.path.join(root, "map_file.txt")
-    with open(path, "w") as f:
-        f.write("metadata datadir\n")
-        for mapfile, datadir in entries:
-            f.write(f"{mapfile} {datadir}\n")
-    return path
-
-
 def write_md5(path, entries):
     """Write an rclone-md5sum-style file. entries: list of (md5, relpath)."""
     with open(path, "w") as f:

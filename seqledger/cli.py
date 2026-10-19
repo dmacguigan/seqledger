@@ -3,7 +3,7 @@
 
 Subcommands:
   init-db     create the catalog schema
-  ingest      load metadata (auto-discover or map file); auto-run taxonomy, refresh data-files check
+  ingest      load metadata (auto-discover); auto-run taxonomy, refresh data-files check
   checksums   load + compare `rclone md5sum` output from Store and P-drive
   validate    re-check the catalog and print findings
   integrity   gzip + FASTQ structural integrity check of cataloged files
@@ -182,9 +182,8 @@ def cmd_ingest(args):
     unresolved taxa exist. Samples dropped from a CSV are reported but left in
     place unless --prune is given, which deletes samples/files the corrected CSV no
     longer references. A final data-files check refreshes the stored
-    data_check_issues + checksum/status (with --seqdata-root it re-validates against
-    disk; without, it just clears rows made stale by a --prune) so the report and
-    GUI reflect the ingest without a separate `validate` run.
+    data_check_issues + checksum/status so the report and GUI reflect the ingest
+    without a separate `validate` run.
 
     Integrity (the gzip/FASTQ byte-scan) is deliberately NOT run here -- it reads
     every byte and is slow, so it is a separate opt-in step: run `seqledger integrity`
@@ -218,20 +217,13 @@ def cmd_ingest(args):
             sys.exit(f"{what} '{path}' does not exist or is not a directory -- check "
                      "the path and that the filesystem (Store/NAS) is mounted.")
 
-    if args.map_file:
-        _need_dir(args.seqdata_root, "--seqdata-root")
-        results = oingest.ingest_map_file(
-            conn, args.map_file, seqdata_root=args.seqdata_root,
-            metadata_root=args.metadata_root, prune=args.prune)
-    else:
-        if not args.seqdata_root or not args.metadata_root:
-            conn.close()
-            sys.exit("ingest needs either a map_file, or both --seqdata-root and "
-                     "--metadata-root for auto-discovery")
-        _need_dir(args.seqdata_root, "--seqdata-root")
-        _need_dir(args.metadata_root, "--metadata-root")
-        results = oingest.ingest_tree(
-            conn, args.seqdata_root, args.metadata_root, prune=args.prune)
+    if not args.seqdata_root or not args.metadata_root:
+        conn.close()
+        sys.exit("ingest needs both --seqdata-root and --metadata-root")
+    _need_dir(args.seqdata_root, "--seqdata-root")
+    _need_dir(args.metadata_root, "--metadata-root")
+    results = oingest.ingest_tree(
+        conn, args.seqdata_root, args.metadata_root, prune=args.prune)
 
     if not results:
         print("WARNING: discovered 0 projects -- nothing was ingested. Check that "
@@ -269,22 +261,18 @@ def cmd_ingest(args):
             other += [f"sample {sid} in catalog but not in this CSV "
                       "(kept; re-run with --prune to remove)" for sid in stats["orphan_samples"]]
 
-    if args.prune_projects:
-        if args.map_file:
-            notes.append("--prune-projects ignored: it only applies to auto-discovery, "
-                         "not a map file")
-        else:
-            pr = oingest.prune_missing_projects(conn, args.seqdata_root, args.metadata_root)
-            if pr["skipped"]:
-                refused = True
-                notes.append(f"refusing to prune projects: {pr['reason']}")
-            elif pr["pruned"]:
-                notes.append(f"deleted {len(pr['pruned'])} vanished project(s) "
-                             f"(gone from disk and mapfiles): {', '.join(pr['pruned'])}")
-            else:
-                notes.append("no vanished projects to prune")
     n_gone = 0
-    if not args.map_file and not args.prune_projects:
+    if args.prune_projects:
+        pr = oingest.prune_missing_projects(conn, args.seqdata_root, args.metadata_root)
+        if pr["skipped"]:
+            refused = True
+            notes.append(f"refusing to prune projects: {pr['reason']}")
+        elif pr["pruned"]:
+            notes.append(f"deleted {len(pr['pruned'])} vanished project(s) "
+                         f"(gone from disk and mapfiles): {', '.join(pr['pruned'])}")
+        else:
+            notes.append("no vanished projects to prune")
+    else:
         gone = oingest.prune_missing_projects(
             conn, args.seqdata_root, args.metadata_root, dry_run=True)["pruned"]
         n_gone = len(gone)
@@ -324,26 +312,9 @@ def cmd_ingest(args):
     # data_check_issues + counts (read by `validate` and the GUI) would
     # otherwise stay stale until a manual `validate`. This is the step that
     # makes a --prune actually clear the removed files from the report.
-    pruned_pids = [pid for pid, _, _, s in results
-                   if s["pruned_samples"] or s["pruned_files"]]
     val = {}
     if ingested:
-        if args.seqdata_root:
-            val = ovalidate.validate_catalog(conn, seqdata_root=args.seqdata_root)
-        elif pruned_pids:
-            # No disk access to recompute; drop the now-stale issue rows for
-            # pruned projects so the report does not show removed files.
-            for pid in pruned_pids:
-                conn.execute("DELETE FROM data_check_issues WHERE project_id=?", (pid,))
-                conn.execute(
-                    "UPDATE projects SET data_check_status='unchecked', "
-                    "data_check_n_missing=NULL, data_check_n_orphan=NULL WHERE project_id=?",
-                    (pid,))
-            conn.commit()
-            notes.append("cleared stale data-files issues for pruned project(s); "
-                         "pass --seqdata-root (or run `validate --seqdata-root`) to recompute")
-        else:
-            notes.append("Files on disk: skipped: pass --seqdata-root to check them")
+        val = ovalidate.validate_catalog(conn, seqdata_root=args.seqdata_root)
 
     root_flag = ("" if odb.get_config(conn, "seqdata_root")
                  else " --seqdata-root <raw_sequence_data>")
@@ -901,26 +872,21 @@ def build_parser():
 
     pi = sub.add_parser(
         "ingest", parents=[dbp],
-        help="auto-discover projects from a seqdata + metadata dir (or a map file); "
+        help="auto-discover projects from a seqdata + metadata dir; "
              "auto-run taxonomy, refresh data-files check (integrity is a separate step)",
         description="Ingest metadata, resolve new taxa, refresh the data-files check. "
                     "Exits 1 if any project FAILs, 2 if a prune is refused.")
-    pi.add_argument("map_file", nargs="?",
-                    help="optional two-column map file (metadata csv, data dir) for "
-                         "manual/odd layouts; omit to auto-discover from the roots")
     pi.add_argument("--metadata-root",
-                    help="dir holding the per-project '<project>_mapfile.csv' files "
-                         "(auto-discovery); with a map file, the dir its CSVs live in")
+                    help="dir holding the per-project '<project>_mapfile.csv' files")
     pi.add_argument("--seqdata-root",
-                    help="root of raw_sequence_data; each top-level folder is a project. "
-                         "Required for auto-discovery; enables disk checks + integrity")
+                    help="root of raw_sequence_data; each top-level folder is a project")
     pi.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
     pi.add_argument("--skip-taxonomy", action="store_true", help="skip the taxonomy step")
     pi.add_argument("--prune", action="store_true",
                     help="delete catalog samples/files the CSV no longer lists "
                          "(then re-run `validate --seqdata-root`)")
     pi.add_argument("--prune-projects", action="store_true",
-                    help="auto-discovery only: delete whole catalog projects that "
+                    help="delete whole catalog projects that "
                          "vanished from BOTH the seqdata and metadata dirs (cascades "
                          "to their samples/files). Refuses to run if the roots turn up "
                          "no projects, so a missing mount can't wipe the catalog.")

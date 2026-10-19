@@ -11,7 +11,7 @@ from seqledger import cli, gui
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import rclone as orclone
-from helpers import make_project, write_map_file
+from helpers import make_project
 
 
 def _fresh_db(tmp_path):
@@ -95,9 +95,8 @@ def test_ingest_skips_filename_with_newline(tmp_path):
         w = csv.writer(f)
         w.writerow(["ID", "R1", "R2", "Taxon", "UniqID"])
         w.writerow(["s1", evil, "s1_2.fastq.gz", "Gadus", "U1"])
-    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     conn = _fresh_db(tmp_path)
-    findings = oingest.ingest_map_file(conn, map_file, seqdata_root=root)[0][1]
+    findings = oingest.ingest_tree(conn, root, root)[0][1]
     rels = [r[0] for r in conn.execute("SELECT rel_path FROM files")]
     assert not any("\n" in r for r in rels), rels
     assert any("control character" in f.message for f in findings), \

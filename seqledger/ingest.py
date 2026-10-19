@@ -1,12 +1,7 @@
 """Ingest CSV map files into the catalog (metadata only; no hashing).
 
-Two ways in:
-  ingest_tree      auto-discover: point at a seqdata root + a metadata root and
-                   pair each project folder with its `<project>_mapfile.csv`.
-  ingest_map_file  explicit two-column map file (metadata csv, data dir). Kept for
-                   manual/odd layouts and back-compat.
-
-Auto-discovery records a per-project `metadata_status`:
+ingest_tree pairs each project folder under a seqdata root with its
+`<project>_mapfile.csv` under a metadata root, and records a per-project `metadata_status`:
   ok               mapfile present + parseable, folder present, all rows clean
   flagged          header valid but some rows needed repair: empty Taxon/UniqID were
                    filled with 'NA', empty-ID / duplicate-ID rows were skipped. The
@@ -175,25 +170,6 @@ def _discover_disk_files(data_dir, seqdata_root, uid_cache, globs=_DEFAULT_FASTQ
 def _cfg_fastq_globs(conn):
     """FASTQ globs for this catalog's configured extensions (default fastq.gz+fq.gz)."""
     return fastq_globs(get_config(conn, "fastq_extensions")) or list(_DEFAULT_FASTQ_GLOBS)
-
-
-def read_map_file(map_file_path):
-    """Read the two-column map file (metadata csv, data dir). Header row ignored.
-
-    Returns list of (metadata_filename, seq_data_relpath).
-    """
-    entries = []
-    with open(map_file_path) as f:
-        next(f, None)  # skip header
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) < 2:
-                continue
-            entries.append((parts[0], parts[1]))
-    return entries
 
 
 def _read_text(path):
@@ -408,8 +384,7 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
     skipped = [p for p in plans if not p["load"]]
 
     # Nothing loadable (every row skipped / no rows): don't write a project row here.
-    # ingest_tree falls back to _ingest_diskonly (invalid_mapfile); the manual path
-    # just reports the failure. Preserves the "FAIL writes nothing" contract.
+    # ingest_tree falls back to _ingest_diskonly (invalid_mapfile).
     if not usable:
         stats["metadata_status"] = "invalid_mapfile"
         stats["metadata_detail"] = _invalid_mapfile_detail(findings)
@@ -607,7 +582,7 @@ def ingest_tree(conn, seqdata_root, metadata_root, prune=False, force=False):
       - folder only (no mapfile)    -> files from disk, no samples ('missing_mapfile')
       - folder + broken header      -> files from disk, no samples ('broken_mapfile')
       - valid header, no usable rows-> files from disk, no samples ('invalid_mapfile')
-    Returns the same list of (project_id, findings, status, stats) as ingest_map_file.
+    Returns a list of (project_id, findings, status, stats), one per project.
     """
     results = []
     for proj in discover_projects(seqdata_root, metadata_root):
@@ -660,7 +635,7 @@ def ingest_tree(conn, seqdata_root, metadata_root, prune=False, force=False):
 def prune_missing_projects(conn, seqdata_root, metadata_root, force=False, dry_run=False):
     """Delete catalog projects that vanished from BOTH roots (folder + mapfile gone).
 
-    Only for auto-discovery. Cascades to the project's samples/files/backups/etc.
+    Cascades to the project's samples/files/backups/etc.
     Safety (each refuses with skipped=True and a human-readable "reason", so a
     partial/broken mount can't wipe the catalog):
       - either root is not an existing directory (can't tell "unmounted" from "empty");
@@ -701,23 +676,3 @@ def prune_missing_projects(conn, seqdata_root, metadata_root, force=False, dry_r
     conn.executemany("DELETE FROM projects WHERE project_id=?", [(p,) for p in gone])
     conn.commit()
     return {"pruned": gone, "skipped": False}
-
-
-def ingest_map_file(conn, map_file_path, seqdata_root=None, metadata_root=None, prune=False,
-                    force=False):
-    """Ingest all projects listed in a two-column map file.
-
-    Per-project metadata CSVs are resolved relative to metadata_root when their
-    path is not absolute and not found in the CWD. Defaults to the map file's
-    own directory. prune/force are forwarded to each project (see ingest_project).
-    """
-    results = []
-    if metadata_root is None:
-        metadata_root = os.path.dirname(os.path.abspath(map_file_path))
-    for metadata_filename, seq_data_relpath in read_map_file(map_file_path):
-        metadata_path = metadata_filename
-        if not os.path.isabs(metadata_path) and not os.path.exists(metadata_path):
-            metadata_path = os.path.join(metadata_root, metadata_filename)
-        results.append(ingest_project(conn, metadata_path, seq_data_relpath,
-                                      seqdata_root, prune=prune, force=force))
-    return results

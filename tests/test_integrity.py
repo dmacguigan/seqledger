@@ -8,17 +8,16 @@ import pytest
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import integrity as oint
-from helpers import make_project, write_map_file
+from helpers import make_project
 
 
 def _setup(tmp_path, rows, disk_files=None):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows, disk_files=disk_files)
-    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     conn = odb.connect(os.path.join(tmp_path, "cat.db"))
     odb.init_db(conn)
-    oingest.ingest_map_file(conn, map_file, seqdata_root=root)
+    oingest.ingest_tree(conn, root, root)
     return conn, root
 
 
@@ -255,12 +254,9 @@ def test_only_project_scopes(tmp_path):
                  [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus", "U1")])
     make_project(root, "genohub-2_Y", "genohub-2_Y_mapfile.csv",
                  [("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "Salmo", "U2")])
-    map_file = write_map_file(root, [
-        ("genohub-1_X_mapfile.csv", "genohub-1_X"),
-        ("genohub-2_Y_mapfile.csv", "genohub-2_Y")])
     conn = odb.connect(os.path.join(tmp_path, "cat.db"))
     odb.init_db(conn)
-    oingest.ingest_map_file(conn, map_file, seqdata_root=root)
+    oingest.ingest_tree(conn, root, root)
     res = oint.check_catalog_integrity(conn, seqdata_root=root, only_project="genohub-1_X")
     assert set(res) == {"genohub-1_X"}
 
@@ -457,7 +453,7 @@ def test_parity_sums_lane_split(tmp_path):
 # ---- staleness: re-ingest size change, collect scoping, unreadable files ---
 
 def _reingest(conn, root):
-    oingest.ingest_map_file(conn, os.path.join(root, "map_file.txt"), seqdata_root=root)
+    oingest.ingest_tree(conn, root, root)
 
 
 def test_reingest_after_truncation_forces_recheck(tmp_path):

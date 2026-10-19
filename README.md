@@ -215,8 +215,8 @@ menu; it shows the equivalent command for each step. Add
 # 1. create the catalog
 seqledger --db oceandna_catalog.db init-db
 
-# 2. ingest metadata -- AUTO-DISCOVERY (recommended): point at the sequence-data
-#    root and the metadata root; no map file needed. Every top-level folder in
+# 2. ingest metadata: point at the sequence-data root and the metadata root.
+#    Every top-level folder in
 #    --seqdata-root is a project, paired with '<project>_mapfile.csv' in
 #    --metadata-root. FASTQ files may be nested in subdirs -- they are found
 #    recursively. Projects are always added; pairing problems are flagged on the
@@ -240,14 +240,6 @@ seqledger --db oceandna_catalog.db init-db
 #    NOTE: the integrity byte-scan (4b) is NOT run by ingest -- it is slow, so run
 #    it separately when ready.
 seqledger --db oceandna_catalog.db ingest \
-    --metadata-root ../raw_sequence_metadata \
-    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
-
-#    ingest metadata -- MANUAL (override for odd layouts): pass an explicit
-#    two-column map file (metadata csv, data dir), same format as
-#    scripts/.../example_map_file.txt. Per-project CSVs are looked up in
-#    --metadata-root (default: the map file's own dir).
-seqledger --db oceandna_catalog.db ingest map_file.txt \
     --metadata-root ../raw_sequence_metadata \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 

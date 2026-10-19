@@ -100,7 +100,7 @@ The sections below are for **data managers**.
 - **conda** with a `seqledger` env (`environment.yml`) only for the **GUI**
   (`streamlit` + `pandas` + `plotly`).
 - Back up the catalog `.db` before running `init-db` on an existing catalog —
-  migrations add columns in place and are not reversible.
+  it is not reversible.
 
 ## Quick start
 
@@ -518,7 +518,7 @@ Ownership + size (`owner_name` / `owner_uid` / `size_bytes` on `files`, plus
 `data_check_date` on `projects`) is written by `validate --seqdata-root`; the same run
 rewrites the per-file `data_check_issues` table (missing / orphan filenames) that backs
 the GUI drill-down. The checksum result is derived from `files.md5_match`. `init-db`
-auto-migrates older catalogs by adding the new columns.
+refuses a catalog that predates seqledger 0.1.0.
 
 ## Open items
 

@@ -366,6 +366,26 @@ def test_grab_and_go_flags_problem_files_and_lane_splits(tmp_path, monkeypatch):
     assert any("Script preview (6 files total" in e.label for e in at.expander)
 
 
+def test_grab_and_go_includes_files_with_dismissed_problems(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    from seqledger import dismiss
+    p = _grab_catalog(tmp_path)
+    log = dismiss.default_log_path(p)
+    dismiss.append(log, "dismiss", dismiss.file_key("P1", "P1/s2_R1.fastq.gz", "gzip error"), "u")
+    dismiss.append(log, "dismiss", dismiss.file_key("P1", "P1/s2_R2.fastq.gz", "missing from disk"), "u")
+    monkeypatch.setenv("SEQLEDGER_DB", p)
+    at = AppTest.from_file(_APP_PATH, default_timeout=30)
+    at.session_state["cart"] = {f"P1\t{s}": {"project_id": "P1", "sample_id": s} for s in ("s1", "s2")}
+    at.run()
+    at.sidebar.radio[0].set_value("Grab & Go").run()
+    table = at.dataframe[1].value
+    assert table[table["sample_id"] == "s2"].iloc[0]["files_ok"] == "ok *"
+    assert not any("files in the cart are corrupt" in w.value for w in at.warning)
+    dest = next(t for t in at.text_input if t.label.startswith("Destination"))
+    dest.set_value("/pool/dest").run()
+    assert any("Script preview (6 files total" in e.label for e in at.expander)
+
+
 def _issues_df(rows):
     cols = ["project_id", "kind", "filename"]
     return pd.DataFrame(rows, columns=cols).assign(full_path="", sample_id="", direction="",

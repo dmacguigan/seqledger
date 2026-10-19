@@ -1408,9 +1408,10 @@ def custom_table_view(samples_df, paths_df):
         table = table.merge(counts, on=["project_id", "sample_id"], how="left")
         table[_col] = table[_col].astype("Int64")
 
-    # Files backing the cart samples, each tagged corrupt/empty/missing/ok/unchecked.
+    # Files backing the cart samples, each tagged corrupt/empty/missing/ok/unchecked/dismissed.
     fpaths = paths_df[paths_df.set_index(["project_id", "sample_id"]).index.isin(keyset)].copy()
-    fpaths["problem"] = [_file_problem(r) for r in fpaths.to_dict("records")]
+    _, dismissed, _ = _dismiss_state()
+    fpaths["problem"] = [_file_problem(r, dismissed) for r in fpaths.to_dict("records")]
     ok_by = {k: _files_ok(g) for k, g in fpaths.groupby(["project_id", "sample_id"])["problem"]}
     table["files_ok"] = [ok_by.get(k, "no files")
                          for k in zip(table["project_id"], table["sample_id"])]
@@ -1422,7 +1423,7 @@ def custom_table_view(samples_df, paths_df):
              "uniq_id", "uniq_id_url", "r1_path", "r2_path"]
     tcols = [c for c in tcols if c in table.columns]
     tevent = st.dataframe(
-        table[tcols], width="stretch", hide_index=True,
+        _tint(table[tcols], ["files_ok"]), width="stretch", hide_index=True,
         on_select="rerun", selection_mode="multi-row", key="cart_table",
         column_config={
             "ncbi_url": st.column_config.LinkColumn("NCBI_name", display_text=r"#(.+)$"),

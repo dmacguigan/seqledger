@@ -15,7 +15,7 @@ which recreates the same tree under the destination.
 import datetime
 import shlex
 
-from .db import check_directive
+from .db import qsub_header
 
 RCLONE_MODULE = "tools/rclone/1.66.0"
 
@@ -101,11 +101,9 @@ def build_copy_script(groups, dest, transfers=4, slots=4, mem=4,
     The log is <job_name>_<stamp>.log (stamp defaults to now) so reruns don't
     overwrite it; the job exits non-zero if any rclone copy fails.
     """
-    job_name, io_queue = check_directive(job_name), check_directive(io_queue)
-    log_name = check_directive(f"{job_name}_{stamp or timestamp()}.log")
+    log_name = f"{job_name}_{stamp or timestamp()}.log"
     dest = dest or "REPLACE_WITH_DESTINATION"
     slots = max(1, min(slots, LTIO_MAX_SLOTS))
-    mres = slots * mem
     header_est = ""
     if est_bytes is not None:
         header_est = (f"# estimated transfer: {human_size(est_bytes)}"
@@ -125,18 +123,7 @@ rm -f "$LIST"
 """)
     body = "\n".join(blocks) if blocks else "echo 'no files selected'; exit 1\n"
 
-    return f"""#!/bin/bash
-#$ -N {job_name}
-#$ -o {log_name}
-#$ -j y
-#$ -terse
-#$ -notify
-#$ -pe mthread {slots}
-#$ -q {io_queue} -l ioq
-#$ -l mres={mres}G,h_data={mem}G,h_vmem={mem}G
-#$ -S /bin/bash
-#$ -cwd
-
+    return qsub_header(job_name, log_name, io_queue, mem, slots) + f"""
 {header_est}echo + `date` $JOB_NAME running on $HOSTNAME in $QUEUE with jobID=$JOB_ID
 # -notify sends SIGUSR1/2 before a wall-cap kill; resubmitting the SAME script
 # resumes (rclone --checksum skips files already copied).

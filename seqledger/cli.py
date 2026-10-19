@@ -543,7 +543,7 @@ def _safe_name(s):
     return re.sub(r"[^A-Za-z0-9._-]", "_", s)
 
 
-def _batch_script(name, log_path, slots, mem, mres, run_cmd,
+def _batch_script(name, log_path, slots, mem, run_cmd,
                   conda_env="seqledger", io_queue="lTIO.sq"):
     """A Hydra qsub script that checks one project on the I/O queue.
 
@@ -553,19 +553,7 @@ def _batch_script(name, log_path, slots, mem, mres, run_cmd,
     72h wall, 12h CPU/slot, 8G/slot, 6 slots and 2 concurrent jobs per user.
     conda_env and io_queue come from the catalog config so another lab can retarget.
     """
-    name, log_path, io_queue = (odb.check_directive(v) for v in (name, log_path, io_queue))
-    return f"""#!/bin/bash
-#$ -N seqledger_int_{name}
-#$ -o {log_path}
-#$ -j y
-#$ -terse
-#$ -notify
-#$ -pe mthread {slots}
-#$ -q {io_queue} -l ioq
-#$ -l mres={mres}G,h_data={mem}G,h_vmem={mem}G
-#$ -S /bin/bash
-#$ -cwd
-
+    return odb.qsub_header(f"seqledger_int_{name}", log_path, io_queue, mem, slots) + f"""
 echo + `date` $JOB_NAME running on $HOSTNAME in $QUEUE with jobID=$JOB_ID
 # -notify sends SIGUSR1/2 before a wall/CPU-cap kill; log why we're stopping so a
 # novice knows to just resubmit (the per-project JSON checkpoint is already saved).
@@ -603,7 +591,6 @@ def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
     run_prefix = ["python", "-m", "seqledger"]
     db_path = os.path.abspath(args.db)
     slots, mem = args.slots, args.mem
-    mres = slots * mem
 
     job_ids = []
     rc = 0
@@ -620,7 +607,7 @@ def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
         if args.force:
             cmd.append("--force")
         with open(script_path, "w") as fh:
-            fh.write(_batch_script(safe, log_path, slots, mem, mres, " ".join(cmd),
+            fh.write(_batch_script(safe, log_path, slots, mem, " ".join(cmd),
                                    conda_env=conda_env, io_queue=io_queue))
         os.chmod(script_path, 0o755)
 

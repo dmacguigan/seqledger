@@ -67,6 +67,16 @@ def check_directive(value):
     return value
 
 
+def qsub_header(name, log, queue, mem, slots=None):
+    """Shebang plus the SGE '#$' block for an I/O-queue job (mem is GB per slot)."""
+    name, log, queue = (check_directive(v) for v in (name, log, queue))
+    pe = f"#$ -pe mthread {slots}\n" if slots else ""
+    return (f"#!/bin/bash\n#$ -N {name}\n#$ -o {log}\n#$ -j y\n#$ -terse\n#$ -notify\n"
+            f"{pe}#$ -q {queue} -l ioq\n"
+            f"#$ -l mres={mem * (slots or 1)}G,h_data={mem}G,h_vmem={mem}G\n"
+            "#$ -S /bin/bash\n#$ -cwd\n")
+
+
 def set_config(conn, key, value):
     """Upsert one config key (no commit; caller commits)."""
     check_config_value(key, value)

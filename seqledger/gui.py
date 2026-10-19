@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-from .db import check_directive
+from .db import qsub_header
 
 APP_PATH = os.path.join(os.path.dirname(__file__), "app", "streamlit_app.py")
 LOGIN_HOST = "hydra-login01.si.edu"
@@ -98,18 +98,7 @@ def _gui_job_script(log_path, ready_path, queue, conda_env, mem_gb, db_abs, port
     we print always points at a live server. SEQLEDGER_DB points at the master DB
     on Store, which is reachable from lTIO -- no Scratch copy involved.
     """
-    log_path, queue = check_directive(log_path), check_directive(queue)
-    return f"""#!/bin/bash
-#$ -N seqledger_gui
-#$ -o {log_path}
-#$ -j y
-#$ -terse
-#$ -notify
-#$ -q {queue} -l ioq
-#$ -l mres={mem_gb}G,h_data={mem_gb}G,h_vmem={mem_gb}G
-#$ -S /bin/bash
-#$ -cwd
-
+    return qsub_header("seqledger_gui", log_path, queue, mem_gb) + f"""
 echo + `date` $JOB_NAME on $HOSTNAME in $QUEUE jobID=$JOB_ID
 source ~/.bashrc
 conda activate {shlex.quote(conda_env)}

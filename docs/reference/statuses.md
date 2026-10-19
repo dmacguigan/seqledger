@@ -10,6 +10,7 @@ Contents
 - [Projects: data-files check](#projects-data-files-check)
 - [Backup checksum](#backup-checksum)
 - [File integrity](#file-integrity)
+- [Dismissed issues](#dismissed-issues)
 - [Taxonomy match types](#taxonomy-match-types)
 - [Integrity run log](#integrity-run-log)
 - [Grab & Go files_ok](#grab--go-files_ok)
@@ -121,6 +122,15 @@ Per project (GUI Projects `integrity` column):
 The CLI also reports "empty file(s)" and "sample(s) where R1 and R2 read counts
 differ". The GUI drill-down lists files as "gzip error", "format error", or
 "empty (0 reads)".
+
+## Dismissed issues
+
+In the GUI, a user can dismiss an issue; see
+[Dismissing issues](../user-guide.md#dismissing-issues). A cell whose issues are
+all dismissed reads `OK *`, a partly dismissed cell keeps its text plus ` *`, and
+with **Show dismissed** on the cells add `(n dismissed)` or `(dismissed)`. The
+catalog values above do not change. Colors: vermillion is an error, orange a
+warning, sky blue dismissed, grey not yet checked, and no color is OK.
 
 ## Taxonomy match types
 

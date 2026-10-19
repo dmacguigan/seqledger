@@ -11,7 +11,6 @@ import io
 import os
 import re
 import shutil
-import socket
 import sqlite3
 import sys
 import tarfile
@@ -104,7 +103,7 @@ def _download(url, dest, timeout=_DOWNLOAD_TIMEOUT):
         with urllib.request.urlopen(url, timeout=timeout) as resp, \
                 open(dest, "wb") as out:
             shutil.copyfileobj(resp, out)
-    except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+    except (urllib.error.URLError, TimeoutError) as e:
         raise RuntimeError(
             f"Failed to download NCBI taxdump from {url}: {e}. "
             f"Check your network connection (or increase the timeout) and retry."
@@ -364,12 +363,8 @@ def _levenshtein(a, b):
 # ---- resolution -------------------------------------------------------------
 
 def _blank(taxon, clean):
-    d = {"taxon": taxon, "clean": clean, "match_type": "unresolved",
-         "taxid": None, "sci_name": None, "rank": None,
-         "lineage": None, "alternatives": None}
-    for c in RANK_COLUMNS:
-        d[c] = None
-    return d
+    return {**dict.fromkeys(_TAXA_COLS), "taxon": taxon, "clean": clean,
+            "match_type": "unresolved"}
 
 
 def _fill_lineage(idx, d, taxid):
@@ -452,9 +447,7 @@ def _resolve_one(idx, taxon, name_index=None):
     # 2. genus + epithet -> fuzzy species within the genus, else fall to the genus.
     if caps:
         genus = caps[-1]
-        gi = toks.index(genus)
-        epithet = (toks[gi + 1].lower()
-                   if gi + 1 < len(toks) and not toks[gi + 1][:1].isupper() else None)
+        epithet = (bare_epithet(toks) or "").lower()
         if epithet:
             gtxs = scientific_name_taxids(idx, genus)
             if len(gtxs) > 1:
@@ -521,13 +514,8 @@ def _resolve_one(idx, taxon, name_index=None):
     return d
 
 
-def _dedup(taxa):
-    seen, out = set(), []
-    for t in taxa:
-        if t and t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
+def _dedup(xs):
+    return list(dict.fromkeys(filter(None, xs)))
 
 
 def resolve_taxa(taxa, taxdir, progress=True):
@@ -560,21 +548,79 @@ _TAXA_COLS = (["taxon", "clean", "match_type", "taxid", "sci_name", "rank"]
               + RANK_COLUMNS + ["lineage", "alternatives"])
 
 
-def _upsert_taxon(conn, d, today):
-    cols = _TAXA_COLS + ["date_resolved"]
-    vals = [d.get(c) for c in _TAXA_COLS] + [today]
-    placeholders = ",".join("?" for _ in cols)
-    updates = ",".join(f"{c}=excluded.{c}" for c in cols)
-    # Never let an automated re-resolve overwrite a user-confirmed taxon: a
-    # `resolve --redo` would otherwise flip its match_type back to a machine guess
-    # while leaving confirmed=1, so it reappears as "unresolved" in query/GUI.
-    conn.execute(
-        f"INSERT INTO taxa ({','.join(cols)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(taxon) DO UPDATE SET {updates} WHERE COALESCE(taxa.confirmed, 0) = 0",
-        vals)
+# Shared with worms.py: `prefix` is "" for the NCBI columns, "worms_" for WoRMS.
+
+def _write_taxa(conn, rows, cols, prefix, confirm=False):
+    """Upsert result dicts into `taxa` (cols excludes taxon) and commit.
+
+    A machine resolve never overwrites a user-confirmed row; confirm=True writes
+    the row as confirmed.
+    """
+    names = ["taxon", *cols, prefix + "date_resolved"] + [prefix + "confirmed"] * confirm
+    guard = "" if confirm else f" WHERE COALESCE(taxa.{prefix}confirmed, 0) = 0"
+    sql = (f"INSERT INTO taxa ({','.join(names)}) VALUES ({','.join('?' * len(names))}) "
+           f"ON CONFLICT(taxon) DO UPDATE SET "
+           f"{','.join(f'{c}=excluded.{c}' for c in names[1:])}{guard}")
+    today = date.today().isoformat()
+    conn.executemany(sql, [[d["taxon"], *(d.get(c) for c in cols), today] + [1] * confirm
+                           for d in rows])
+    conn.commit()
 
 
-def resolve_catalog(conn, taxdir, scope="new", redo=False):
+def _taxa_in_scope(conn, scope, prefix):
+    cond = "1" if scope == "all" else f"t.{prefix}date_resolved IS NULL"
+    if scope == "unconfirmed":
+        cond += f" OR COALESCE(t.{prefix}confirmed, 0) = 0"
+    return [r[0] for r in conn.execute(
+        "SELECT DISTINCT s.taxon FROM samples s LEFT JOIN taxa t ON t.taxon = s.taxon "
+        f"WHERE s.taxon IS NOT NULL AND s.taxon != '' AND ({cond})")]
+
+
+def _write_review(results, path, fields, id_col, match_col):
+    """Review CSV; confirmed_<id_col> is pre-filled only for exact matches."""
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fields + ["confirmed_" + id_col],
+                           extrasaction="ignore")
+        w.writeheader()
+        for d in results:
+            row = {k: "" if v is None else v for k, v in d.items()}
+            row["confirmed_" + id_col] = row[id_col] if d[match_col] == "exact" else ""
+            w.writerow(row)
+
+
+def _review_reader(csv_path, col, hint):
+    reader = csv.DictReader(io.StringIO(_read_text(csv_path)))
+    if col not in (reader.fieldnames or []):
+        raise ValueError(f"{csv_path} has no '{col}' column; {hint}")
+    return reader
+
+
+def _apply_rows(conn, reader, col, lookup, cols, prefix):
+    """Validate each row on its own; lookup(taxon, id) -> dict or a skip reason."""
+    rows, skipped = [], []
+    for row in reader:
+        taxon = (row.get("taxon") or "").strip()
+        v = (row.get(col) or "").strip()
+        if not v:
+            continue
+        if not taxon:
+            skipped.append(f"(blank taxon): row has {col} '{v}'")
+            continue
+        try:
+            n = int(v)
+        except ValueError:
+            skipped.append(f"{taxon}: {col} '{v}' is not a number")
+            continue
+        d = lookup(taxon, n)
+        if isinstance(d, str):
+            skipped.append(f"{taxon}: {d}")
+        else:
+            rows.append(d)
+    _write_taxa(conn, rows, cols, prefix, confirm=True)
+    return len(rows), skipped
+
+
+def resolve_catalog(conn, taxdir, scope="new"):
     """Resolve distinct sample taxa and upsert into the `taxa` table.
 
     scope picks which taxa to (re-)resolve:
@@ -586,64 +632,17 @@ def resolve_catalog(conn, taxdir, scope="new", redo=False):
       "all"          re-resolve every distinct taxon. Confirmed taxa are kept:
                      their machine result is returned (and lands in the review
                      CSV) but is not written over the confirmation.
-    redo=True is a legacy alias for scope="all". Returns the resolution dicts.
+    Returns the resolution dicts.
     """
-    if redo:
-        scope = "all"
-    if scope == "all":
-        rows = conn.execute(
-            "SELECT DISTINCT taxon FROM samples WHERE taxon IS NOT NULL AND taxon!=''")
-    elif scope == "unconfirmed":
-        rows = conn.execute(
-            """SELECT DISTINCT s.taxon FROM samples s
-               LEFT JOIN taxa t ON t.taxon = s.taxon
-               WHERE s.taxon IS NOT NULL AND s.taxon != ''
-                 AND (t.date_resolved IS NULL OR COALESCE(t.confirmed, 0) = 0)""")
-    else:  # "new": never NCBI-resolved
-        rows = conn.execute(
-            """SELECT DISTINCT s.taxon FROM samples s
-               LEFT JOIN taxa t ON t.taxon = s.taxon
-               WHERE s.taxon IS NOT NULL AND s.taxon != ''
-                 AND t.date_resolved IS NULL""")
-    taxa = [r[0] for r in rows]
-    results = resolve_taxa(taxa, taxdir)
-    today = date.today().isoformat()
-    for d in results:
-        _upsert_taxon(conn, d, today)
-    conn.commit()
+    results = resolve_taxa(_taxa_in_scope(conn, scope, ""), taxdir)
+    _write_taxa(conn, results, _TAXA_COLS[1:], "")
     return results
 
 
 def write_review_csv(results, path):
-    """Write a review CSV; user edits confirmed_taxid then runs apply.
-
-    confirmed_taxid is pre-filled only for exact matches; a filled cell means
-    "I confirm this taxid".
-    """
-    fields = ["taxon", "clean", "match_type", "taxid", "sci_name", "rank",
-              "lineage", "alternatives", "confirmed_taxid"]
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        for d in results:
-            tx = "" if d["taxid"] is None else d["taxid"]
-            w.writerow({
-                "taxon": d["taxon"], "clean": d["clean"], "match_type": d["match_type"],
-                "taxid": tx, "sci_name": d["sci_name"] or "", "rank": d["rank"] or "",
-                "lineage": d["lineage"] or "", "alternatives": d["alternatives"] or "",
-                "confirmed_taxid": tx if d["match_type"] == "exact" else ""})
-
-
-def _apply_confirmed(conn, d, today):
-    cols = _TAXA_COLS[1:] + ["date_resolved"]
-    updates = ",".join(f"{c}=?" for c in cols) + ", confirmed=1"
-    vals = [d.get(c) for c in _TAXA_COLS[1:]] + [today, d["taxon"]]
-    # The taxa row may not exist if the taxon was never auto-resolved (e.g. a
-    # confirmed_taxid hand-entered for a brand-new taxon); ensure it does so the
-    # UPDATE actually writes rather than silently matching zero rows -- otherwise
-    # apply_review would report it applied while persisting nothing.
-    conn.execute("INSERT OR IGNORE INTO taxa (taxon) VALUES (?)", (d["taxon"],))
-    conn.execute(f"UPDATE taxa SET {updates} WHERE taxon=?", vals)
+    """Write a review CSV; user edits confirmed_taxid then runs apply."""
+    _write_review(results, path, ["taxon", "clean", "match_type", "taxid", "sci_name",
+                                  "rank", "lineage", "alternatives"], "taxid", "match_type")
 
 
 def apply_review(conn, taxdir, csv_path):
@@ -655,38 +654,20 @@ def apply_review(conn, taxdir, csv_path):
     Returns (applied, skipped) where skipped is a list of "taxon: reason" strings.
     Raises ValueError if the CSV has no confirmed_taxid column.
     """
-    reader = csv.DictReader(io.StringIO(_read_text(csv_path)))
-    if "confirmed_taxid" not in (reader.fieldnames or []):
-        raise ValueError(f"{csv_path} has no 'confirmed_taxid' column; not an NCBI "
-                         f"review CSV (a WoRMS one needs --source worms)")
+    reader = _review_reader(csv_path, "confirmed_taxid", "not an NCBI review CSV "
+                            "(a WoRMS one needs --source worms)")
     build_index(taxdir)
     idx = open_index(taxdir)
-    today = date.today().isoformat()
-    applied = 0
-    skipped = []
+
+    def lookup(taxon, taxid):
+        d = _blank(taxon, clean_taxon(taxon))
+        _fill_lineage(idx, d, taxid)
+        if d["sci_name"] is None:
+            return f"taxid {taxid} not found in the NCBI taxdump"
+        d["match_type"] = "confirmed"
+        return d
+
     try:
-        for row in reader:
-            taxon = (row.get("taxon") or "").strip()
-            ct = (row.get("confirmed_taxid") or "").strip()
-            if not ct:
-                continue
-            if not taxon:
-                skipped.append(f"(blank taxon): row has confirmed_taxid '{ct}'")
-                continue
-            try:
-                taxid = int(ct)
-            except ValueError:
-                skipped.append(f"{taxon}: confirmed_taxid '{ct}' is not a number")
-                continue
-            d = _blank(taxon, clean_taxon(taxon))
-            _fill_lineage(idx, d, taxid)
-            if d["sci_name"] is None:  # taxid not found in the taxdump
-                skipped.append(f"{taxon}: taxid {taxid} not found in the NCBI taxdump")
-                continue
-            d["match_type"] = "confirmed"
-            _apply_confirmed(conn, d, today)
-            applied += 1
-        conn.commit()
+        return _apply_rows(conn, reader, "confirmed_taxid", lookup, _TAXA_COLS[1:], "")
     finally:
         idx.close()
-    return applied, skipped

@@ -90,6 +90,18 @@ def fastq_globs(exts_csv):
     return ["*." + e.strip().lstrip(".") for e in (exts_csv or "").split(",") if e.strip()]
 
 
+def read_text(path):
+    """Read a text file, tolerating UTF-16 (BOM), UTF-8 BOM, and cp1252 exports."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
+
+
 def connect(db_path):
     """Open a SQLite connection with foreign keys on and Row factory."""
     conn = sqlite3.connect(db_path, timeout=60)

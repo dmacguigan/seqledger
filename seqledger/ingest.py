@@ -25,6 +25,7 @@ from datetime import date
 
 from .db import (METADATA_SUFFIX, REQUIRED_COLUMNS, fastq_globs, get_config,
                  header_uniqid_column, parse_project_id)
+from .db import read_text as _read_text
 
 # Fallback FASTQ globs when no config is available (direct callers / tests).
 _DEFAULT_FASTQ_GLOBS = ("*.fastq.gz", "*.fq.gz")
@@ -161,21 +162,6 @@ def _discover_disk_files(data_dir, seqdata_root, globs=_DEFAULT_FASTQ_GLOBS):
 def _cfg_fastq_globs(conn):
     """FASTQ globs for this catalog's configured extensions (default fastq.gz+fq.gz)."""
     return fastq_globs(get_config(conn, "fastq_extensions")) or list(_DEFAULT_FASTQ_GLOBS)
-
-
-def _read_text(path):
-    """Read a metadata CSV, tolerating Excel exports that aren't UTF-8.
-
-    Tries UTF-8 (with BOM), then falls back to cp1252 (Windows Excel default).
-    """
-    with open(path, "rb") as f:
-        data = f.read()
-    for enc in ("utf-8-sig", "cp1252"):
-        try:
-            return data.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
 
 
 def _read_csv(metadata_path):

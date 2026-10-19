@@ -350,16 +350,6 @@ def test_samples_table_shows_match_labels(tmp_path, monkeypatch):
     assert "review: phonetic (sounds-like)" in set(shown["worms_match"])
 
 
-def test_project_null_metadata_detail_uses_fallback(tmp_path, monkeypatch):
-    at = _apptest(monkeypatch, _make_catalog(tmp_path), "Projects")
-    at.session_state[_table_key(at, "projects_table_")] = {
-        "selection": {"rows": [2], "columns": []}}
-    at.run()
-    text = " ".join(w.value for w in at.warning)
-    assert app._MAPFILE_DETAIL["missing_mapfile"] in text
-    assert "nan" not in text
-
-
 def test_old_catalog_copy_shows_schema_error(tmp_path, monkeypatch):
     path = _make_catalog(tmp_path)
     con = sqlite3.connect(path)

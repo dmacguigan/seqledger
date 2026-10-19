@@ -1,7 +1,6 @@
 """Per-catalog config table + get/set/resolve helpers."""
 
 import os
-import sqlite3
 
 from seqledger import db as odb
 
@@ -28,17 +27,6 @@ def test_set_and_get_overrides_default(tmp_path):
     cfg = odb.resolve_config(conn)
     assert cfg["catalog_name"] == "Deep Sea Catalog"
     assert cfg["io_queue"] == "lTIO.sq"  # untouched -> default
-
-
-def test_missing_config_table_falls_back(tmp_path):
-    # An older read-only catalog copy predating the config table must not crash.
-    p = os.path.join(tmp_path, "old.db")
-    con = sqlite3.connect(p)
-    con.execute("CREATE TABLE projects (project_id TEXT PRIMARY KEY)")
-    con.commit()
-    con.row_factory = sqlite3.Row
-    assert odb.get_config(con, "conda_env") == "seqledger"
-    assert odb.resolve_config(con)["io_queue"] == "lTIO.sq"
 
 
 def test_fresh_schema_loads_and_resolves_defaults(tmp_path):

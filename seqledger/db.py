@@ -38,15 +38,8 @@ CONFIG_DEFAULTS = {
 
 
 def get_config(conn, key, default=None):
-    """Config value for key, falling back to CONFIG_DEFAULTS then `default`.
-
-    Tolerates a missing `config` table (an older read-only catalog copy that
-    predates it), so the GUI on a stale Scratch replica still resolves defaults.
-    """
-    try:
-        row = conn.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
-    except sqlite3.OperationalError:
-        row = None
+    """Config value for key, falling back to CONFIG_DEFAULTS then `default`."""
+    row = conn.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
     if row is not None and row["value"] is not None:
         return row["value"]
     return CONFIG_DEFAULTS.get(key, default)
@@ -86,12 +79,9 @@ def set_config(conn, key, value):
 def resolve_config(conn):
     """All config keys as a dict (defaults merged with any stored rows)."""
     cfg = dict(CONFIG_DEFAULTS)
-    try:
-        for r in conn.execute("SELECT key, value FROM config"):
-            if r["value"] is not None:
-                cfg[r["key"]] = r["value"]
-    except sqlite3.OperationalError:
-        pass
+    for r in conn.execute("SELECT key, value FROM config"):
+        if r["value"] is not None:
+            cfg[r["key"]] = r["value"]
     return cfg
 
 

@@ -14,14 +14,14 @@ Status: prototype, in active development.
 
 ## Who this is for
 
-| | GUI users | Data managers |
+| | Researchers | Data managers |
 |---|---|---|
-| What you do | Search and filter the catalog, look up samples and files, export tables, build copy jobs for FASTQs in Grab & Go | Everything GUI users do, plus create the catalog, load new projects, run the checks, and keep it current |
+| What you do | Search and filter the catalog, look up samples and files, export tables, build copy jobs for FASTQs in Grab & Go | Everything researchers do, plus create the catalog, load new projects, run the checks, and keep it current |
 | How | One command on Hydra starts the GUI; you open it in your web browser | The `seqledger` command line |
 | Install | Once, into your own Hydra account | Same install |
 | Read | [User guide](docs/user-guide.md) | [Admin guide](docs/admin-guide.md) |
 
-## 60-second start: GUI users
+## 60-second start: researchers
 
 Ask your data manager for the catalog path once. Install as shown in the
 [user guide](docs/user-guide.md#one-time-setup), then on Hydra:

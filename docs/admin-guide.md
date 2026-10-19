@@ -1,7 +1,7 @@
 # seqledger admin guide
 
 How to create, fill, check, and maintain a seqledger catalog. For data managers.
-GUI-only users want the [user guide](user-guide.md).
+Researchers who only browse want the [user guide](user-guide.md).
 
 Contents
 
@@ -127,7 +127,7 @@ the catalog's `conda_env` to match ([config](reference/config.md)), and make sur
 
 ### Back up
 
-Make a consistent copy with SQLite's backup command. It is safe while GUI users
+Make a consistent copy with SQLite's backup command. It is safe while researchers
 are reading:
 
 ```bash
@@ -147,7 +147,7 @@ A plain `cp` is safe only when no seqledger command is writing. Back up before
 ### Restore
 
 1. Make sure no seqledger command is writing (see [one writer](#the-one-writer-rule)).
-   Ask GUI users to close their sessions.
+   Ask researchers to close their sessions.
 2. Keep the damaged file for inspection: `mv oceandna_catalog.db oceandna_catalog.db.broken`.
 3. Copy the backup into place and fix its permissions:
 
@@ -587,18 +587,18 @@ Run only one writing command at a time on a catalog. Writers: `init-db` (not
 alongside a writer: `query`, `init-db --show`, the GUI, and batch integrity jobs.
 
 A second writer waits up to 60 seconds for the lock, then fails with
-`error: database is locked`. GUI users see "Catalog is being updated, retry
+`error: database is locked`. Researchers see "Catalog is being updated, retry
 shortly." during long writes. Do not run two writers from different machines
 against the same file on a network filesystem.
 
 ## Permissions and privacy
 
 - `init-db` creates a new catalog with mode 600 (only you can read it). Before
-  GUI users can open it, grant read access, for example
+  researchers can open it, grant read access, for example
   `chmod 640 oceandna_catalog.db` with a shared group, or `chmod 644`.
 - Writers need write access to the catalog file and its folder (SQLite writes a
   journal file next to it, and the review CSVs and `.taxonomy/` land there).
-- GUI users need read access to the catalog file only.
+- Researchers need read access to the catalog file only.
 - Config values that go into job scripts (`conda_env`, `io_queue`,
   `rclone_module`, `login_host`, `catalog_slug`) may only contain letters, digits,
   and `. _ @ : / -`.

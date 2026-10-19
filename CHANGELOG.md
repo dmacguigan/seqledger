@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-19
+
 ### Added
 
 - A mapfile `R1`/`R2` name found in several subfolders (one library over
@@ -164,6 +166,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `init-db --set` refuses unknown config keys and lists the known ones.
 - `--debug` works after the subcommand, like `--db` and `-v`.
 
-[Unreleased]: https://github.com/dmacguigan/seqledger/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/dmacguigan/seqledger/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/dmacguigan/seqledger/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/dmacguigan/seqledger/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/dmacguigan/seqledger/compare/f3174b6...v0.2.0

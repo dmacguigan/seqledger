@@ -96,8 +96,9 @@ def resolve_config(conn):
 
 
 def fastq_globs(exts_csv):
-    """Turn a 'fastq.gz,fq.gz' config string into ['*.fastq.gz', '*.fq.gz']."""
-    return ["*." + e.strip().lstrip(".") for e in (exts_csv or "").split(",") if e.strip()]
+    """Turn a 'fastq.gz,fq.gz' config string into ['*.fastq.gz', '*.fq.gz'] (default if empty)."""
+    return (["*." + e.strip().lstrip(".") for e in (exts_csv or "").split(",") if e.strip()]
+            or fastq_globs(CONFIG_DEFAULTS["fastq_extensions"]))
 
 
 def read_text(path):

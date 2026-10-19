@@ -198,7 +198,7 @@ def check_data_files(conn, project_id, seq_data_relpath, seqdata_root):
     # Recursive: FASTQ may be nested in subdirs (matches ingest's discovery), and
     # the extension set comes from the catalog config (default fastq.gz + fq.gz).
     # Disk paths are made relative to seqdata_root, the same convention as files.rel_path.
-    globs = fastq_globs(get_config(conn, "fastq_extensions")) or ["*.fastq.gz", "*.fq.gz"]
+    globs = fastq_globs(get_config(conn, "fastq_extensions"))
     disk = set()
     for pat in globs:
         disk.update(os.path.relpath(p, seqdata_root)

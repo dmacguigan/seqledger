@@ -26,9 +26,6 @@ from datetime import date
 from .db import (METADATA_SUFFIX, REQUIRED_COLUMNS, fastq_globs, get_config,
                  header_uniqid_column, parse_project_id)
 from .db import read_text as _read_text
-
-# Fallback FASTQ globs when no config is available (direct callers / tests).
-_DEFAULT_FASTQ_GLOBS = ("*.fastq.gz", "*.fq.gz")
 from .validate import (Finding, FAIL, WARN, NA_VALUE, FLAG_MESSAGES,
                        plan_rows, validate_metadata, overall_status)
 
@@ -124,7 +121,7 @@ def _infer_direction(filename):
 _BAD_PATH_RE = re.compile(r"[\n\r\0]")
 
 
-def _discover_disk_files(data_dir, seqdata_root, globs=_DEFAULT_FASTQ_GLOBS):
+def _discover_disk_files(data_dir, seqdata_root, globs):
     """Find FASTQ files under data_dir (recursively; files may be nested in subdirs).
 
     globs is the set of shell patterns to match (from the catalog's configured
@@ -157,11 +154,6 @@ def _discover_disk_files(data_dir, seqdata_root, globs=_DEFAULT_FASTQ_GLOBS):
         by_basename[fn] = info
         all_files.append(info)
     return by_basename, all_files, collisions
-
-
-def _cfg_fastq_globs(conn):
-    """FASTQ globs for this catalog's configured extensions (default fastq.gz+fq.gz)."""
-    return fastq_globs(get_config(conn, "fastq_extensions")) or list(_DEFAULT_FASTQ_GLOBS)
 
 
 def _read_csv(metadata_path):
@@ -337,7 +329,7 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
         data_dir = os.path.join(seqdata_root, seq_data_relpath)
         proj_owner_uid, proj_owner_name, _ = _stat_owner(data_dir)
         disk, all_disk, collisions = _discover_disk_files(
-            data_dir, seqdata_root, _cfg_fastq_globs(conn))
+            data_dir, seqdata_root, fastq_globs(get_config(conn, "fastq_extensions")))
         on_disk = {i["rel_path"] for i in all_disk}
 
     disk_filenames = set(disk) if disk is not None else None
@@ -500,7 +492,7 @@ def _ingest_diskonly(conn, project_id, data_dir, seqdata_root, metadata_status, 
     if data_dir:
         proj_uid, proj_name, _ = _stat_owner(data_dir)
         _by_basename, all_files, _coll = _discover_disk_files(
-            data_dir, seqdata_root, _cfg_fastq_globs(conn))
+            data_dir, seqdata_root, fastq_globs(get_config(conn, "fastq_extensions")))
 
     _upsert_project(conn, project_id_, source, number, description, None, project_id,
                     seqdata_root=abs_root, owner_uid=proj_uid, owner_name=proj_name,

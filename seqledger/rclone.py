@@ -15,9 +15,7 @@ which recreates the same tree under the destination.
 import datetime
 import shlex
 
-from .db import qsub_header
-
-RCLONE_MODULE = "tools/rclone/1.66.0"
+from .db import CONFIG_DEFAULTS, qsub_header
 
 
 def _missing(v):
@@ -87,7 +85,8 @@ LTIO_MAX_SLOTS = 6  # lTIO caps a user at 6 slots; requesting more never schedul
 
 def build_copy_script(groups, dest, transfers=4, slots=4, mem=4,
                       job_name="seqledger_rclone_copy", est_bytes=None, n_files=None,
-                      rclone_module=RCLONE_MODULE, io_queue="lTIO.sq", stamp=None):
+                      rclone_module=CONFIG_DEFAULTS["rclone_module"],
+                      io_queue=CONFIG_DEFAULTS["io_queue"], stamp=None):
     """Return a Hydra qsub script that rclone-copies the grouped files to dest.
 
     groups: list of (src_root, [rel_path, ...]) from group_by_root.

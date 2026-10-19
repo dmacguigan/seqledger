@@ -544,7 +544,8 @@ def _safe_name(s):
 
 
 def _batch_script(name, log_path, slots, mem, run_cmd,
-                  conda_env="seqledger", io_queue="lTIO.sq"):
+                  conda_env=odb.CONFIG_DEFAULTS["conda_env"],
+                  io_queue=odb.CONFIG_DEFAULTS["io_queue"]):
     """A Hydra qsub script that checks one project on the I/O queue.
 
     The I/O queue is the only way to reach the NAS/Store partition from a compute
@@ -567,7 +568,7 @@ exit $status
 """
 
 
-def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
+def _submit_batch(args, projects, conda_env, io_queue):
     """Write a per-project qsub script and (unless --no-submit) submit it.
 
     Each remote job checks one project and writes its results to
@@ -812,16 +813,16 @@ def cmd_taxonomy(args):
 def cmd_gui(args):
     from seqledger import gui as ogui
     # CLI flag > catalog config > built-in default.
-    cfg = {}
+    cfg = odb.CONFIG_DEFAULTS
     if os.path.exists(args.db):
         # Read-only: this path only reads config to build the qsub/tunnel command
         # (no init_db/migrate/write), so it must not open the shared DB read/write.
         conn = odb.connect_ro(args.db)
-        cfg = {k: odb.get_config(conn, k) for k in ("login_host", "conda_env", "io_queue")}
+        cfg = odb.resolve_config(conn)
         conn.close()
-    login_host = args.login_host or cfg.get("login_host") or ogui.LOGIN_HOST
-    conda_env = args.conda_env or cfg.get("conda_env") or "seqledger"
-    queue = args.queue or cfg.get("io_queue") or "lTIO.sq"
+    login_host = args.login_host or cfg["login_host"]
+    conda_env = args.conda_env or cfg["conda_env"]
+    queue = args.queue or cfg["io_queue"]
     if args.qsub:
         ogui.launch_qsub(args.db, port=args.port, login_host=login_host,
                          queue=queue, conda_env=conda_env, mem_gb=args.mem, wait=args.wait)
@@ -1015,7 +1016,8 @@ def build_parser():
                          "master catalog on Store directly (no Scratch copy); waits for it "
                          "to start, then prints the tunnel command to screen")
     pg.add_argument("--queue", default=None,
-                    help="queue for --qsub (default: catalog config, else lTIO.sq)")
+                    help="queue for --qsub (default: catalog config, else "
+                         f"{odb.CONFIG_DEFAULTS['io_queue']})")
     pg.add_argument("--conda-env", default=None,
                     help="conda env activated inside the --qsub job (default: catalog config)")
     pg.add_argument("--mem", type=int, default=6, help="memory GB for the --qsub job (default 6)")

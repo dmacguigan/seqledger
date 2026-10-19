@@ -35,7 +35,7 @@ def test_fresh_schema_loads_and_resolves_defaults(fresh_db):
 def test_fastq_globs():
     assert odb.fastq_globs("fastq.gz,fq.gz") == ["*.fastq.gz", "*.fq.gz"]
     assert odb.fastq_globs(".fastq.gz") == ["*.fastq.gz"]
-    assert odb.fastq_globs("") == []
+    assert odb.fastq_globs("") == ["*.fastq.gz", "*.fq.gz"]
 
 
 def test_ingest_uses_configured_roots(tmp_path, capsys):

@@ -63,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a multiple of 4; no per-record framing check) and the fixed map file columns.
 - Internal: NCBI and WoRMS taxonomy share one set of scope, review-CSV, and apply
   helpers.
+- Ctrl-C stops any command with a one-line "interrupted" and exit code 130
+  (no traceback).
 
 ### Removed
 
@@ -141,5 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   escapes the catalog path, and the GUI connection is query-only.
 - The CLI waits up to 60 s for a locked catalog (was 5 s), and a local
   `integrity` run commits at least every 30 s so it does not starve other writers.
+- `init-db --set` refuses unknown config keys and lists the known ones.
+- `--debug` works after the subcommand, like `--db` and `-v`.
 
 [Unreleased]: https://github.com/dmacguigan/seqledger/compare/main...devel

@@ -6,7 +6,7 @@ Subcommands:
   checksums   load + compare `rclone md5sum` output from Store and P-drive
   validate    re-check the catalog and print findings
   integrity   gzip + FASTQ structural integrity check of cataloged files
-  taxonomy    resolve sample taxa to NCBI TaxIDs (resolve / apply)
+  taxonomy    resolve sample taxa to NCBI TaxIDs and WoRMS AphiaIDs (resolve / apply)
   query       lookups (uniq-id, search, unbacked, mismatches, summary, taxa)
   gui         launch the Streamlit browse GUI (prints SSH tunnel command)
 """
@@ -94,6 +94,10 @@ def cmd_init_db(args):
             conn.close()
             sys.exit(f"--set expects KEY=VALUE, got: {pair}")
         k, v = pair.split("=", 1)
+        if k.strip() not in odb.CONFIG_DEFAULTS:
+            conn.close()
+            sys.exit(f"unknown config key '{k.strip()}'; "
+                     f"known keys: {', '.join(odb.CONFIG_DEFAULTS)}")
         updates[k.strip()] = v
     try:
         for k, v in updates.items():
@@ -817,23 +821,25 @@ def build_parser():
     p.add_argument("-v", "--verbose", action="count", default=0,
                    help="more detail: -v per project, -vv per file")
     p.add_argument("--version", action="version", version=f"seqledger {__version__}")
-    # Also accept --db / -v after the subcommand; SUPPRESS keeps the top-level value when absent.
+    # Also accept --db / --debug / -v after the subcommand; SUPPRESS keeps the top-level value when absent.
     dbp = argparse.ArgumentParser(add_help=False)
     dbp.add_argument("--db", default=argparse.SUPPRESS, help="path to catalog SQLite DB")
+    dbp.add_argument("--debug", action="store_true", default=argparse.SUPPRESS,
+                     help="show the full traceback on error")
     dbp.add_argument("-v", "--verbose", action="count", default=argparse.SUPPRESS,
                      help="more detail: -v per project, -vv per file")
     sub = p.add_subparsers(dest="cmd")
 
     pdb = sub.add_parser(
         "init-db", parents=[dbp],
-        help="create/upgrade the catalog schema; optionally set per-catalog config",
+        help="create the catalog schema; optionally set per-catalog config",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="Create/upgrade the catalog schema and set config. "
+        description="Create or configure the catalog schema and set config. "
                     "--show only prints the config (read-only).",
         epilog="other config keys (set with --set KEY=VALUE):\n" + "\n".join(
             f"  {k} (default: {v})" for k, v in odb.CONFIG_DEFAULTS.items()
             if k not in _INIT_CONFIG_FLAGS.values()))
-    pdb.add_argument("--name", help="catalog display name (GUI title / CLI banner)")
+    pdb.add_argument("--name", help="catalog display name (GUI title)")
     pdb.add_argument("--seqdata-root", dest="seqdata_root",
                      help="default root of raw_sequence_data for this catalog")
     pdb.add_argument("--metadata-root", dest="metadata_root",
@@ -857,13 +863,13 @@ def build_parser():
     pi.add_argument("--taxdir", help="taxdump dir (default: <db dir>/.taxonomy)")
     pi.add_argument("--skip-taxonomy", action="store_true", help="skip the taxonomy step")
     pi.add_argument("--prune", action="store_true",
-                    help="delete catalog samples/files the CSV no longer lists "
-                         "(then re-run `validate --seqdata-root`)")
+                    help="delete catalog samples/files the CSV no longer lists")
     pi.add_argument("--prune-projects", action="store_true",
                     help="delete whole catalog projects that "
                          "vanished from BOTH the seqdata and metadata dirs (cascades "
-                         "to their samples/files). Refuses to run if the roots turn up "
-                         "no projects, so a missing mount can't wipe the catalog.")
+                         "to their samples/files). Refuses if a root is missing, turns up "
+                         "no projects, or more than half of the root's projects would "
+                         "go, so a missing mount can't wipe the catalog.")
     pi.add_argument("--yes", action="store_true",
                     help="skip the confirmation prompt for --prune / --prune-projects")
     pi.set_defaults(func=cmd_ingest)
@@ -874,7 +880,9 @@ def build_parser():
     pc.add_argument("--store", required=True, help="rclone md5sum output for Store")
     pc.add_argument("--pdrive", required=True, help="rclone md5sum output for P-drive")
     pc.add_argument("--project", help="limit to one project_id")
-    pc.add_argument("--source", default="backfill", choices=["ingest", "backfill"])
+    pc.add_argument("--source", default="backfill", choices=["ingest", "backfill"],
+                    help="label stored on the md5 rows (default backfill; ingest only "
+                         "for listings made at ingest time)")
     pc.add_argument("--full", action="store_true",
                     help="also reset files in projects absent from the listings")
     pc.add_argument("--force", action="store_true",
@@ -886,7 +894,7 @@ def build_parser():
                         description="Re-check the catalog (data-files + checksum). Exits 1 "
                                     "on missing/orphan files or md5 mismatches.")
     pv.add_argument("--seqdata-root",
-                    help="root of raw_sequence_data; enables the on-disk data-files check")
+                    help="root of raw_sequence_data (overrides the configured or stored root)")
     pv.set_defaults(func=cmd_validate)
 
     pin = sub.add_parser("integrity", parents=[dbp],
@@ -895,7 +903,8 @@ def build_parser():
                                      "1 on any gzip/format error, 2 if --batch qsub is "
                                      "missing or fails.")
     pin.add_argument("--seqdata-root",
-                     help="root of raw_sequence_data (default: each project's stored root)")
+                     help="root of raw_sequence_data (overrides the configured seqdata_root, "
+                          "which wins over each project's stored root)")
     pin.add_argument("--project", help="limit to one project_id")
     pin.add_argument("--jobs", type=int, default=None,
                      help="concurrent read streams (default: min(8, CPU count); on a "
@@ -904,9 +913,10 @@ def build_parser():
                      help="re-read every file, even ones that already passed and are "
                           "unchanged (default: skip those for a fast, resumable run)")
     pin.add_argument("--batch", action="store_true",
-                     help="generate a per-project qsub script and submit it to Hydra's "
-                          "I/O queue (lTIO.sq) for remote checking (the only way to reach "
-                          "the NAS/Store partition from a compute node); each job writes "
+                     help="generate a per-project qsub script and submit it to the "
+                          "configured I/O queue (default lTIO.sq) for remote checking "
+                          "(the only way to reach the NAS/Store partition from a compute "
+                          "node); each job writes "
                           "JSON results to merge later with --collect. Respects --project.")
     pin.add_argument("--batch-dir", default="integrity_batch",
                      help="dir for generated batch scripts/logs/results "
@@ -958,10 +968,13 @@ def build_parser():
     pq.set_defaults(func=cmd_query)
 
     pt = sub.add_parser("taxonomy", parents=[dbp],
-                        help="resolve sample taxa to NCBI TaxIDs + WoRMS AphiaIDs")
+                        help="resolve sample taxa to NCBI TaxIDs + WoRMS AphiaIDs",
+                        description="Resolve sample taxa to NCBI TaxIDs + WoRMS AphiaIDs.")
     tsub = pt.add_subparsers(dest="action", required=True)
     tr = tsub.add_parser("resolve", parents=[dbp],
-                         help="resolve taxa (NCBI taxdump and/or WoRMS), write review CSV")
+                         help="resolve taxa (NCBI taxdump and/or WoRMS), write review CSV",
+                         description="Resolve taxa (NCBI taxdump and/or WoRMS) and write "
+                                     "a review CSV next to the catalog.")
     tr.add_argument("--source", choices=("ncbi", "worms", "both"), default="ncbi",
                     help="taxonomy source: ncbi (default, local taxdump), worms "
                          "(WoRMS REST API), or both")
@@ -974,23 +987,31 @@ def build_parser():
     tr.add_argument("--redo", action="store_true",
                     help="re-resolve every taxon; confirmed taxa are kept (their "
                          "machine result goes to the review CSV only)")
-    ta = tsub.add_parser("apply", parents=[dbp], help="apply confirmed overrides from a review CSV")
-    ta.add_argument("--review", required=True, help="edited review CSV")
+    ta = tsub.add_parser("apply", parents=[dbp], help="apply confirmed overrides from a review CSV",
+                         description="Apply confirmed overrides from an edited review CSV.")
+    ta.add_argument("--review", required=True,
+                    help="edited review CSV, written next to the catalog by `resolve` "
+                         "(taxonomy_review.csv or worms_review.csv; dated, e.g. "
+                         "taxonomy_review_YYYY-MM-DD.csv, if one already exists)")
     ta.add_argument("--source", choices=("ncbi", "worms"), default="ncbi",
                     help="which review CSV this is: ncbi (confirmed_taxid, default) "
                          "or worms (confirmed_aphia_id)")
     ta.add_argument("--taxdir", help="taxdump/cache dir (default: <db dir>/.taxonomy)")
     pt.set_defaults(func=cmd_taxonomy)
 
-    pg = sub.add_parser("gui", parents=[dbp], help="launch Streamlit browse GUI (locally, or on lTIO via --qsub)")
+    pg = sub.add_parser("gui", parents=[dbp], help="launch Streamlit browse GUI (locally, or on lTIO via --qsub)",
+                        description="Launch the Streamlit browse GUI and print the SSH "
+                                    "tunnel command.")
     pg.add_argument("--port", type=int, default=8501,
-                    help="server port (a free port is chosen automatically under --qsub)")
+                    help="server port (default 8501; a free port is chosen automatically "
+                         "under --qsub)")
     pg.add_argument("--login-host", default=None,
                     help="Hydra login host for the SSH tunnel (default: catalog config)")
     pg.add_argument("--qsub", action="store_true",
-                    help="run the GUI as a job on the I/O queue (lTIO.sq) so it reads the "
-                         "master catalog on Store directly (no Scratch copy); waits for it "
-                         "to start, then prints the tunnel command to screen")
+                    help="run the GUI as a job on the configured I/O queue (default "
+                         "lTIO.sq) so it reads the master catalog on Store directly (no "
+                         "Scratch copy); waits for it to start, then prints the tunnel "
+                         "command to screen")
     pg.add_argument("--queue", default=None,
                     help="queue for --qsub (default: catalog config, else "
                          f"{odb.CONFIG_DEFAULTS['io_queue']})")
@@ -1018,6 +1039,9 @@ def run(argv=None):
         _require_db(args.db, any(a == "--db" or a.startswith("--db=") for a in argv))
     try:
         return args.func(args) or 0, args
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        sys.exit(130)
     except (OSError, sqlite3.Error, ValueError, RuntimeError) as e:
         if getattr(args, "debug", False):
             raise

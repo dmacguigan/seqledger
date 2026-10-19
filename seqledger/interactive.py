@@ -34,7 +34,7 @@ OVERVIEW = """
     3  Projects not backed up
     4  Files whose backup copies differ
     5  Species names needing review"""
-DOWNLOAD = ("Look up new species names now? First time downloads about 80 MB and "
+DOWNLOAD = ("Look up new species names now? First time downloads about 72 MB and "
             "uses about 1.4 GB next to the catalog.")
 RCLONE = """Make the two md5 listings first, for example:
   rclone md5sum SI-Hydra:/store/nmnh_ocean_dna/public/raw_sequence_data > store.md5

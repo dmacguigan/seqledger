@@ -598,7 +598,8 @@ def projects_view(df, issues, integ_issues):
             "date_ingested"]
     show = _column_filters(show, cols, "projects")
     st.caption(f"{len(show)} of {len(df)} projects. 'mapfile' flags a folder with no "
-               "mapfile, a mapfile with no folder, or a broken mapfile. Select a row for "
+               "mapfile, a mapfile with no folder, a broken mapfile, flagged rows, or "
+               "no usable rows. Select a row for "
                "its mapfile explanation + data-files & integrity issues below. "
                "'owner_name' is the filesystem owner (a personal identifier).")
     event = st.dataframe(show[cols], width="stretch", hide_index=True,
@@ -1085,7 +1086,7 @@ def custom_table_view(samples_df, paths_df):
         return
 
     st.subheader("Search results")
-    st.caption(f"{len(view)} match(es). Select rows and click **Add to custom table**. "
+    st.caption(f"{len(view)} match(es). Select rows and click **Add selected**. "
                f"Grab & Go table currently holds {len(cart)} sample(s).")
     cols = ["project_id", "sample_id", "taxon", "tax_name", "uniq_id", "uniq_id_url"]
     event = st.dataframe(

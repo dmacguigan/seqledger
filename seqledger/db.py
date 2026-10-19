@@ -120,9 +120,10 @@ def connect_ro(db_path):
 
     For paths that must not write the shared DB over NFS -- notably the remote
     integrity batch worker (--emit-json), which only reads its file list. mode=ro
-    (not immutable) so it stays correct while the CLI writes the master elsewhere.
+    (not immutable) so it stays correct while the CLI writes the master elsewhere;
+    timeout lets SQLite wait out a concurrent write lock.
     """
-    conn = sqlite3.connect(ro_uri(db_path), uri=True)
+    conn = sqlite3.connect(ro_uri(db_path), uri=True, timeout=15)
     conn.row_factory = sqlite3.Row
     # Defense in depth on top of mode=ro: refuse any write attempt outright.
     # (foreign_keys is irrelevant on a pure-read connection, so it stays off.)

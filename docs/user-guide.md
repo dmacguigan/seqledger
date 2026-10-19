@@ -46,8 +46,11 @@ You install seqledger into your own Hydra account. No admin rights needed.
    conda env create -f environment.yml
    conda activate seqledger
    pip install -e '.[gui]'
+   seqledger --version    # prints "seqledger 0.2.0"
    ```
 
+   The `seqledger` command is available whenever the `seqledger` env is
+   active; run `conda activate seqledger` in each new login.
    Keep the environment name `seqledger`. The GUI job activates the environment
    by that name (your data manager can change the name for the whole catalog,
    see [config](reference/config.md)).

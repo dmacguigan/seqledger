@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-19
+
 ### Fixed
 
 - `init-db` now also refuses a catalog whose `files` table still has the old
@@ -155,5 +157,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `init-db --set` refuses unknown config keys and lists the known ones.
 - `--debug` works after the subcommand, like `--db` and `-v`.
 
-[Unreleased]: https://github.com/dmacguigan/seqledger/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/dmacguigan/seqledger/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/dmacguigan/seqledger/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/dmacguigan/seqledger/compare/f3174b6...v0.2.0

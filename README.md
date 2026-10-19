@@ -51,7 +51,7 @@ cd seqledger
 conda env create -f environment.yml
 conda activate seqledger
 pip install -e '.[gui]'
-seqledger --version    # prints "seqledger 0.2.0"
+seqledger --version    # prints the installed version
 
 # create the catalog and record where the data lives
 seqledger --db /path/to/catalog.db init-db --name "My lab sequence catalog" \

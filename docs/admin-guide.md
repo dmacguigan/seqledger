@@ -100,7 +100,7 @@ cd seqledger
 conda env create -f environment.yml     # creates an env named seqledger
 conda activate seqledger
 pip install -e '.[gui]'
-seqledger --version    # prints "seqledger 0.2.0"
+seqledger --version    # prints the installed version
 ```
 
 The `seqledger` command is available whenever the `seqledger` env is active;

@@ -1229,10 +1229,10 @@ def custom_table_view(samples_df, paths_df):
     if mp_issues["n_lane_split"]:
         ids = mp_issues["lane_split_ids"]
         shown = ", ".join(ids[:20]) + (", ..." if len(ids) > 20 else "")
-        st.warning(f"MitoPilot takes one file per read direction. {len(ids)} samples in "
-                   "the cart are lane-split (several R1 or R2 files); only the first file "
-                   "of each is in the map. Merge lanes first or run them separately. "
-                   f"({shown})")
+        st.warning(f"MitoPilot takes one R1 and one R2 per sample. {len(ids)} sample(s) in "
+                   "the cart have more than one read pair (lane-split, or sequenced over "
+                   "several runs); only the first pair of each is in the map. Concatenate "
+                   f"the files per direction after copying, or run them separately. ({shown})")
 
     total, n_files, n_unknown = orclone.estimate_size(rows)
 

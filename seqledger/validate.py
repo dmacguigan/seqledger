@@ -126,6 +126,9 @@ def validate_metadata(metadata_filename, header, rows, disk_filenames=None,
         return findings, True  # can't check rows without a valid header
 
     _uniqid_col, plans = plan_rows(header, rows)
+    # disk_filenames are subpaths under the project folder; a mapfile entry may be
+    # the bare basename or the subpath.
+    disk_basenames = {os.path.basename(f) for f in disk_filenames or ()}
     metadata_r1r2 = set()
     for p in plans:
         i = p["line"]
@@ -137,7 +140,8 @@ def validate_metadata(metadata_filename, header, rows, disk_filenames=None,
         for direction, fn in (("R1", p["r1"]), ("R2", p["r2"])):
             if fn:
                 metadata_r1r2.add(fn)
-                if disk_filenames is not None and fn not in disk_filenames:
+                if (disk_filenames is not None and fn not in disk_filenames
+                        and fn not in disk_basenames):
                     findings.append(Finding(WARN, f"row {i}: {direction} '{fn}' not found on disk"))
         if known_uniq_ids and p["uniq_id"] != NA_VALUE and p["uniq_id"] in known_uniq_ids:
             findings.append(Finding(
@@ -148,7 +152,7 @@ def validate_metadata(metadata_filename, header, rows, disk_filenames=None,
     # Orphans: fastq on disk not referenced by any metadata row (exact match).
     if disk_filenames is not None:
         for fn in sorted(disk_filenames):
-            if fn not in metadata_r1r2:
+            if fn not in metadata_r1r2 and os.path.basename(fn) not in metadata_r1r2:
                 findings.append(Finding(WARN, f"'{fn}' on disk is not referenced in metadata"))
 
     has_fail = any(f.level == FAIL for f in findings)

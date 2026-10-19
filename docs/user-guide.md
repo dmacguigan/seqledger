@@ -32,7 +32,7 @@ The GUI is read-only. Nothing you click can change or delete catalog data.
 You install seqledger into your own Hydra account. No admin rights needed.
 
 1. Make sure `conda` works on Hydra. Log in and run `conda --version`. If that
-   fails, set up conda first (see the Hydra wiki, or ask your data manager).
+   fails, set up conda first ([Hydra conda page](https://confluence.si.edu/spaces/HPC/pages/163152340/Conda+Anaconda+Miniconda), or ask your data manager).
    The GUI job runs `source ~/.bashrc` and then `conda activate seqledger`, so
    `conda activate` must work in a fresh login shell. If it does not, run
    `conda init bash` once and log in again.

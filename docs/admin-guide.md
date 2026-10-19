@@ -90,6 +90,9 @@ columns. Other names work, with those columns left empty. See
 
 ### Install
 
+You need conda on Hydra first; see the
+[Hydra conda page](https://confluence.si.edu/spaces/HPC/pages/163152340/Conda+Anaconda+Miniconda).
+
 ```bash
 ssh jsmith@hydra-login01.si.edu
 git clone https://github.com/dmacguigan/seqledger.git

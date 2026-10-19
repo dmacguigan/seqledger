@@ -540,3 +540,25 @@ def test_prune_dry_run_lists_without_deleting(tmp_path, fresh_db):
     res = oingest.prune_missing_projects(conn, seq, meta, dry_run=True)
     assert res["pruned"] == ["genohub-2_B"] and res["skipped"] is False
     assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 2
+
+
+def test_mapfile_subpath_disambiguates_same_basename(tmp_path, fresh_db):
+    # Same basename in Run1 and Run2; mapfile names each with its subfolder.
+    from seqledger import validate as ov
+    seq, meta = _roots(tmp_path)
+    pid = "genohub-1_X"
+    rows = [("s1", "Run1/x_R1.fastq.gz", "Run1/x_R2.fastq.gz", "Gadus", "U1"),
+            ("s2", "Run2/x_R1.fastq.gz", "Run2/x_R2.fastq.gz", "Gadus", "U2")]
+    make_project(seq, pid, f"{pid}_mapfile.csv", rows)
+    conn = fresh_db
+    results = oingest.ingest_tree(conn, seq, meta)
+    assert results[0][2] == "pass", [str(f) for f in results[0][1]]
+    rows_db = conn.execute(
+        "SELECT filename, rel_path, size_bytes FROM files ORDER BY rel_path").fetchall()
+    assert [(r["filename"], r["rel_path"]) for r in rows_db] == [
+        ("x_R1.fastq.gz", f"{pid}/Run1/x_R1.fastq.gz"),
+        ("x_R2.fastq.gz", f"{pid}/Run1/x_R2.fastq.gz"),
+        ("x_R1.fastq.gz", f"{pid}/Run2/x_R1.fastq.gz"),
+        ("x_R2.fastq.gz", f"{pid}/Run2/x_R2.fastq.gz")]
+    assert all(r["size_bytes"] > 0 for r in rows_db)
+    assert ov.check_data_files(conn, pid, pid, seq)["status"] == "ok"

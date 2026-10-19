@@ -79,13 +79,14 @@ cataloged from disk with no samples, and `ingest` counts it as rejected.
 
 ## How R1 and R2 are matched to files
 
-- `R1` and `R2` are bare file names, not paths. `S01_R1.fastq.gz` is right;
-  `sub/S01_R1.fastq.gz` will not match.
-- They are matched by exact name against every FASTQ found anywhere under the
-  project folder (all subfolders). Which files count as FASTQs is set by
-  `fastq_extensions` (default `fastq.gz,fq.gz`, see [config](config.md)).
-- If the same file name exists in two subfolders, the one that sorts last by path
-  is used, with a warning. Give files unique names within a project.
+- `R1` and `R2` are usually bare file names (`S01_R1.fastq.gz`), matched by
+  exact name against every FASTQ found anywhere under the project folder (all
+  subfolders). Which files count as FASTQs is set by `fastq_extensions`
+  (default `fastq.gz,fq.gz`, see [config](config.md)).
+- If the same file name exists in two subfolders (say `Run1/` and `Run2/`), a
+  bare name picks the one that sorts last by path, with a warning. To name a
+  specific one, write the path under the project folder with forward slashes:
+  `Run1/S01_R1.fastq.gz`.
 - A listed file that is not on disk is still cataloged (with no size) and reported
   as "in mapfile, not on disk".
 - A FASTQ on disk that the mapfile does not list is not cataloged; it is reported

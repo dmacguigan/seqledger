@@ -128,7 +128,9 @@ def _discover_disk_files(data_dir, seqdata_root, globs):
     collisions), where each info is {"filename","rel_path","size","uid","name"} and
     rel_path is relative to seqdata_root:
       by_basename -- {basename: info} for mapfile R1/R2 lookup (a colliding basename
-                     keeps the last found and is listed in `collisions`).
+                     keeps the last found and is listed in `collisions`); also keyed
+                     by the subpath under data_dir ('Run1/x.fastq.gz'), so a mapfile
+                     can name one of several same-named files.
       all_files   -- one info per file (keyed physically by rel_path), so a caller
                      that catalogs everything (diskonly projects) keeps BOTH files
                      when two share a basename in different subdirs.
@@ -151,6 +153,7 @@ def _discover_disk_files(data_dir, seqdata_root, globs):
         if fn in by_basename:
             collisions.append(fn)
         by_basename[fn] = info
+        by_basename[os.path.relpath(p, data_dir).replace(os.sep, "/")] = info
         all_files.append(info)
     return by_basename, all_files, collisions
 
@@ -331,13 +334,13 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
             data_dir, seqdata_root, fastq_globs(get_config(conn, "fastq_extensions")))
         on_disk = {i["rel_path"] for i in all_disk}
 
-    disk_filenames = set(disk) if disk is not None else None
+    disk_filenames = None
+    if disk is not None:
+        disk_filenames = {os.path.relpath(i["rel_path"], seq_data_relpath).replace(os.sep, "/")
+                          for i in all_disk}
     findings, has_fail = validate_metadata(
         metadata_filename, header, rows, disk_filenames,
         known_uniq_ids=_known_uniq_ids(conn, project_id))
-    for fn in collisions:
-        findings.append(Finding(WARN, f"'{fn}' appears in more than one subdirectory; "
-                                       "the last one found was cataloged"))
     status = overall_status(findings)
 
     stats = _empty_stats()
@@ -349,6 +352,14 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
     uniqid_col, plans = plan_rows(header, rows)
     usable = [p for p in plans if p["load"]]
     skipped = [p for p in plans if not p["load"]]
+
+    # A bare name is ambiguous when several subdirs hold it; a subpath entry is not.
+    bare = {p[k] for p in usable for k in ("r1", "r2") if p[k] and "/" not in p[k]}
+    for fn in collisions:
+        if fn in bare:
+            findings.append(Finding(WARN, f"'{fn}' appears in more than one subdirectory; "
+                                           "the last one found was cataloged (name it "
+                                           f"with its subfolder, e.g. 'Run1/{fn}')"))
 
     # Nothing loadable (every row skipped / no rows): don't write a project row here.
     # ingest_tree falls back to _ingest_diskonly (invalid_mapfile).
@@ -431,7 +442,7 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
             uid = info["uid"] if info else None
             name = info["name"] if info else None
             was_new, target = _upsert_file(
-                conn, project_id, sample_pk, direction, filename, rel_path,
+                conn, project_id, sample_pk, direction, os.path.basename(filename), rel_path,
                 size_bytes=size, owner_uid=uid, owner_name=name,
                 disk_confirmed=info is not None, on_disk=on_disk)
             kept_paths.add(target)

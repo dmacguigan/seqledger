@@ -160,6 +160,7 @@ One row per sequencing project (one folder of FASTQ files).
   integrity issues**.
 - Click a row to see, below the table, a plain explanation of any mapfile
   problem and a list of every problem file (missing, extra, damaged, or empty).
+- Status cells are tinted; see [Dismissing issues](#dismissing-issues).
 
 ### Samples
 
@@ -176,6 +177,7 @@ One row per sample.
 - The CSV download has more than the screen: full R1/R2 paths, NCBI taxid, and
   lineage.
 - Click a row to list that sample's files.
+- Status cells are tinted; see [Dismissing issues](#dismissing-issues).
 
 ### Files
 
@@ -187,6 +189,7 @@ One row per FASTQ file.
 - Sidebar: filter by project, backup status, integrity, or search by sample or
   filename.
 - Click a row to see its sample.
+- Status cells are tinted; see [Dismissing issues](#dismissing-issues).
 
 `owner_name` is the Hydra user who owns the files on disk. It is personal
 information: do not share exports that include it outside your lab.
@@ -262,6 +265,47 @@ same file), `extra_cells` (row had more cells than the header).
 `fuzzy`, `near`, and `review` mean the name was a guess; `unresolved` means no
 match.
 
+### Dismissing issues
+
+Some problems are known and harmless, for example a file you never plan to
+fix. Any GUI user can dismiss an issue. Dismissing only hides it: nothing in the
+catalog changes. Dismissals are shared, so everyone sees them.
+
+- **Projects**: select a project. Next to the mapfile warning is **Dismiss
+  mapfile issue**. In the **Data-files issues** table, tick rows and press
+  **Dismiss selected (n)**, or press **Dismiss all (N)**. The table also lists
+  md5 mismatches, and shows each file's path.
+- **Samples**: select a sample, then **Dismiss flags for this sample** under the
+  table.
+- **Files**: select a file, then press the Dismiss button next to each problem
+  listed under the table (gzip error, format error, empty, md5 mismatch).
+
+Add a short **Note** to say why. "Unchecked", "Not verified", and "Not
+compared" cannot be dismissed, because they are not problems yet.
+
+A cell whose issues are all dismissed reads `OK *`. A cell with some issues
+dismissed keeps its live text plus ` *`. Tick **Show dismissed** in the sidebar
+to see everything again: cells show the full text plus `(n dismissed)`, dismissed
+rows come back in the issues table with who dismissed them, when, and the note,
+and an **Undo** button appears.
+
+A dismissal covers the exact state you dismissed. If the problem changes (more
+flagged rows, a different error), it shows again. A dismissal stays until
+someone undoes it. In Grab & Go, a file whose problems are all dismissed is
+copied like any other, and its sample reads `ok *`.
+
+Status cells in Projects, Samples, and Files are tinted by what they say:
+
+| Color | Meaning |
+|---|---|
+| Vermillion | Error: corrupt, empty, or missing file, md5 mismatch, no or broken mapfile |
+| Orange | Warning: file on disk but not in the mapfile, flagged rows, sample flags |
+| Sky blue | Dismissed |
+| Grey | Not yet checked: unchecked, not verified, not compared, incomplete |
+| No color | OK |
+
+Every colored cell also says what it means in words.
+
 ## Grab & Go
 
 1. **Search.** In the sidebar, filter by project, taxonomy (matches the typed
@@ -277,7 +321,9 @@ match.
    file that is corrupt, empty, missing on disk, or not yet checked. Select rows
    and click **Remove selected** to drop them. If some files have problems, a
    warning appears with a check box (on by default) that leaves those files out
-   of the copy job and the MitoPilot map.
+   of the copy job and the MitoPilot map. A file whose problems are all
+   [dismissed](#dismissing-issues) is not a problem file: it goes into the copy
+   job, the size estimate, and the MitoPilot map.
 4. **Export.**
    - **Download table CSV**: one row per sample, with names, taxonomy, read
      counts, and full `r1_path` / `r2_path`.

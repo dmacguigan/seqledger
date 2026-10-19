@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Dismissable GUI issues. Any user can dismiss a mapfile issue, a data-files
+  problem, a sample's flags, or a file's problem from Projects, Samples, and
+  Files. Dismissals are shared and only hide the issue; the catalog is not
+  changed. Cells read `OK *` (or the live text plus ` *`), **Show dismissed**
+  brings them back with an **Undo** button, and files with only dismissed
+  problems are included in Grab & Go copies. Dismissals live in a hidden
+  `.<catalog name>_dismissed.tsv` next to the catalog.
+- Status cells are tinted: vermillion for errors, orange for warnings, sky blue
+  for dismissed, grey for not yet checked.
+- `init-db` records the dismissals log path in the config key `dismiss_log`, so
+  Scratch copies of the catalog use the master's log. Back up the catalog, then
+  re-run `init-db` on the master so copies find the log.
+
+### Changed
+
+- The Projects "Data-files issues" table also lists md5 mismatches, and the
+  integrity rows show each file's relative path.
+- Minimum pandas is now 2.1 (was 2.0).
+
 ## [0.3.0] - 2026-10-19
 
 ### Added

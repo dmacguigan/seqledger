@@ -267,3 +267,17 @@ def test_version_flag(capsys):
         cli.main(["--version"])
     assert e.value.code == 0
     assert capsys.readouterr().out.startswith("seqledger ")
+
+
+def test_init_db_records_dismiss_log_once(tmp_path):
+    from seqledger import db as odb
+    db = str(tmp_path / "cat.db")
+    assert _run(["--db", db, "init-db"]) == 0
+    con = odb.connect(db)
+    assert odb.get_config(con, "dismiss_log") == str(tmp_path / ".cat_dismissed.tsv")
+    con.close()
+    assert _run(["--db", db, "init-db", "--set", "dismiss_log=/store/x/.log.tsv"]) == 0
+    assert _run(["--db", db, "init-db"]) == 0
+    con = odb.connect(db)
+    assert odb.get_config(con, "dismiss_log") == "/store/x/.log.tsv"
+    con.close()

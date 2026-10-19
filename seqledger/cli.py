@@ -24,6 +24,7 @@ from urllib.error import URLError
 
 from seqledger import __version__
 from seqledger import db as odb
+from seqledger import dismiss
 from seqledger import ingest as oingest
 from seqledger import checksums as ochecksums
 from seqledger import validate as ovalidate
@@ -105,6 +106,8 @@ def cmd_init_db(args):
     except ValueError as e:
         conn.close()
         sys.exit(str(e))
+    if not odb.get_config(conn, "dismiss_log"):
+        odb.set_config(conn, "dismiss_log", dismiss.default_log_path(os.path.abspath(args.db)))
     conn.commit()
 
     conn.close()

@@ -364,3 +364,331 @@ def test_grab_and_go_flags_problem_files_and_lane_splits(tmp_path, monkeypatch):
     # unticking the exclude box puts the problem files back in the job
     at.checkbox[0].uncheck().run()
     assert any("Script preview (6 files total" in e.label for e in at.expander)
+
+
+def test_grab_and_go_includes_files_with_dismissed_problems(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    from seqledger import dismiss
+    p = _grab_catalog(tmp_path)
+    log = dismiss.default_log_path(p)
+    dismiss.append(log, "dismiss", dismiss.file_key("P1", "P1/s2_R1.fastq.gz", "gzip error"), "u")
+    dismiss.append(log, "dismiss", dismiss.file_key("P1", "P1/s2_R2.fastq.gz", "missing from disk"), "u")
+    monkeypatch.setenv("SEQLEDGER_DB", p)
+    at = AppTest.from_file(_APP_PATH, default_timeout=30)
+    at.session_state["cart"] = {f"P1\t{s}": {"project_id": "P1", "sample_id": s} for s in ("s1", "s2")}
+    at.run()
+    at.sidebar.radio[0].set_value("Grab & Go").run()
+    table = at.dataframe[1].value
+    assert table[table["sample_id"] == "s2"].iloc[0]["files_ok"] == "ok *"
+    assert not any("files in the cart are corrupt" in w.value for w in at.warning)
+    dest = next(t for t in at.text_input if t.label.startswith("Destination"))
+    dest.set_value("/pool/dest").run()
+    assert any("Script preview (6 files total" in e.label for e in at.expander)
+
+
+def _issues_df(rows):
+    cols = ["project_id", "kind", "filename"]
+    return pd.DataFrame(rows, columns=cols).assign(full_path="", sample_id="", direction="",
+                                                   taxon="", uniq_id="", uniq_id_url="")
+
+def _prow(**kw):
+    base = dict(project_id="P1", metadata_status="ok", metadata_detail="", data_check_status="issues",
+                data_check_n_missing=0, data_check_n_orphan=0, n_files=4, n_integrity_ok=4,
+                n_integrity_bad=0, n_integrity_empty=0, n_mismatch=0, n_uncompared=0)
+    base.update(kw); return pd.Series(base)
+
+def test_project_status_rolls_up_live_and_dismissed():
+    from seqledger import dismiss
+    issues = _issues_df([("P1", "missing from mapfile", "P1/Run1/a.gz"),
+                         ("P1", "missing from mapfile", "P1/Run2/a.gz"),
+                         ("P1", "missing from disk", "P1/b.gz"),
+                         ("P1", "md5 mismatch", "P1/b.gz"),
+                         ("P1", "gzip error", "P1/c.gz")])
+    prow = _prow(data_check_n_missing=1, data_check_n_orphan=2, n_integrity_bad=1,
+                 n_integrity_ok=3, n_mismatch=1)
+    none = app._mark_issues(issues, {})
+    s = app._project_status(prow, none, {}, False)
+    assert s["data_files"] == "1 file(s) in mapfile not on disk, 2 file(s) on disk, not in mapfile"
+    assert s["integrity"] == "1 corrupt" and s["checksum"] == "1 file(s) differ between Store and P-drive"
+    d = {dismiss.file_key("P1", "P1/Run1/a.gz", "missing from mapfile"): {"user": "u", "time": "t", "note": ""},
+         dismiss.file_key("P1", "P1/b.gz", "missing from disk"): {"user": "u", "time": "t", "note": ""},
+         dismiss.file_key("P1", "P1/c.gz", "gzip error"): {"user": "u", "time": "t", "note": ""}}
+    marked = app._mark_issues(issues, d)
+    assert list(marked["dismissed"]) == [True, False, True, False, True]
+    s = app._project_status(prow, marked, d, False)
+    assert s["data_files"] == "1 file(s) on disk, not in mapfile *"
+    assert s["integrity"] == "OK *"
+    assert s["checksum"] == "1 file(s) differ between Store and P-drive"   # md5 key untouched
+    s = app._project_status(prow, marked, d, True)
+    assert s["data_files"] == "1 file(s) in mapfile not on disk, 2 file(s) on disk, not in mapfile (2 dismissed)"
+    assert s["integrity"] == "1 corrupt (1 dismissed)"
+
+def test_project_status_mapfile_and_incomplete_variants():
+    from seqledger import dismiss
+    prow = _prow(metadata_status="flagged", metadata_detail="3 rows\tflagged", n_integrity_ok=2,
+                 n_integrity_bad=1, n_uncompared=2, n_mismatch=1)
+    issues = app._mark_issues(_issues_df([("P1", "gzip error", "P1/c.gz"),
+                                          ("P1", "md5 mismatch", "P1/c.gz")]), {})
+    s = app._project_status(prow, issues, {}, False)
+    assert s["mapfile"] == "flagged rows"
+    d = {dismiss.project_key("P1", "flagged", "3 rows\tflagged"): {"user": "u", "time": "t", "note": ""},
+         dismiss.file_key("P1", "P1/c.gz", "gzip error"): {"user": "u", "time": "t", "note": ""},
+         dismiss.file_key("P1", "P1/c.gz", "md5 mismatch"): {"user": "u", "time": "t", "note": ""}}
+    issues = app._mark_issues(issues, d)
+    s = app._project_status(prow, issues, d, False)
+    assert s["mapfile"] == "OK *"
+    assert s["integrity"] == "incomplete (1 unchecked) *"
+    assert s["checksum"] == "incomplete (2 not compared) *"
+    assert app._project_status(prow, issues, d, True)["mapfile"] == "flagged rows (dismissed)"
+
+def test_severity_and_tint():
+    sv = app._severity
+    assert sv("gzip error") == "error" and sv("1 corrupt") == "error" and sv("Mismatch") == "error"
+    assert sv("missing from mapfile") == "warning" and sv("na_uniqid") == "warning"
+    assert sv("unchecked") == "pending" and sv("incomplete (2 unchecked)") == "pending"
+    assert sv("OK *") == "dismissed" and sv("OK") == "ok" and sv("") == "ok" and sv("Verified") == "ok"
+    assert sv("1 corrupt *") == "error"
+    assert sv("ok *") == "dismissed"
+    assert sv("unchecked (data folder not found: /x/empty_runs)") == "pending"
+    assert sv("1 corrupt (2 dismissed)") == "dismissed" and sv("flagged rows (dismissed)") == "dismissed"
+    styler = app._tint(pd.DataFrame({"integrity": ["gzip error", "ok"], "x": [1, 2]}), ["integrity", "nope"])
+    html = styler.to_html()
+    assert "rgba(213, 94, 0, 0.30)" in html
+
+def test_file_problem_honours_dismissals():
+    from seqledger import dismiss
+    r = {"project_id": "P1", "rel_path": "P1/x.gz", "integrity_status": "gzip_error", "n_reads": None}
+    assert app._file_problem(r) == "corrupt"
+    d = {dismiss.file_key("P1", "P1/x.gz", "gzip error"): {}}
+    assert app._file_problem(r, d) == "dismissed"
+    m = {"project_id": "P1", "rel_path": "P1/y.gz", "integrity_status": "ok", "n_reads": 5, "missing_on_disk": 1}
+    assert app._file_problem(m, {dismiss.file_key("P1", "P1/y.gz", "missing from disk"): {}}) == "dismissed"
+    assert app._files_ok(["ok", "dismissed"]) == "ok *"
+    assert app._files_ok(["corrupt", "dismissed"]) == "1 corrupt *"
+
+def test_md5_issues_loader(tmp_path):
+    p = _grab_catalog(tmp_path)
+    con = sqlite3.connect(p)
+    con.execute("UPDATE files SET md5_match=0 WHERE rel_path='P1/s2_R2.fastq.gz'")
+    con.commit(); con.close()
+    df = app.load_md5_issues(p, os.path.getmtime(p))
+    assert list(df["kind"]) == ["md5 mismatch"] and list(df["filename"]) == ["P1/s2_R2.fastq.gz"]
+    integ = app.load_integrity_issues(p, os.path.getmtime(p))
+    assert list(integ["filename"]) == ["P1/s2_R1.fastq.gz"]   # rel_path, not basename
+
+
+def _issues_catalog(tmp_path):
+    p = _grab_catalog(tmp_path)
+    con = sqlite3.connect(p)
+    con.execute("UPDATE projects SET data_check_status='issues', data_check_n_missing=1, "
+                "metadata_status='flagged', metadata_detail='1 row flagged' WHERE project_id='P1'")
+    con.execute("UPDATE files SET md5_match=(rel_path != 'P1/s2_R2.fastq.gz')")
+    con.commit(); con.close()
+    return p
+
+def _select(at, key, rows):
+    # A browser keeps table selections across reruns; AppTest drops them, so re-apply.
+    from streamlit.proto.WidgetStates_pb2 import WidgetStates
+    from streamlit.testing.v1.element_tree import get_widget_state
+    if not hasattr(at, "_sel"):
+        at._sel, run = {}, at._run
+
+        def _run(*a, **kw):
+            for k, r in at._sel.items():
+                at.session_state[k] = {"selection": {"rows": r, "columns": []}}
+            return run(*a, **kw)
+        at._run = _run
+    at._sel[key] = rows
+    # AppTest keeps widgets that an st.rerun() removed; skip them.
+    ws = WidgetStates()
+    for node in at._tree:
+        try:
+            w = get_widget_state(node)
+        except KeyError:
+            continue
+        if w is not None:
+            ws.widgets.append(w)
+    return at._run(ws)
+
+def _button(at, label):
+    return next(b for b in at.button if b.label.startswith(label))
+
+def test_projects_dismiss_all_then_show_and_undo(tmp_path, monkeypatch):
+    from seqledger import dismiss
+    p = _issues_catalog(tmp_path)
+    at = _apptest(monkeypatch, p, "Projects")
+    _select(at, _table_key(at, "projects_table_"), [0])
+    assert at.dataframe[0].value.iloc[0]["data_files"] == "1 file(s) in mapfile not on disk"
+    assert any("1 row flagged" in w.value for w in at.warning)
+    issues = at.dataframe[1].value
+    assert sorted(issues["issue"]) == ["gzip error", "md5 mismatch", "missing from disk"]
+    _button(at, "Dismiss all (3)").click().run()
+    _select(at, _table_key(at, "projects_table_"), [0])
+    row = at.dataframe[0].value.iloc[0]
+    assert row["data_files"] == "OK *" and row["integrity"] == "OK *" and row["checksum"] == "OK *"
+    assert "Data-files issues" in " ".join(h.value for h in at.subheader)
+    assert len(at.dataframe) == 1   # no live rows: table replaced by an info line
+    assert any("3 issue(s) dismissed" in i.value for i in at.info)
+    log, _ = dismiss.read(dismiss.default_log_path(p))
+    assert len(log) == 3
+    # mapfile dismiss
+    at.text_input(key="note_mapfile").set_value("**bold** [x](y)")
+    _button(at, "Dismiss mapfile issue").click().run()
+    _select(at, _table_key(at, "projects_table_"), [0])
+    assert at.dataframe[0].value.iloc[0]["mapfile"] == "OK *"
+    assert not at.warning
+    assert any("Mapfile: OK *" in i.value and "\\*\\*bold\\*\\* \\[x\\]\\(y\\)" in i.value
+               for i in at.info)
+    # show dismissed -> rows back with who/when, undo one
+    at.sidebar.checkbox[-1].check().run()
+    _select(at, _table_key(at, "projects_table_"), [0])
+    issues = at.dataframe[1].value
+    assert len(issues) == 3 and set(issues["dismissed_by"]) != {""}
+    assert all(i.endswith(" (dismissed)") for i in issues["issue"])
+    assert at.dataframe[0].value.iloc[0]["mapfile"] == "flagged rows (dismissed)"
+    at.sidebar.checkbox[0].check().run()   # Only mapfile issues: tests live labels
+    assert len(at.dataframe[0].value) == 0
+    at.sidebar.checkbox[0].uncheck().run()
+    _select(at, _table_key(at, "projects_table_"), [0])
+    _select(at, _table_key(at, "issues_table_P1"), [0])
+    _button(at, "Undo selected (1)").click().run()
+    assert len(dismiss.read(dismiss.default_log_path(p))[0]) == 3   # 4 dismissed, 1 undone
+
+def test_projects_dismiss_unwritable_log_shows_hint(tmp_path, monkeypatch):
+    p = _issues_catalog(tmp_path)
+    log = tmp_path / ".cat_dismissed.tsv"
+    log.write_text("")
+    log.chmod(0o444)
+    if os.access(str(log), os.W_OK):
+        pytest.skip("running as root")
+    at = _apptest(monkeypatch, p, "Projects")
+    _select(at, _table_key(at, "projects_table_"), [0])
+    _button(at, "Dismiss all").click().run()
+    assert not at.exception
+    assert any("chmod 664" in e.value for e in at.error)
+
+def test_projects_sidebar_reports_unreadable_lines(tmp_path, monkeypatch):
+    p = _issues_catalog(tmp_path)
+    (tmp_path / ".cat_dismissed.tsv").write_text("junk\n")
+    at = _apptest(monkeypatch, p, "Projects")
+    assert any("1 unreadable line(s)" in c.value for c in at.sidebar.caption)
+
+def _capture_downloads(monkeypatch):
+    import streamlit as st
+    got = {}
+    monkeypatch.setattr(st, "download_button",
+                        lambda label, data, name, *a, **kw: got.__setitem__(name, data))
+    return got
+
+def _download_frame(got, suffix):
+    import io
+    return pd.read_csv(io.BytesIO(next(v for k, v in got.items() if k.endswith(suffix))))
+
+def test_samples_dismiss_flags(tmp_path, monkeypatch):
+    from seqledger import dismiss
+    p = _issues_catalog(tmp_path)
+    con = sqlite3.connect(p); con.execute("UPDATE samples SET flags='na_uniqid' WHERE sample_id='s1'")
+    con.commit(); con.close()
+    got = _capture_downloads(monkeypatch)
+    at = _apptest(monkeypatch, p, "Samples")
+    key = _table_key(at, "samples_table_")
+    i = list(at.dataframe[0].value["sample_id"]).index("s1")
+    _select(at, key, [i])
+    _button(at, "Dismiss flags for this sample").click().run()
+    assert at.dataframe[0].value.iloc[i]["flags"] == "OK *"
+    assert dismiss.sample_key("P1", "s1", "na_uniqid") in dismiss.read(dismiss.default_log_path(p))[0]
+    csv = _download_frame(got, "_samples.csv")
+    assert csv.loc[csv["sample_id"] == "s1", "flags"].iloc[0] == "na_uniqid"
+    assert any("turn on 'Show dismissed' to see it" in c.value for c in at.caption)
+    at.sidebar.checkbox[-1].check().run()
+    assert at.dataframe[0].value.iloc[i]["flags"] == "na_uniqid (dismissed)"
+    at.sidebar.radio[0].set_value("Grab & Go").run()
+    at.sidebar.radio[0].set_value("Samples").run()
+    assert at.sidebar.checkbox[-1].value is True
+
+def test_files_dismiss_integrity_and_md5(tmp_path, monkeypatch):
+    p = _issues_catalog(tmp_path)
+    got = _capture_downloads(monkeypatch)
+    at = _apptest(monkeypatch, p, "Files")
+    key = _table_key(at, "files_table_")
+    df = at.dataframe[0].value
+    i = list(df["filename"]).index("s2_R1.fastq.gz")   # gzip_error
+    _select(at, key, [i])
+    _button(at, "Dismiss gzip error").click().run()
+    assert at.dataframe[0].value.iloc[i]["integrity"] == "OK *"
+    j = list(at.dataframe[0].value["filename"]).index("s2_R2.fastq.gz")   # md5 mismatch
+    _select(at, key, [j])
+    _button(at, "Dismiss md5 mismatch").click().run()
+    assert at.dataframe[0].value.iloc[j]["backup"] == "OK *"
+    csv = _download_frame(got, "_files.csv").set_index("filename")
+    assert csv.loc["s2_R1.fastq.gz", "integrity"] == "gzip_error"
+    assert csv.loc["s2_R2.fastq.gz", "backup"] == "Mismatch"
+    assert any("turn on 'Show dismissed' to see it" in c.value for c in at.caption)
+    # the integrity filter no longer returns the dismissed file
+    sel = next(s for s in at.sidebar.selectbox if s.label == "Integrity")
+    sel.set_value("gzip_error").run()
+    assert "s2_R1.fastq.gz" not in list(at.dataframe[0].value["filename"])
+
+def _labels():
+    dl, cl, il, fo = (app.ovalidate.data_label, app.ovalidate.checksum_label,
+                      app.integrity_label, app._files_ok)
+    ints = {"n_files": 3, "n_integrity_ok": 3, "n_integrity_bad": 0, "n_integrity_empty": 0}
+    cs = {"n_files": 3, "n_mismatch": 0, "n_uncompared": 0}
+    return [
+        (dl({"status": "ok"}), "ok"),
+        (dl({"status": "unchecked"}), "pending"),
+        (dl({"status": "unchecked", "detail": "data folder not found: /x"}), "pending"),
+        (dl({"status": "issues", "n_missing": 1, "n_orphan": 0}), "error"),
+        (dl({"status": "issues", "n_missing": 0, "n_orphan": 2}), "warning"),
+        (dl({"status": "issues", "n_missing": 1, "n_orphan": 2}), "error"),
+        (cl({**cs, "n_files": 0}), "pending"),
+        (cl({**cs, "n_mismatch": 1}), "error"),
+        (cl({**cs, "n_uncompared": 2}), "pending"),
+        (cl(cs), "ok"),
+        (il({**ints, "n_files": 0}), "pending"),
+        (il({**ints, "n_integrity_ok": 2, "n_integrity_bad": 1}), "error"),
+        (il({**ints, "n_integrity_empty": 1}), "error"),
+        (il({**ints, "n_integrity_ok": 0}), "pending"),
+        (il({**ints, "n_integrity_ok": 2}), "pending"),
+        (il(ints), "ok"),
+    ] + [(app._MAPFILE_LABEL[k], v) for k, v in (
+        ("ok", "ok"), ("missing_mapfile", "error"), ("missing_seqdata", "error"),
+        ("broken_mapfile", "error"), ("invalid_mapfile", "error"), ("flagged", "warning"))
+    ] + [
+        (fo([]), "pending"), (fo(["ok"]), "ok"), (fo(["ok", "dismissed"]), "dismissed"),
+        (fo(["missing"]), "error"), (fo(["missing", "unchecked"]), "error"),
+        (fo(["missing", "dismissed"]), "error"), (fo(["empty"]), "error"),
+        (fo(["corrupt", "dismissed"]), "error"), (fo(["unchecked"]), "pending"),
+        ("Verified", "ok"), ("Mismatch", "error"), ("Not compared", "pending"),
+        ("ok", "ok"), ("gzip_error", "error"), ("format_error", "error"), ("unchecked", "pending"),
+        ("missing from disk", "error"), ("missing from mapfile", "warning"),
+        ("md5 mismatch", "error"), ("empty (0 reads)", "error"),
+        ("gzip error (dismissed)", "dismissed"), ("missing from mapfile (dismissed)", "dismissed"),
+    ]
+
+@pytest.mark.parametrize("label,severity", _labels())
+def test_severity_of_real_labels(label, severity):
+    assert app._severity(label) == severity
+
+def test_tint_skips_styler_on_large_frames():
+    big = pd.DataFrame("x", index=range(10001), columns=[f"c{i}" for i in range(11)])
+    assert isinstance(app._tint(big, ["c0"]), pd.DataFrame)
+    assert not isinstance(app._tint(pd.DataFrame({"c0": ["x"]}), ["c0"]), pd.DataFrame)
+
+def test_projects_unavailable_log_hides_dismiss(tmp_path, monkeypatch):
+    p = _issues_catalog(tmp_path)
+    con = sqlite3.connect(p)
+    con.execute("INSERT OR REPLACE INTO config(key, value) VALUES ('dismiss_log', ?)",
+                (str(tmp_path / "nope" / ".x.tsv"),))
+    con.commit(); con.close()
+    at = _apptest(monkeypatch, p, "Projects")
+    _select(at, _table_key(at, "projects_table_"), [0])
+    assert not at.exception
+    assert any("Dismissals unavailable" in c.value for c in at.sidebar.caption)
+    assert len(at.dataframe) == 2
+    assert not any(b.label.startswith(("Dismiss", "Undo")) for b in at.button)
+
+def test_projects_only_checksum_keeps_uncompared(tmp_path, monkeypatch):
+    at = _apptest(monkeypatch, _make_catalog(tmp_path), "Projects")
+    next(c for c in at.sidebar.checkbox if c.label == "Only checksum issues").check().run()
+    assert list(at.dataframe[0].value["project_id"]) == ["P1"]

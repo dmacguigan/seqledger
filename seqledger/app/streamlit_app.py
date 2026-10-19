@@ -730,19 +730,23 @@ def projects_view(df, issues, integ_issues, md5_issues):
     all_issues = _mark_issues(pd.concat([issues, integ_issues, md5_issues], ignore_index=True),
                               dismissed)
     by_pid = dict(list(all_issues.groupby("project_id")))
-    status = [_project_status(r, by_pid.get(r["project_id"], all_issues.iloc[:0]),
-                              dismissed, show_dismissed) for r in df.to_dict("records")]
-    view = df.assign(**{c: [s[c] for s in status] for c in _STATUS_COLS})
+    def statuses(show):
+        return pd.DataFrame([_project_status(r, by_pid.get(r["project_id"], all_issues.iloc[:0]),
+                                             dismissed, show) for r in df.to_dict("records")],
+                            columns=_STATUS_COLS, index=df.index)
+
+    live_lab = statuses(False)
+    view = df.join(statuses(True) if show_dismissed else live_lab)
     if search:
         s = search.lower()
         mask = (_contains(view["project_id"], s) | _contains(view["description"], s))
         view = view[mask]
 
     def bad(col):
-        return view[col].map(_severity).isin(["error", "warning"])
+        return live_lab.loc[view.index, col].map(_severity).isin(["error", "warning"])
 
     if mapfile_only:
-        view = view[~view["mapfile"].astype(str).str.startswith("OK")]
+        view = view[~live_lab.loc[view.index, "mapfile"].astype(str).str.startswith("OK")]
     if data_only:
         view = view[bad("data_files")]
     if cs_only:
@@ -811,7 +815,7 @@ def projects_view(df, issues, integ_issues, md5_issues):
         icols += ["dismissed_by", "dismissed_on", "note"]
     ev = st.dataframe(
         _tint(rows[icols], ["issue"]), width="stretch", hide_index=True,
-        on_select="rerun", selection_mode="multi-row", key=f"issues_table_{pid}",
+        on_select="rerun", selection_mode="multi-row", key=f"issues_table_{pid}_{hash(tuple(zip(rows['filename'], rows['kind'])))}",
         column_config={"full_path": "expected_path",
                        "uniq_id_url": _uniqid_link_col()})
     _download(rows, f"{pid}_data_issues.csv")

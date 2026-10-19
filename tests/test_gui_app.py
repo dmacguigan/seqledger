@@ -523,7 +523,11 @@ def test_projects_dismiss_all_then_show_and_undo(tmp_path, monkeypatch):
     issues = at.dataframe[1].value
     assert len(issues) == 3 and set(issues["dismissed_by"]) != {""}
     assert at.dataframe[0].value.iloc[0]["mapfile"] == "flagged rows (dismissed)"
-    _select(at, f"issues_table_P1", [0])
+    at.sidebar.checkbox[0].check().run()   # Only mapfile issues: tests live labels
+    assert len(at.dataframe[0].value) == 0
+    at.sidebar.checkbox[0].uncheck().run()
+    _select(at, _table_key(at, "projects_table_"), [0])
+    _select(at, _table_key(at, "issues_table_P1"), [0])
     _button(at, "Undo selected (1)").click().run()
     assert len(dismiss.read(dismiss.default_log_path(p))[0]) == 3   # 4 dismissed, 1 undone
 

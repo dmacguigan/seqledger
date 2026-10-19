@@ -22,7 +22,7 @@ Contents
 ## Global flags
 
 ```
-usage: seqledger [-h] [--db DB] [--debug] [-v]
+usage: seqledger [-h] [--db DB] [--debug] [-v] [--version]
                  {init-db,ingest,checksums,validate,integrity,query,taxonomy,gui}
                  ...
 
@@ -30,8 +30,8 @@ seqledger: sequence-data catalog CLI
 
 positional arguments:
   {init-db,ingest,checksums,validate,integrity,query,taxonomy,gui}
-    init-db             create/upgrade the catalog schema; optionally set per-
-                        catalog config
+    init-db             create the catalog schema; optionally set per-catalog
+                        config
     ingest              auto-discover projects from a seqdata + metadata dir;
                         auto-run taxonomy, refresh data-files check (integrity
                         is a separate step)
@@ -50,6 +50,7 @@ options:
   --debug               show the full traceback on error instead of a one-line
                         message
   -v, --verbose         more detail: -v per project, -vv per file
+  --version             show program's version number and exit
 ```
 
 - `--db PATH`: the catalog file. Default: `$SEQLEDGER_DB` if set, else
@@ -58,7 +59,7 @@ options:
   `seqledger query summary --db /path/to/catalog.db` are the same).
 - `-v`, `-vv`: more detail, before or after the subcommand.
 - `--debug`: print the full Python traceback instead of a one-line `error:`.
-  Only accepted before the subcommand: `seqledger --debug ingest`.
+  Before or after the subcommand.
 - Every command except `init-db` stops with `no catalog at '<path>'` (exit 1) if
   the catalog file does not exist, instead of creating an empty one.
 - Run without installing: `python -m seqledger` from the repository root.
@@ -81,8 +82,9 @@ options:
 | Code | Meaning |
 |---|---|
 | 0 | Ran cleanly. Warnings (flagged rows, files not yet checked) do not change this |
-| 1 | Problems found: `ingest` rejected a project; `validate` found missing or extra files or an md5 mismatch; `integrity` found a gzip or format error; `checksums` found an md5 mismatch. Also any error that stops a command (`no catalog at`, `error: <message>`, a bad `--set` value, a missing root folder) |
+| 1 | Problems found: `ingest` rejected a project; `validate` found missing or extra files or an md5 mismatch; `integrity` found a gzip or format error; `checksums` found an md5 mismatch. Also any error that stops a command (`no catalog at`, `error: <message>`, a bad `--set` key or value, a missing root folder) |
 | 2 | Refused or usage error: a prune refused (no `--yes` without a terminal, an answer other than yes, or a safety refusal of `--prune-projects`); `integrity --batch` could not run `qsub`; bad command-line arguments; `seqledger` with no subcommand outside a terminal |
+| 130 | Interrupted with Ctrl-C |
 
 `query`, `taxonomy`, and `gui` exit 0 unless they hit an error (exit 1) or a usage
 error (exit 2).
@@ -97,18 +99,19 @@ creates one with `init-db`.
 ## init-db
 
 ```
-usage: seqledger init-db [-h] [--db DB] [-v] [--name NAME]
+usage: seqledger init-db [-h] [--db DB] [--debug] [-v] [--name NAME]
                          [--seqdata-root SEQDATA_ROOT]
                          [--metadata-root METADATA_ROOT] [--set KEY=VALUE]
                          [--show]
 
-Create/upgrade the catalog schema and set config. --show only prints the config (read-only).
+Create or configure the catalog schema and set config. --show only prints the config (read-only).
 
 options:
   -h, --help            show this help message and exit
   --db DB               path to catalog SQLite DB
+  --debug               show the full traceback on error
   -v, --verbose         more detail: -v per project, -vv per file
-  --name NAME           catalog display name (GUI title / CLI banner)
+  --name NAME           catalog display name (GUI title)
   --seqdata-root SEQDATA_ROOT
                         default root of raw_sequence_data for this catalog
   --metadata-root METADATA_ROOT
@@ -147,7 +150,8 @@ seqledger --db /path/to/catalog.db init-db --show
 ## ingest
 
 ```
-usage: seqledger ingest [-h] [--db DB] [-v] [--metadata-root METADATA_ROOT]
+usage: seqledger ingest [-h] [--db DB] [--debug] [-v]
+                        [--metadata-root METADATA_ROOT]
                         [--seqdata-root SEQDATA_ROOT] [--taxdir TAXDIR]
                         [--skip-taxonomy] [--prune] [--prune-projects] [--yes]
 
@@ -157,6 +161,7 @@ any project FAILs, 2 if a prune is refused.
 options:
   -h, --help            show this help message and exit
   --db DB               path to catalog SQLite DB
+  --debug               show the full traceback on error
   -v, --verbose         more detail: -v per project, -vv per file
   --metadata-root METADATA_ROOT
                         dir holding the per-project '<project>_mapfile.csv'
@@ -167,11 +172,11 @@ options:
   --taxdir TAXDIR       taxdump dir (default: <db dir>/.taxonomy)
   --skip-taxonomy       skip the taxonomy step
   --prune               delete catalog samples/files the CSV no longer lists
-                        (then re-run `validate --seqdata-root`)
   --prune-projects      delete whole catalog projects that vanished from BOTH
                         the seqdata and metadata dirs (cascades to their
-                        samples/files). Refuses to run if the roots turn up no
-                        projects, so a missing mount can't wipe the catalog.
+                        samples/files). Refuses if a root is missing, turns up
+                        no projects, or more than half of the root's projects
+                        would go, so a missing mount can't wipe the catalog.
   --yes                 skip the confirmation prompt for --prune / --prune-
                         projects
 ```
@@ -196,9 +201,9 @@ options:
 ## checksums
 
 ```
-usage: seqledger checksums [-h] [--db DB] [-v] --store STORE --pdrive PDRIVE
-                           [--project PROJECT] [--source {ingest,backfill}]
-                           [--full] [--force]
+usage: seqledger checksums [-h] [--db DB] [--debug] [-v] --store STORE
+                           --pdrive PDRIVE [--project PROJECT]
+                           [--source {ingest,backfill}] [--full] [--force]
 
 Load + compare rclone md5sum output from Store and P-drive. Exits 1 on any md5
 mismatch.
@@ -206,11 +211,14 @@ mismatch.
 options:
   -h, --help            show this help message and exit
   --db DB               path to catalog SQLite DB
+  --debug               show the full traceback on error
   -v, --verbose         more detail: -v per project, -vv per file
   --store STORE         rclone md5sum output for Store
   --pdrive PDRIVE       rclone md5sum output for P-drive
   --project PROJECT     limit to one project_id
   --source {ingest,backfill}
+                        label stored on the md5 rows (default backfill; ingest
+                        only for listings made at ingest time)
   --full                also reset files in projects absent from the listings
   --force               load even if a listing looks truncated
 ```
@@ -229,7 +237,8 @@ options:
 ## validate
 
 ```
-usage: seqledger validate [-h] [--db DB] [-v] [--seqdata-root SEQDATA_ROOT]
+usage: seqledger validate [-h] [--db DB] [--debug] [-v]
+                          [--seqdata-root SEQDATA_ROOT]
 
 Re-check the catalog (data-files + checksum). Exits 1 on missing/orphan files
 or md5 mismatches.
@@ -237,10 +246,11 @@ or md5 mismatches.
 options:
   -h, --help            show this help message and exit
   --db DB               path to catalog SQLite DB
+  --debug               show the full traceback on error
   -v, --verbose         more detail: -v per project, -vv per file
   --seqdata-root SEQDATA_ROOT
-                        root of raw_sequence_data; enables the on-disk data-
-                        files check
+                        root of raw_sequence_data (overrides the configured or
+                        stored root)
 ```
 
 - Runs the data-files check whether or not `--seqdata-root` is given. Root: the
@@ -252,11 +262,12 @@ options:
 ## integrity
 
 ```
-usage: seqledger integrity [-h] [--db DB] [-v] [--seqdata-root SEQDATA_ROOT]
-                           [--project PROJECT] [--jobs JOBS] [--force]
-                           [--batch] [--batch-dir BATCH_DIR] [--slots SLOTS]
-                           [--mem MEM] [--no-submit] [--only-unchecked]
-                           [--emit-json PATH] [--collect DIR]
+usage: seqledger integrity [-h] [--db DB] [--debug] [-v]
+                           [--seqdata-root SEQDATA_ROOT] [--project PROJECT]
+                           [--jobs JOBS] [--force] [--batch]
+                           [--batch-dir BATCH_DIR] [--slots SLOTS] [--mem MEM]
+                           [--no-submit] [--only-unchecked] [--emit-json PATH]
+                           [--collect DIR]
 
 gzip + FASTQ integrity check of cataloged files. Exits 1 on any gzip/format
 error, 2 if --batch qsub is missing or fails.
@@ -264,10 +275,12 @@ error, 2 if --batch qsub is missing or fails.
 options:
   -h, --help            show this help message and exit
   --db DB               path to catalog SQLite DB
+  --debug               show the full traceback on error
   -v, --verbose         more detail: -v per project, -vv per file
   --seqdata-root SEQDATA_ROOT
-                        root of raw_sequence_data (default: each project's
-                        stored root)
+                        root of raw_sequence_data (overrides the configured
+                        seqdata_root, which wins over each project's stored
+                        root)
   --project PROJECT     limit to one project_id
   --jobs JOBS           concurrent read streams (default: min(8, CPU count);
                         on a network mount try 16-32 to fill the pipe)
@@ -275,10 +288,11 @@ options:
                         are unchanged (default: skip those for a fast,
                         resumable run)
   --batch               generate a per-project qsub script and submit it to
-                        Hydra's I/O queue (lTIO.sq) for remote checking (the
-                        only way to reach the NAS/Store partition from a
-                        compute node); each job writes JSON results to merge
-                        later with --collect. Respects --project.
+                        the configured I/O queue (default lTIO.sq) for remote
+                        checking (the only way to reach the NAS/Store
+                        partition from a compute node); each job writes JSON
+                        results to merge later with --collect. Respects
+                        --project.
   --batch-dir BATCH_DIR
                         dir for generated batch scripts/logs/results (default:
                         ./integrity_batch)
@@ -314,15 +328,19 @@ options:
 ## taxonomy resolve
 
 ```
-usage: seqledger taxonomy resolve [-h] [--db DB] [-v]
+usage: seqledger taxonomy resolve [-h] [--db DB] [--debug] [-v]
                                   [--source {ncbi,worms,both}]
                                   [--taxdir TAXDIR] [--force-download]
                                   [--rebuild-index] [--refresh-unconfirmed]
                                   [--redo]
 
+Resolve taxa (NCBI taxdump and/or WoRMS) and write a review CSV next to the
+catalog.
+
 options:
   -h, --help            show this help message and exit
   --db DB               path to catalog SQLite DB
+  --debug               show the full traceback on error
   -v, --verbose         more detail: -v per project, -vv per file
   --source {ncbi,worms,both}
                         taxonomy source: ncbi (default, local taxdump), worms
@@ -348,14 +366,20 @@ options:
 ## taxonomy apply
 
 ```
-usage: seqledger taxonomy apply [-h] [--db DB] [-v] --review REVIEW
+usage: seqledger taxonomy apply [-h] [--db DB] [--debug] [-v] --review REVIEW
                                 [--source {ncbi,worms}] [--taxdir TAXDIR]
+
+Apply confirmed overrides from an edited review CSV.
 
 options:
   -h, --help            show this help message and exit
   --db DB               path to catalog SQLite DB
+  --debug               show the full traceback on error
   -v, --verbose         more detail: -v per project, -vv per file
-  --review REVIEW       edited review CSV
+  --review REVIEW       edited review CSV, written next to the catalog by
+                        `resolve` (taxonomy_review.csv or worms_review.csv;
+                        dated, e.g. taxonomy_review_YYYY-MM-DD.csv, if one
+                        already exists)
   --source {ncbi,worms}
                         which review CSV this is: ncbi (confirmed_taxid,
                         default) or worms (confirmed_aphia_id)
@@ -371,7 +395,7 @@ options:
 ## query
 
 ```
-usage: seqledger query [-h] [--db DB] [-v]
+usage: seqledger query [-h] [--db DB] [--debug] [-v]
                        {uniq-id,search,unbacked,mismatches,summary,taxa}
                        [term]
 
@@ -385,6 +409,7 @@ positional arguments:
 options:
   -h, --help            show this help message and exit
   --db DB               path to catalog SQLite DB
+  --debug               show the full traceback on error
   -v, --verbose         more detail: -v per project, -vv per file
 
 lookups:
@@ -423,23 +448,26 @@ Output is tab-separated; "(none)" goes to stderr when nothing matches.
 ## gui
 
 ```
-usage: seqledger gui [-h] [--db DB] [-v] [--port PORT]
+usage: seqledger gui [-h] [--db DB] [--debug] [-v] [--port PORT]
                      [--login-host LOGIN_HOST] [--qsub] [--queue QUEUE]
                      [--conda-env CONDA_ENV] [--mem MEM] [--wait WAIT]
+
+Launch the Streamlit browse GUI and print the SSH tunnel command.
 
 options:
   -h, --help            show this help message and exit
   --db DB               path to catalog SQLite DB
+  --debug               show the full traceback on error
   -v, --verbose         more detail: -v per project, -vv per file
-  --port PORT           server port (a free port is chosen automatically under
-                        --qsub)
+  --port PORT           server port (default 8501; a free port is chosen
+                        automatically under --qsub)
   --login-host LOGIN_HOST
                         Hydra login host for the SSH tunnel (default: catalog
                         config)
-  --qsub                run the GUI as a job on the I/O queue (lTIO.sq) so it
-                        reads the master catalog on Store directly (no Scratch
-                        copy); waits for it to start, then prints the tunnel
-                        command to screen
+  --qsub                run the GUI as a job on the configured I/O queue
+                        (default lTIO.sq) so it reads the master catalog on
+                        Store directly (no Scratch copy); waits for it to
+                        start, then prints the tunnel command to screen
   --queue QUEUE         queue for --qsub (default: catalog config, else
                         lTIO.sq)
   --conda-env CONDA_ENV

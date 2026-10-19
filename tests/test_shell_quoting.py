@@ -11,23 +11,17 @@ from seqledger import cli, gui
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import rclone as orclone
-from helpers import make_project, write_map_file
+from helpers import make_project
 
 
-def _fresh_db(tmp_path):
-    conn = odb.connect(os.path.join(tmp_path, "cat.db"))
-    odb.init_db(conn)
-    return conn
-
-
-def test_set_config_rejects_shell_metachar_in_script_key(tmp_path):
-    conn = _fresh_db(tmp_path)
+def test_set_config_rejects_shell_metachar_in_script_key(fresh_db):
+    conn = fresh_db
     with pytest.raises(ValueError, match="conda_env"):
         odb.set_config(conn, "conda_env", "seqledger; touch A B #")
 
 
-def test_set_config_rejects_newline_any_key(tmp_path):
-    conn = _fresh_db(tmp_path)
+def test_set_config_rejects_newline_any_key(fresh_db):
+    conn = fresh_db
     with pytest.raises(ValueError, match="io_queue"):
         odb.set_config(conn, "io_queue", "lTIO.sq\n#$ -M x@y -m bea")
     with pytest.raises(ValueError, match="newline"):
@@ -85,7 +79,7 @@ def test_copy_script_quotes_destination_with_quote_and_space():
     assert "DEST='/pool/my dir'\"'\"'; id'" in s
 
 
-def test_ingest_skips_filename_with_newline(tmp_path):
+def test_ingest_skips_filename_with_newline(tmp_path, fresh_db):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
     mapfile, _ = make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv",
@@ -95,9 +89,8 @@ def test_ingest_skips_filename_with_newline(tmp_path):
         w = csv.writer(f)
         w.writerow(["ID", "R1", "R2", "Taxon", "UniqID"])
         w.writerow(["s1", evil, "s1_2.fastq.gz", "Gadus", "U1"])
-    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
-    conn = _fresh_db(tmp_path)
-    findings = oingest.ingest_map_file(conn, map_file, seqdata_root=root)[0][1]
+    conn = fresh_db
+    findings = oingest.ingest_tree(conn, root, root)[0][1]
     rels = [r[0] for r in conn.execute("SELECT rel_path FROM files")]
     assert not any("\n" in r for r in rels), rels
     assert any("control character" in f.message for f in findings), \

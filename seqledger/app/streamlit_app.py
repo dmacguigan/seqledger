@@ -89,14 +89,10 @@ DB_PATH = os.environ.get("SEQLEDGER_DB", "catalog.db")
 # Full absolute path when the seqdata_root was captured at ingest, else the relpath.
 _FULL_PATH = "COALESCE(p.seqdata_root || '/' || f.rel_path, f.rel_path)"
 
-# data_check_issues.kind -> (short label, one-line explanation). Legacy rows
-# ('missing'/'orphan', written before the kind rename) map to the same text so
-# older catalogs still read clearly without a re-validate.
+# data_check_issues.kind -> (short label, one-line explanation).
 _ISSUE_LABEL = {
     "missing from disk":    "missing from disk",
-    "missing":              "missing from disk",
     "missing from mapfile": "missing from mapfile",
-    "orphan":               "missing from mapfile",
     # Integrity-check failures (files.integrity_status / n_reads), surfaced in the
     # same per-project issues table as the disk/mapfile checks.
     "gzip error":           "gzip error",
@@ -105,9 +101,7 @@ _ISSUE_LABEL = {
 }
 _ISSUE_DETAIL = {
     "missing from disk":    "Sequence file is listed in the mapfile but was not found on disk.",
-    "missing":              "Sequence file is listed in the mapfile but was not found on disk.",
     "missing from mapfile": "Sequence file is present on disk but is not referenced by any mapfile row.",
-    "orphan":               "Sequence file is present on disk but is not referenced by any mapfile row.",
     "gzip error":           "File is not valid gzip or is truncated (failed decompression / `gunzip -t`).",
     "format error":         "File decompresses but is not valid FASTQ (line count not a multiple of 4).",
     "empty (0 reads)":      "File passed the gzip/FASTQ check but contains 0 reads (empty file or failed transfer?).",
@@ -117,35 +111,12 @@ _ISSUE_DETAIL = {
 # per-project sentence is stored in metadata_detail; this is the at-a-glance label.
 _MAPFILE_LABEL = {
     "ok":              "OK",
-    "unknown":         "unknown",
     "missing_mapfile": "no mapfile",
     "missing_seqdata": "no data folder",
     "broken_mapfile":  "broken mapfile",
     "invalid_mapfile": "no usable rows",
     "flagged":         "flagged rows",
 }
-_MAPFILE_DETAIL = {
-    "unknown": "This catalog copy predates the mapfile-status check, or the status "
-               "isn't set. Re-ingest (or re-sync the GUI copy) to populate it.",
-    "missing_mapfile": "A project folder is on disk but has no '<project>_mapfile.csv' "
-                       "in the metadata directory. Files were cataloged from disk; "
-                       "sample metadata (taxon, UniqID) is missing until a mapfile is added.",
-    "missing_seqdata": "A mapfile exists but no matching project folder was found in the "
-                       "sequence-data directory. Samples were cataloged from the mapfile, "
-                       "but no files are on disk.",
-    "broken_mapfile":  "The mapfile is present but its header is malformed (expected "
-                       "ID,R1,R2,Taxon,UniqID). Files were cataloged from disk; sample "
-                       "metadata was skipped until the mapfile is fixed.",
-    "invalid_mapfile": "The mapfile header is valid but no rows could be loaded (all had "
-                       "empty or duplicate IDs). Files were cataloged from disk. Fix the "
-                       "mapfile and re-ingest.",
-    "flagged":         "The mapfile loaded, but some rows needed repair: empty Taxon/UniqID "
-                       "were filled with 'NA', and empty-ID or duplicate-ID rows were "
-                       "skipped. The affected samples are marked in the 'flags' column. Fix "
-                       "the mapfile and re-ingest to clear them.",
-}
-
-
 def _ro_connect(db_path):
     """Open the catalog read-only (the GUI never writes).
 
@@ -291,10 +262,6 @@ def _uniqid_link_col():
 
 @st.cache_data(ttl=60)
 def load_samples(db_path, mtime):
-    # Tolerate a catalog copy that predates the samples.flags migration (the GUI
-    # opens read-only and never migrates -- e.g. an older synced Scratch copy).
-    flags = "s.flags" if "flags" in _table_columns(db_path, "samples") else "NULL"
-    # Tolerate a catalog copy predating the WoRMS columns (older read-only replica).
     # worms_url embeds the accepted name in a URL '#'-fragment so the link column can
     # display the name as its label (a LinkColumn display_text regex), exactly like
     # ncbi_url -- no separate name/link columns. worms_name is kept for search + CSV.
@@ -303,12 +270,9 @@ def load_samples(db_path, mtime):
         "t.worms_match_type AS worms_match, t.aphia_id AS aphia_id, "
         "t.worms_lineage AS worms_lineage, "
         f"CASE WHEN t.aphia_id IS NOT NULL THEN '{WORMS_TAX_URL}' || t.aphia_id "
-        "|| '#' || COALESCE(t.worms_sci_name, s.taxon) END AS worms_url"
-        if "aphia_id" in _table_columns(db_path, "taxa")
-        else "NULL AS worms_name, NULL AS worms_status, NULL AS worms_match, "
-             "NULL AS aphia_id, NULL AS worms_lineage, NULL AS worms_url")
+        "|| '#' || COALESCE(t.worms_sci_name, s.taxon) END AS worms_url")
     return _with_uniqid_url(_sql(db_path, f"""
-        SELECT s.project_id, s.sample_id, s.taxon, s.uniq_id, {flags} AS flags,
+        SELECT s.project_id, s.sample_id, s.taxon, s.uniq_id, s.flags,
                p.source, p.seq_data_relpath AS data_dir,
                COALESCE(b.verified, 0) AS backup_verified,
                t.sci_name AS tax_name, t.match_type AS tax_match,
@@ -341,12 +305,8 @@ def load_samples(db_path, mtime):
 @st.cache_data(ttl=60)
 def load_taxonomy(db_path, mtime):
     # Select both the NCBI and WoRMS rank/match columns so the view's source toggle
-    # can switch client-side. Guard each column for an older copy that predates the
-    # WoRMS migration (missing -> NULL), so the query never hits 'no such column'.
-    taxa_cols = _table_columns(db_path, "taxa")
-    def col(c):
-        return f"t.{c}" if c in taxa_cols else f"NULL AS {c}"
-    extra = ", ".join(col(c) for c in RANK_COLS + ["worms_match_type"] + WORMS_RANK_COLS)
+    # can switch client-side.
+    extra = ", ".join(f"t.{c}" for c in RANK_COLS + ["worms_match_type"] + WORMS_RANK_COLS)
     return _sql(db_path, f"""
         SELECT s.project_id, s.sample_id, s.taxon, t.taxid, t.match_type,
                {extra}
@@ -355,28 +315,9 @@ def load_taxonomy(db_path, mtime):
         ORDER BY s.project_id, s.sample_id""")
 
 
-def _table_columns(db_path, table):
-    def run():
-        con = _ro_connect(db_path)
-        try:
-            return {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
-        finally:
-            con.close()
-    return _with_retry(run)
-
-
 @st.cache_data(ttl=60)
 def load_projects(db_path, mtime):
-    # Tolerate catalogs created before the metadata_status/detail migration: the
-    # GUI opens the DB read-only and never migrates, so fall back to defaults when
-    # those columns are absent (older synced copy on Scratch, etc.).
-    # Missing status coalesces to 'unknown', NOT 'ok': turning "we don't know" into
-    # "healthy" would hide real mapfile problems on an old/unmigrated copy.
-    cols = _table_columns(db_path, "projects")
-    mstatus = ("COALESCE(p.metadata_status, 'unknown')"
-               if "metadata_status" in cols else "'unknown'")
-    mdetail = "p.metadata_detail" if "metadata_detail" in cols else "NULL"
-    return _sql(db_path, f"""
+    return _sql(db_path, """
         SELECT p.project_id, p.source, p.description,
                (SELECT COUNT(*) FROM samples s WHERE s.project_id = p.project_id) AS n_samples,
                (SELECT COUNT(*) FROM files f WHERE f.project_id = p.project_id) AS n_files,
@@ -397,8 +338,8 @@ def load_projects(db_path, mtime):
                (SELECT MAX(f.integrity_date) FROM files f
                   WHERE f.project_id = p.project_id) AS integrity_date,
                p.owner_name, p.seq_data_relpath AS data_dir,
-               {mstatus} AS metadata_status,
-               {mdetail} AS metadata_detail,
+               p.metadata_status,
+               p.metadata_detail,
                p.data_check_date, p.date_ingested
         FROM projects p
         ORDER BY p.project_id""")
@@ -528,7 +469,7 @@ def load_file_paths(db_path, mtime):
                COALESCE(f.integrity_status, 'unchecked') AS integrity_status,
                EXISTS (SELECT 1 FROM data_check_issues i
                        WHERE i.project_id = f.project_id AND i.filename = f.rel_path
-                         AND i.kind IN ('missing from disk', 'missing')) AS missing_on_disk
+                         AND i.kind = 'missing from disk') AS missing_on_disk
         FROM files f
         JOIN projects p ON p.project_id = f.project_id
         LEFT JOIN samples s ON s.sample_pk = f.sample_pk
@@ -754,10 +695,8 @@ def projects_view(df, issues, integ_issues):
         pid = prow["project_id"]
         mstatus = prow["metadata_status"]
         if mstatus != "ok":
-            detail = prow.get("metadata_detail")
-            if not (pd.notna(detail) and detail):
-                detail = _MAPFILE_DETAIL.get(mstatus, "")
-            st.warning(f"**Mapfile issue ({_MAPFILE_LABEL.get(mstatus, mstatus)}):** {detail}")
+            st.warning(f"**Mapfile issue ({_MAPFILE_LABEL.get(mstatus, mstatus)}):** "
+                       f"{prow['metadata_detail']}")
         # Disk/mapfile checks (data_check_issues) and integrity-check failures live in
         # different tables but are the same question to a user ("what's wrong with this
         # project's files?"), so surface both here instead of hiding integrity errors

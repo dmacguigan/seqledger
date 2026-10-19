@@ -1,5 +1,10 @@
-import os
-import sys
+import pytest
 
-# Put the data_management_db root on the path so `import seqledger` finds the package.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from seqledger import db as odb
+
+
+@pytest.fixture
+def fresh_db(tmp_path):
+    conn = odb.connect(str(tmp_path / "cat.db"))
+    odb.init_db(conn)
+    return conn

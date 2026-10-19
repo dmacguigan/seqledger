@@ -27,10 +27,7 @@ by an adversarial review. Highlights (specifics may still shift):
   table is keyed on `UNIQUE(project_id, rel_path)` (was `project_id, filename`),
   so two FASTQ files that share a basename in different subdirectories of one
   project (lane/run splits) are both cataloged, and md5 verification joins on the
-  full path instead of cross-contaminating same-named files. Existing catalogs
-  are rebuilt to the new key automatically on the next `init-db` (the file table
-  is recreated in place, preserving all rows; **back up the catalog first**, as
-  the README already advises for `init-db`).
+  full path instead of cross-contaminating same-named files.
 - Documentation corrected to describe the integrity check accurately: it
   decompresses every byte (equivalent to `gzip -t`, catching truncation, CRC
   errors, and bit-rot) and verifies the total line count is a multiple of 4, but
@@ -82,6 +79,19 @@ by an adversarial review. Highlights (specifics may still shift):
   `query -h` explains the column names.
 - Internal: NCBI and WoRMS taxonomy share one set of scope, review-CSV, and
   apply helpers. No user-visible change.
+
+### Removed
+
+- Legacy schema migrations (added columns, `role` to `direction` rename, the
+  `files` rel_path rebuild). A catalog must have run `init-db` with a 2026
+  release (0.1.0) before upgrading; older catalogs are refused with a message.
+  `idx_files_mismatch` now lives in `schema.sql`. **Back up the catalog before
+  `init-db`.**
+- The two-column map file mode of `ingest` (positional `map_file`). Ingest
+  always auto-discovers from `--seqdata-root` and `--metadata-root`.
+- GUI fallbacks for catalog copies missing newer columns or the `config` table,
+  and the legacy `missing`/`orphan` issue kinds.
+- `requirements.txt`; use `pip install -e .[test]` or `environment.yml`.
 
 ### Fixed
 

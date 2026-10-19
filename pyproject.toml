@@ -33,3 +33,6 @@ packages = ["seqledger", "seqledger.app"]
 # Ship the schema + the Streamlit app inside the wheel.
 seqledger = ["schema.sql"]
 "seqledger.app" = ["streamlit_app.py"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

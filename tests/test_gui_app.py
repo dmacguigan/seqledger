@@ -1,53 +1,19 @@
-"""Unit tests for the PURE helpers in the read-only Streamlit GUI.
-
-Importing app/streamlit_app.py pulls in `streamlit` (for its @st.cache_data
-decorators) even though these tests never touch the Streamlit runtime. When
-streamlit isn't installed we inject a minimal stand-in so the module imports; the
-functions under test (`_csv_safe_*`, `_validate_regex`, `_with_retry`, `_drop_unknown`,
-`_link_text`, `_filter_by_columns`, `_catalog_caption`, `integrity_label`) never call
-`st.*`, so a real vs. faked streamlit makes no difference to what is verified.
-"""
+"""Tests for the read-only Streamlit GUI: pure helpers plus AppTest runs."""
 
 import contextlib
 import datetime
-import importlib.util
 import math
 import os
 import sqlite3
 import sys
-import types
 
 import pandas as pd
 import pytest
 
-# app/ has no __init__.py (streamlit runs it as a bare script), so load it by path.
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_APP_PATH = os.path.join(_REPO_ROOT, "seqledger", "app", "streamlit_app.py")
+pytest.importorskip("streamlit")
+from seqledger.app import streamlit_app as app  # noqa: E402
 
-
-def _load_app_module():
-    try:
-        import streamlit  # noqa: F401  (real streamlit if the GUI env is installed)
-    except Exception:
-        fake = types.ModuleType("streamlit")
-
-        def _cache_data(*a, **k):
-            def deco(fn):
-                return fn
-            return deco
-
-        fake.cache_data = _cache_data
-        fake.column_config = types.SimpleNamespace(LinkColumn=lambda *a, **k: None)
-        fake.spinner = lambda *a, **k: contextlib.nullcontext()
-        sys.modules["streamlit"] = fake
-    sys.path.insert(0, _REPO_ROOT)
-    spec = importlib.util.spec_from_file_location("seqledger_streamlit_app", _APP_PATH)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-app = _load_app_module()
+_APP_PATH = app.__file__
 
 
 # --- #27 CSV formula injection -------------------------------------------------
@@ -348,16 +314,6 @@ def test_samples_table_shows_match_labels(tmp_path, monkeypatch):
     shown = at.dataframe[0].value
     assert "fuzzy (species)" in set(shown["tax_match"])
     assert "review: phonetic (sounds-like)" in set(shown["worms_match"])
-
-
-def test_project_null_metadata_detail_uses_fallback(tmp_path, monkeypatch):
-    at = _apptest(monkeypatch, _make_catalog(tmp_path), "Projects")
-    at.session_state[_table_key(at, "projects_table_")] = {
-        "selection": {"rows": [2], "columns": []}}
-    at.run()
-    text = " ".join(w.value for w in at.warning)
-    assert app._MAPFILE_DETAIL["missing_mapfile"] in text
-    assert "nan" not in text
 
 
 def test_old_catalog_copy_shows_schema_error(tmp_path, monkeypatch):

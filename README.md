@@ -100,7 +100,7 @@ The sections below are for **data managers**.
 - **conda** with a `seqledger` env (`environment.yml`) only for the **GUI**
   (`streamlit` + `pandas` + `plotly`).
 - Back up the catalog `.db` before running `init-db` on an existing catalog —
-  migrations add columns in place and are not reversible.
+  it is not reversible.
 
 ## Quick start
 
@@ -156,8 +156,8 @@ Gaps this addresses:
 
 Core tooling (ingest / checksums / validate / query) uses only the Python stdlib,
 so it runs on a Hydra login node or a Mac with no install step. Only the GUI needs
-`streamlit` + `pandas`, provided as a conda env (`environment.yml`; `requirements.txt`
-kept for pip users).
+`streamlit` + `pandas`, provided as a conda env (`environment.yml`; pip users:
+`pip install -e .[test]`).
 
 ## Install
 
@@ -215,8 +215,8 @@ menu; it shows the equivalent command for each step. Add
 # 1. create the catalog
 seqledger --db oceandna_catalog.db init-db
 
-# 2. ingest metadata -- AUTO-DISCOVERY (recommended): point at the sequence-data
-#    root and the metadata root; no map file needed. Every top-level folder in
+# 2. ingest metadata: point at the sequence-data root and the metadata root.
+#    Every top-level folder in
 #    --seqdata-root is a project, paired with '<project>_mapfile.csv' in
 #    --metadata-root. FASTQ files may be nested in subdirs -- they are found
 #    recursively. Projects are always added; pairing problems are flagged on the
@@ -240,14 +240,6 @@ seqledger --db oceandna_catalog.db init-db
 #    NOTE: the integrity byte-scan (4b) is NOT run by ingest -- it is slow, so run
 #    it separately when ready.
 seqledger --db oceandna_catalog.db ingest \
-    --metadata-root ../raw_sequence_metadata \
-    --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
-
-#    ingest metadata -- MANUAL (override for odd layouts): pass an explicit
-#    two-column map file (metadata csv, data dir), same format as
-#    scripts/.../example_map_file.txt. Per-project CSVs are looked up in
-#    --metadata-root (default: the map file's own dir).
-seqledger --db oceandna_catalog.db ingest map_file.txt \
     --metadata-root ../raw_sequence_metadata \
     --seqdata-root /store/nmnh_ocean_dna/public/raw_sequence_data
 
@@ -377,8 +369,8 @@ One-time env setup on Hydra:
 conda env create -f environment.yml     # creates the `seqledger` env
 conda activate seqledger                 # or: mamba env create -f environment.yml
 ```
-(Existing env? `conda env update -f environment.yml`. Pip users: `pip install -r
-requirements.txt`.)
+(Existing env? `conda env update -f environment.yml`. Pip users: `pip install -e
+.[test]`.)
 
 **Recommended -- serve it on the I/O queue** (reads the master on Store directly,
 no Scratch copy). From a login node:
@@ -518,7 +510,7 @@ Ownership + size (`owner_name` / `owner_uid` / `size_bytes` on `files`, plus
 `data_check_date` on `projects`) is written by `validate --seqdata-root`; the same run
 rewrites the per-file `data_check_issues` table (missing / orphan filenames) that backs
 the GUI drill-down. The checksum result is derived from `files.md5_match`. `init-db`
-auto-migrates older catalogs by adding the new columns.
+refuses a catalog that predates seqledger 0.1.0.
 
 ## Open items
 

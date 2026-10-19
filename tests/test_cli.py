@@ -9,7 +9,7 @@ import pytest
 
 from seqledger import cli
 from seqledger import db as odb
-from helpers import make_project, write_map_file, write_md5
+from helpers import make_project, write_md5
 
 ROWS = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1")]
 
@@ -87,11 +87,11 @@ def test_db_after_subcommand(tmp_path, capsys):
 def test_ingest_fail_exits_1(tmp_path):
     root = str(tmp_path / "raw")
     os.makedirs(root)
-    make_project(root, "p1", "p1_bad.csv", ROWS)
-    mf = write_map_file(root, [("p1_bad.csv", "p1")])
+    make_project(root, "p1", "p1_mapfile.csv", ROWS, header=["A", "B", "C", "D", "E"])
     db = str(tmp_path / "cat.db")
     _run(["--db", db, "init-db"])
-    assert _run(["--db", db, "ingest", mf, "--seqdata-root", root, "--skip-taxonomy"]) == 1
+    assert _run(["--db", db, "ingest", "--seqdata-root", root, "--metadata-root", root,
+                 "--skip-taxonomy"]) == 1
 
 
 def test_ingest_zero_projects_not_complete(tmp_path, capsys):

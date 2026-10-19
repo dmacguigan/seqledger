@@ -5,7 +5,7 @@ import pytest
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import checksums as ochecksums
-from helpers import make_project, write_map_file, write_md5
+from helpers import make_project, write_md5
 
 
 def _setup_project(tmp_path):
@@ -16,10 +16,9 @@ def _setup_project(tmp_path):
         ("i2", "i2_1.fastq.gz", "i2_2.fastq.gz", "Gadus", "U2"),
     ]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
-    map_file = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     conn = odb.connect(os.path.join(tmp_path, "cat.db"))
     odb.init_db(conn)
-    oingest.ingest_map_file(conn, map_file, seqdata_root=root)
+    oingest.ingest_tree(conn, root, root)
     return conn, root
 
 
@@ -164,14 +163,12 @@ def test_checksum_matches_by_relpath_not_basename(tmp_path):
 def _setup_two_projects(tmp_path):
     root = str(tmp_path / "raw_sequence_data")
     os.makedirs(root, exist_ok=True)
-    pairs = []
     for pid in ("projA", "projB"):
         rows = [("i1", "i1_1.fastq.gz", "i1_2.fastq.gz", "Gadus", f"{pid}U1")]
         make_project(root, pid, f"{pid}_mapfile.csv", rows)
-        pairs.append((f"{pid}_mapfile.csv", pid))
     conn = odb.connect(os.path.join(tmp_path, "cat.db"))
     odb.init_db(conn)
-    oingest.ingest_map_file(conn, write_map_file(root, pairs), seqdata_root=root)
+    oingest.ingest_tree(conn, root, root)
     full = [("a" * 32, f"{pid}/i1_{d}.fastq.gz")
             for pid in ("projA", "projB") for d in (1, 2)]
     s = write_md5(str(tmp_path / "s0.md5"), full)

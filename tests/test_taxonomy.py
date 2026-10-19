@@ -3,7 +3,7 @@ import os
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import taxonomy as otax
-from helpers import make_project, write_map_file
+from helpers import make_project
 
 # Tiny synthetic taxdump:
 # root -> Eukaryota -> Actinopterygii -> Gadidae -> {Gadus, Urophycis}
@@ -165,10 +165,9 @@ def test_resolve_catalog_and_apply(tmp_path):
     rows = [("s1", "s1_1.fastq.gz", "s1_2.fastq.gz", "Gadus morhua", "U1"),
             ("s2", "s2_1.fastq.gz", "s2_2.fastq.gz", "Zzz qqq", "U2")]
     make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", rows)
-    mf = write_map_file(root, [("genohub-1_X_mapfile.csv", "genohub-1_X")])
     conn = odb.connect(str(tmp_path / "cat.db"))
     odb.init_db(conn)
-    oingest.ingest_map_file(conn, mf, seqdata_root=root)
+    oingest.ingest_tree(conn, root, root)
 
     results = otax.resolve_catalog(conn, taxdir)
     assert len(results) == 2

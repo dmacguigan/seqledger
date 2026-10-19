@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from seqledger import rclone as orclone  # noqa: E402
 from seqledger import mitopilot as omito  # noqa: E402
 from seqledger import db as odb  # noqa: E402
+from seqledger import validate as ovalidate  # noqa: E402
 
 NCBI_TAX_URL = "https://www.ncbi.nlm.nih.gov/datasets/taxonomy/"
 RANK_COLS = ["tax_domain", "tax_kingdom", "tax_phylum", "tax_class",
@@ -329,30 +330,6 @@ def backup_label(v):
     return "Verified" if v == 1 else "Not verified"
 
 
-def data_files_label(row):
-    status = row["data_check_status"]
-    if status == "ok":
-        return "OK"
-    if status != "issues":
-        return "unchecked"
-    parts = []
-    if row["data_check_n_missing"]:
-        parts.append(f"{int(row['data_check_n_missing'])} missing from disk")
-    if row["data_check_n_orphan"]:
-        parts.append(f"{int(row['data_check_n_orphan'])} missing from mapfile")
-    return ", ".join(parts) or "issues"
-
-
-def checksum_label(row):
-    if row["n_files"] == 0:
-        return "no files"
-    if row["n_mismatch"]:
-        return f"{int(row['n_mismatch'])} mismatch"
-    if row["n_uncompared"]:
-        return f"incomplete ({int(row['n_uncompared'])} uncompared)"
-    return "verified"
-
-
 def mapfile_label(row):
     return _MAPFILE_LABEL.get(row["metadata_status"], row["metadata_status"])
 
@@ -611,8 +588,10 @@ def projects_view(df, issues, integ_issues):
 
     show = view.copy()
     show["mapfile"] = show.apply(mapfile_label, axis=1) if len(show) else []
-    show["data_files"] = show.apply(data_files_label, axis=1) if len(show) else []
-    show["checksum"] = show.apply(checksum_label, axis=1) if len(show) else []
+    show["data_files"] = show.apply(lambda r: ovalidate.data_label(
+        {"status": r["data_check_status"], "n_missing": r["data_check_n_missing"],
+         "n_orphan": r["data_check_n_orphan"]}), axis=1) if len(show) else []
+    show["checksum"] = show.apply(ovalidate.checksum_label, axis=1) if len(show) else []
     show["integrity"] = show.apply(integrity_label, axis=1) if len(show) else []
     cols = ["project_id", "source", "description", "n_samples", "n_files",
             "mapfile", "data_files", "checksum", "integrity", "owner_name", "data_dir",

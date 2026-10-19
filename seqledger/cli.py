@@ -319,9 +319,9 @@ def cmd_ingest(args):
         r = val.get(pid) if pid in ingested else None
         if r:
             if r["data"]["status"] == "issues" or r["data"].get("detail"):
-                parts.append(_data_label(r["data"]))
+                parts.append(ovalidate.data_label(r["data"]))
             if r["checksum"]["status"] == "mismatch":
-                parts.append(_checksum_label(r["checksum"]))
+                parts.append(ovalidate.checksum_label(r["checksum"]))
             disk = [f.message for f in r["notes"]]
         else:
             miss = sum("not found on disk" in m for m in disk)
@@ -333,7 +333,7 @@ def cmd_ingest(args):
         if r and r["checksum"]["status"] == "incomplete":
             unverified += 1
             if v:
-                parts.append(_checksum_label(r["checksum"]))
+                parts.append(ovalidate.checksum_label(r["checksum"]))
         out.append((pid, "; ".join(parts), [d for d in disk + other if d not in parts]))
 
     changed = tot_new or tot_changed or tot_files
@@ -430,31 +430,6 @@ def _problems(rows, verbose, cap=10, head=None):
     return more > 0 or (verbose < 2 and any(r[2] for r in shown))
 
 
-def _data_label(data):
-    if data["status"] == "ok":
-        if data.get("n_unmapped"):
-            return f"OK, {data['n_unmapped']} file(s) not linked to any sample (no mapfile)"
-        return "OK"
-    if data["status"] == "unchecked":
-        return f"unchecked ({data['detail']})" if data.get("detail") else "unchecked"
-    parts = []
-    if data.get("n_missing"):
-        parts.append(f"{data['n_missing']} file(s) in mapfile not on disk")
-    if data.get("n_orphan"):
-        parts.append(f"{data['n_orphan']} file(s) on disk, not in mapfile")
-    return ", ".join(parts) or "issues"
-
-
-def _checksum_label(cs):
-    if cs["status"] == "verified":
-        return "backup verified"
-    if cs["status"] == "mismatch":
-        return f"{cs['n_mismatch']} file(s) differ between Store and P-drive"
-    if cs["status"] == "incomplete":
-        return f"backup not yet verified ({cs['n_uncompared']} file(s))"
-    return "no files"
-
-
 def cmd_validate(args):
     v = args.verbose
     conn = odb.connect(args.db)
@@ -474,9 +449,9 @@ def cmd_validate(args):
         r = results[pid]
         parts = []
         if r["data"]["status"] == "issues" or r["data"].get("detail"):
-            parts.append(_data_label(r["data"]))
+            parts.append(ovalidate.data_label(r["data"]))
         if r["checksum"]["status"] == "mismatch":
-            parts.append(_checksum_label(r["checksum"]))
+            parts.append(ovalidate.checksum_label(r["checksum"]))
         shared = sum("shared across projects" in f.message for f in r["notes"])
         if shared:
             parts.append(f"{shared} UniqID(s) shared with other projects")
@@ -484,7 +459,7 @@ def cmd_validate(args):
         n_ok += not parts and not incomplete
         unverified += incomplete
         if v and (incomplete or not parts):
-            parts.append(_checksum_label(r["checksum"]))
+            parts.append(ovalidate.checksum_label(r["checksum"]))
         rows.append((pid, "; ".join(parts), [f.message for f in r["notes"]]))
     print(f"Checked {len(results)} project(s): {n_ok} fully OK")
     if n_unscanned:

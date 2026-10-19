@@ -212,6 +212,32 @@ def check_data_files(conn, project_id, seq_data_relpath, seqdata_root):
             "missing": missing, "orphan": orphan, "n_unmapped": len(unmapped)}
 
 
+def data_label(d):
+    """One-line files-on-disk status from check_data_files (or the stored counts)."""
+    if d["status"] == "ok":
+        n = d.get("n_unmapped")
+        return f"OK, {n} file(s) not linked to any sample (no mapfile)" if n else "OK"
+    if d["status"] != "issues":
+        return f"unchecked ({d['detail']})" if d.get("detail") else "unchecked"
+    parts = []
+    if d.get("n_missing"):
+        parts.append(f"{int(d['n_missing'])} file(s) in mapfile not on disk")
+    if d.get("n_orphan"):
+        parts.append(f"{int(d['n_orphan'])} file(s) on disk, not in mapfile")
+    return ", ".join(parts) or "issues"
+
+
+def checksum_label(cs):
+    """One-line Store vs P-drive status from n_files / n_mismatch / n_uncompared."""
+    if not cs["n_files"]:
+        return "no files"
+    if cs["n_mismatch"]:
+        return f"{int(cs['n_mismatch'])} file(s) differ between Store and P-drive"
+    if cs["n_uncompared"]:
+        return f"backup not yet verified ({int(cs['n_uncompared'])} file(s))"
+    return "backup verified"
+
+
 def check_checksums(conn, project_id):
     """Store vs P-drive md5 status for one project, from stored md5_match.
 

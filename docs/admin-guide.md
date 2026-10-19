@@ -100,7 +100,11 @@ cd seqledger
 conda env create -f environment.yml     # creates an env named seqledger
 conda activate seqledger
 pip install -e '.[gui]'
+seqledger --version    # prints "seqledger 0.2.0"
 ```
+
+The `seqledger` command is available whenever the `seqledger` env is active;
+run `conda activate seqledger` in each new login.
 
 Requirements: Python 3.10 or newer; `rclone` for making md5 listings (on Hydra:
 `module load tools/rclone/1.66.0`); SGE `qsub` for batch jobs. Without conda,

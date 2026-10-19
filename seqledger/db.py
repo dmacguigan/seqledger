@@ -67,6 +67,16 @@ def check_directive(value):
     return value
 
 
+def qsub_header(name, log, queue, mem, slots=None):
+    """Shebang plus the SGE '#$' block for an I/O-queue job (mem is GB per slot)."""
+    name, log, queue = (check_directive(v) for v in (name, log, queue))
+    pe = f"#$ -pe mthread {slots}\n" if slots else ""
+    return (f"#!/bin/bash\n#$ -N {name}\n#$ -o {log}\n#$ -j y\n#$ -terse\n#$ -notify\n"
+            f"{pe}#$ -q {queue} -l ioq\n"
+            f"#$ -l mres={mem * (slots or 1)}G,h_data={mem}G,h_vmem={mem}G\n"
+            "#$ -S /bin/bash\n#$ -cwd\n")
+
+
 def set_config(conn, key, value):
     """Upsert one config key (no commit; caller commits)."""
     check_config_value(key, value)
@@ -86,8 +96,9 @@ def resolve_config(conn):
 
 
 def fastq_globs(exts_csv):
-    """Turn a 'fastq.gz,fq.gz' config string into ['*.fastq.gz', '*.fq.gz']."""
-    return ["*." + e.strip().lstrip(".") for e in (exts_csv or "").split(",") if e.strip()]
+    """Turn a 'fastq.gz,fq.gz' config string into ['*.fastq.gz', '*.fq.gz'] (default if empty)."""
+    return (["*." + e.strip().lstrip(".") for e in (exts_csv or "").split(",") if e.strip()]
+            or fastq_globs(CONFIG_DEFAULTS["fastq_extensions"]))
 
 
 def read_text(path):
@@ -120,9 +131,10 @@ def connect_ro(db_path):
 
     For paths that must not write the shared DB over NFS -- notably the remote
     integrity batch worker (--emit-json), which only reads its file list. mode=ro
-    (not immutable) so it stays correct while the CLI writes the master elsewhere.
+    (not immutable) so it stays correct while the CLI writes the master elsewhere;
+    timeout lets SQLite wait out a concurrent write lock.
     """
-    conn = sqlite3.connect(ro_uri(db_path), uri=True)
+    conn = sqlite3.connect(ro_uri(db_path), uri=True, timeout=15)
     conn.row_factory = sqlite3.Row
     # Defense in depth on top of mode=ro: refuse any write attempt outright.
     # (foreign_keys is irrelevant on a pure-read connection, so it stays off.)

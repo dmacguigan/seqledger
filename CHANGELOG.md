@@ -79,6 +79,13 @@ by an adversarial review. Highlights (specifics may still shift):
   `query -h` explains the column names.
 - Internal: NCBI and WoRMS taxonomy share one set of scope, review-CSV, and
   apply helpers. No user-visible change.
+- `init-db` keeps only `--name`, `--seqdata-root`, `--metadata-root`, `--set`,
+  and `--show`. The `--slug`, `--conda-env`, `--rclone-module`, `--login-host`,
+  `--io-queue`, `--backup-location`, and `--fastq-ext` flags are gone; use
+  `--set KEY=VALUE` (e.g. `--set conda_env=myenv`). `init-db -h` lists the keys.
+- The GUI no longer retries reads itself when the catalog is locked; SQLite
+  waits up to 15 s for a concurrent write, then the GUI shows "Catalog is being
+  updated, retry shortly."
 
 ### Removed
 

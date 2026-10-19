@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Ocean DNA sequence data catalog CLI.
 
 Subcommands:
@@ -26,7 +25,6 @@ from urllib.error import URLError
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import checksums as ochecksums
-from seqledger import query as oquery
 from seqledger import validate as ovalidate
 
 
@@ -68,15 +66,9 @@ def _resolve_root(conn, value, key, label, verbose=0):
     return None
 
 
-# init-db flag name -> config key. Flags let a lab retarget the tool without
-# editing source; unset keys keep today's defaults (odb.CONFIG_DEFAULTS).
-_INIT_CONFIG_FLAGS = {
-    "name": "catalog_name", "slug": "catalog_slug",
-    "seqdata_root": "seqdata_root", "metadata_root": "metadata_root",
-    "conda_env": "conda_env", "rclone_module": "rclone_module",
-    "login_host": "login_host", "io_queue": "io_queue",
-    "backup_location": "backup_location", "fastq_ext": "fastq_extensions",
-}
+# init-db flag name -> config key; other keys go through --set KEY=VALUE.
+_INIT_CONFIG_FLAGS = {"name": "catalog_name", "seqdata_root": "seqdata_root",
+                      "metadata_root": "metadata_root"}
 
 
 def cmd_init_db(args):
@@ -326,9 +318,9 @@ def cmd_ingest(args):
         r = val.get(pid) if pid in ingested else None
         if r:
             if r["data"]["status"] == "issues" or r["data"].get("detail"):
-                parts.append(_data_label(r["data"]))
+                parts.append(ovalidate.data_label(r["data"]))
             if r["checksum"]["status"] == "mismatch":
-                parts.append(_checksum_label(r["checksum"]))
+                parts.append(ovalidate.checksum_label(r["checksum"]))
             disk = [f.message for f in r["notes"]]
         else:
             miss = sum("not found on disk" in m for m in disk)
@@ -340,7 +332,7 @@ def cmd_ingest(args):
         if r and r["checksum"]["status"] == "incomplete":
             unverified += 1
             if v:
-                parts.append(_checksum_label(r["checksum"]))
+                parts.append(ovalidate.checksum_label(r["checksum"]))
         out.append((pid, "; ".join(parts), [d for d in disk + other if d not in parts]))
 
     changed = tot_new or tot_changed or tot_files
@@ -437,31 +429,6 @@ def _problems(rows, verbose, cap=10, head=None):
     return more > 0 or (verbose < 2 and any(r[2] for r in shown))
 
 
-def _data_label(data):
-    if data["status"] == "ok":
-        if data.get("n_unmapped"):
-            return f"OK, {data['n_unmapped']} file(s) not linked to any sample (no mapfile)"
-        return "OK"
-    if data["status"] == "unchecked":
-        return f"unchecked ({data['detail']})" if data.get("detail") else "unchecked"
-    parts = []
-    if data.get("n_missing"):
-        parts.append(f"{data['n_missing']} file(s) in mapfile not on disk")
-    if data.get("n_orphan"):
-        parts.append(f"{data['n_orphan']} file(s) on disk, not in mapfile")
-    return ", ".join(parts) or "issues"
-
-
-def _checksum_label(cs):
-    if cs["status"] == "verified":
-        return "backup verified"
-    if cs["status"] == "mismatch":
-        return f"{cs['n_mismatch']} file(s) differ between Store and P-drive"
-    if cs["status"] == "incomplete":
-        return f"backup not yet verified ({cs['n_uncompared']} file(s))"
-    return "no files"
-
-
 def cmd_validate(args):
     v = args.verbose
     conn = odb.connect(args.db)
@@ -481,9 +448,9 @@ def cmd_validate(args):
         r = results[pid]
         parts = []
         if r["data"]["status"] == "issues" or r["data"].get("detail"):
-            parts.append(_data_label(r["data"]))
+            parts.append(ovalidate.data_label(r["data"]))
         if r["checksum"]["status"] == "mismatch":
-            parts.append(_checksum_label(r["checksum"]))
+            parts.append(ovalidate.checksum_label(r["checksum"]))
         shared = sum("shared across projects" in f.message for f in r["notes"])
         if shared:
             parts.append(f"{shared} UniqID(s) shared with other projects")
@@ -491,7 +458,7 @@ def cmd_validate(args):
         n_ok += not parts and not incomplete
         unverified += incomplete
         if v and (incomplete or not parts):
-            parts.append(_checksum_label(r["checksum"]))
+            parts.append(ovalidate.checksum_label(r["checksum"]))
         rows.append((pid, "; ".join(parts), [f.message for f in r["notes"]]))
     print(f"Checked {len(results)} project(s): {n_ok} fully OK")
     if n_unscanned:
@@ -550,8 +517,9 @@ def _safe_name(s):
     return re.sub(r"[^A-Za-z0-9._-]", "_", s)
 
 
-def _batch_script(name, log_path, slots, mem, mres, run_cmd,
-                  conda_env="seqledger", io_queue="lTIO.sq"):
+def _batch_script(name, log_path, slots, mem, run_cmd,
+                  conda_env=odb.CONFIG_DEFAULTS["conda_env"],
+                  io_queue=odb.CONFIG_DEFAULTS["io_queue"]):
     """A Hydra qsub script that checks one project on the I/O queue.
 
     The I/O queue is the only way to reach the NAS/Store partition from a compute
@@ -560,19 +528,7 @@ def _batch_script(name, log_path, slots, mem, mres, run_cmd,
     72h wall, 12h CPU/slot, 8G/slot, 6 slots and 2 concurrent jobs per user.
     conda_env and io_queue come from the catalog config so another lab can retarget.
     """
-    name, log_path, io_queue = (odb.check_directive(v) for v in (name, log_path, io_queue))
-    return f"""#!/bin/bash
-#$ -N seqledger_int_{name}
-#$ -o {log_path}
-#$ -j y
-#$ -terse
-#$ -notify
-#$ -pe mthread {slots}
-#$ -q {io_queue} -l ioq
-#$ -l mres={mres}G,h_data={mem}G,h_vmem={mem}G
-#$ -S /bin/bash
-#$ -cwd
-
+    return odb.qsub_header(f"seqledger_int_{name}", log_path, io_queue, mem, slots) + f"""
 echo + `date` $JOB_NAME running on $HOSTNAME in $QUEUE with jobID=$JOB_ID
 # -notify sends SIGUSR1/2 before a wall/CPU-cap kill; log why we're stopping so a
 # novice knows to just resubmit (the per-project JSON checkpoint is already saved).
@@ -586,7 +542,7 @@ exit $status
 """
 
 
-def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
+def _submit_batch(args, projects, conda_env, io_queue):
     """Write a per-project qsub script and (unless --no-submit) submit it.
 
     Each remote job checks one project and writes its results to
@@ -610,7 +566,6 @@ def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
     run_prefix = ["python", "-m", "seqledger"]
     db_path = os.path.abspath(args.db)
     slots, mem = args.slots, args.mem
-    mres = slots * mem
 
     job_ids = []
     rc = 0
@@ -627,7 +582,7 @@ def _submit_batch(args, projects, conda_env="seqledger", io_queue="lTIO.sq"):
         if args.force:
             cmd.append("--force")
         with open(script_path, "w") as fh:
-            fh.write(_batch_script(safe, log_path, slots, mem, mres, " ".join(cmd),
+            fh.write(_batch_script(safe, log_path, slots, mem, " ".join(cmd),
                                    conda_env=conda_env, io_queue=io_queue))
         os.chmod(script_path, 0o755)
 
@@ -712,27 +667,51 @@ def cmd_integrity(args):
     return _print_integrity(results, args.verbose)
 
 
+_SAMPLE_COLS = ["project_id", "sample_id", "taxon", "uniq_id"]
+_QUERIES = {
+    "uniq-id": ("SELECT project_id, sample_id, taxon, uniq_id FROM samples "
+                "WHERE uniq_id = :term ORDER BY project_id", _SAMPLE_COLS),
+    "search": ("SELECT project_id, sample_id, taxon, uniq_id FROM samples "
+               "WHERE sample_id LIKE :like OR taxon LIKE :like OR uniq_id LIKE :like "
+               "ORDER BY project_id, sample_id", _SAMPLE_COLS),
+    "unbacked": ("""SELECT p.project_id, COALESCE(b.verified, 0) AS verified,
+                           b.n_files, b.n_mismatch
+                    FROM projects p
+                    LEFT JOIN backups b ON b.project_id = p.project_id AND b.location = :loc
+                    WHERE COALESCE(b.verified, 0) = 0 ORDER BY p.project_id""",
+                 ["project_id", "verified", "n_files", "n_mismatch"]),
+    "mismatches": ("SELECT project_id, filename, store_md5, pdrive_md5 FROM files "
+                   "WHERE md5_match = 0 ORDER BY project_id, filename",
+                   ["project_id", "filename", "store_md5", "pdrive_md5"]),
+    "taxa": ("""SELECT taxon, COALESCE(match_type, 'unresolved') AS match_type,
+                       taxid, sci_name, rank FROM taxa
+                WHERE COALESCE(match_type, 'unresolved') NOT IN ('exact', 'confirmed')
+                ORDER BY match_type, taxon""",
+             ["taxon", "match_type", "taxid", "sci_name", "rank"]),
+    "summary": ("""SELECT p.project_id, p.source,
+                   (SELECT COUNT(*) FROM samples s WHERE s.project_id = p.project_id) AS n_samples,
+                   (SELECT COUNT(*) FROM files f WHERE f.project_id = p.project_id) AS n_files,
+                   COALESCE(p.data_check_status, 'unchecked') AS data_check_status,
+                   (SELECT COUNT(*) FROM files f
+                      WHERE f.project_id = p.project_id AND f.md5_match = 0) AS n_mismatch,
+                   (SELECT COUNT(*) FROM files f
+                      WHERE f.project_id = p.project_id AND f.md5_match IS NULL) AS n_uncompared,
+                   p.owner_name
+                FROM projects p ORDER BY p.project_id""",
+                ["project_id", "source", "n_samples", "n_files",
+                 "data_check_status", "n_mismatch", "n_uncompared", "owner_name"]),
+}
+
+
+def run_query(conn, what, term=""):
+    return conn.execute(_QUERIES[what][0], {
+        "term": term, "like": f"%{term}%",
+        "loc": odb.get_config(conn, "backup_location")}).fetchall()
+
+
 def cmd_query(args):
     conn = odb.connect_ro(args.db)  # read-only: a typo can't create a stray empty DB
-    if args.what == "uniq-id":
-        _print_rows(oquery.find_by_uniq_id(conn, args.term),
-                    ["project_id", "sample_id", "taxon", "uniq_id"])
-    elif args.what == "search":
-        _print_rows(oquery.find_sample(conn, args.term),
-                    ["project_id", "sample_id", "taxon", "uniq_id"])
-    elif args.what == "unbacked":
-        _print_rows(oquery.unbacked_projects(conn),
-                    ["project_id", "verified", "n_files", "n_mismatch"])
-    elif args.what == "mismatches":
-        _print_rows(oquery.mismatched_files(conn),
-                    ["project_id", "filename", "store_md5", "pdrive_md5"])
-    elif args.what == "taxa":
-        _print_rows(oquery.unresolved_taxa(conn),
-                    ["taxon", "match_type", "taxid", "sci_name", "rank"])
-    elif args.what == "summary":
-        _print_rows(oquery.project_summary(conn),
-                    ["project_id", "source", "n_samples", "n_files",
-                     "data_check_status", "n_mismatch", "n_uncompared", "owner_name"])
+    _print_rows(run_query(conn, args.what, args.term), _QUERIES[args.what][1])
     conn.close()
 
 
@@ -808,16 +787,16 @@ def cmd_taxonomy(args):
 def cmd_gui(args):
     from seqledger import gui as ogui
     # CLI flag > catalog config > built-in default.
-    cfg = {}
+    cfg = odb.CONFIG_DEFAULTS
     if os.path.exists(args.db):
         # Read-only: this path only reads config to build the qsub/tunnel command
         # (no init_db/migrate/write), so it must not open the shared DB read/write.
         conn = odb.connect_ro(args.db)
-        cfg = {k: odb.get_config(conn, k) for k in ("login_host", "conda_env", "io_queue")}
+        cfg = odb.resolve_config(conn)
         conn.close()
-    login_host = args.login_host or cfg.get("login_host") or ogui.LOGIN_HOST
-    conda_env = args.conda_env or cfg.get("conda_env") or "seqledger"
-    queue = args.queue or cfg.get("io_queue") or "lTIO.sq"
+    login_host = args.login_host or cfg["login_host"]
+    conda_env = args.conda_env or cfg["conda_env"]
+    queue = args.queue or cfg["io_queue"]
     if args.qsub:
         ogui.launch_qsub(args.db, port=args.port, login_host=login_host,
                          queue=queue, conda_env=conda_env, mem_gb=args.mem, wait=args.wait)
@@ -846,26 +825,19 @@ def build_parser():
     pdb = sub.add_parser(
         "init-db", parents=[dbp],
         help="create/upgrade the catalog schema; optionally set per-catalog config",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Create/upgrade the catalog schema and set config. "
-                    "--show only prints the config (read-only).")
+                    "--show only prints the config (read-only).",
+        epilog="other config keys (set with --set KEY=VALUE):\n" + "\n".join(
+            f"  {k} (default: {v})" for k, v in odb.CONFIG_DEFAULTS.items()
+            if k not in _INIT_CONFIG_FLAGS.values()))
     pdb.add_argument("--name", help="catalog display name (GUI title / CLI banner)")
-    pdb.add_argument("--slug", help="export-filename prefix (e.g. 'oceandna')")
     pdb.add_argument("--seqdata-root", dest="seqdata_root",
                      help="default root of raw_sequence_data for this catalog")
     pdb.add_argument("--metadata-root", dest="metadata_root",
                      help="default dir of per-project '<project>_mapfile.csv' files")
-    pdb.add_argument("--conda-env", dest="conda_env",
-                     help="conda env activated inside generated qsub jobs")
-    pdb.add_argument("--rclone-module", dest="rclone_module",
-                     help="module load'ed in generated rclone copy jobs")
-    pdb.add_argument("--login-host", dest="login_host", help="Hydra login host for GUI tunnels")
-    pdb.add_argument("--io-queue", dest="io_queue", help="qsub queue for batch/rclone/gui jobs")
-    pdb.add_argument("--backup-location", dest="backup_location",
-                     help="label of the 'verified backup' location (e.g. 'pdrive')")
-    pdb.add_argument("--fastq-ext", dest="fastq_ext",
-                     help="comma-separated FASTQ suffixes to discover (e.g. 'fastq.gz,fq.gz')")
     pdb.add_argument("--set", action="append", metavar="KEY=VALUE",
-                     help="set any config key directly (repeatable)")
+                     help="set any config key (repeatable; keys listed below)")
     pdb.add_argument("--show", action="store_true",
                      help="print the resolved config and exit (read-only; ignores other flags)")
     pdb.set_defaults(func=cmd_init_db)
@@ -1018,7 +990,8 @@ def build_parser():
                          "master catalog on Store directly (no Scratch copy); waits for it "
                          "to start, then prints the tunnel command to screen")
     pg.add_argument("--queue", default=None,
-                    help="queue for --qsub (default: catalog config, else lTIO.sq)")
+                    help="queue for --qsub (default: catalog config, else "
+                         f"{odb.CONFIG_DEFAULTS['io_queue']})")
     pg.add_argument("--conda-env", default=None,
                     help="conda env activated inside the --qsub job (default: catalog config)")
     pg.add_argument("--mem", type=int, default=6, help="memory GB for the --qsub job (default 6)")
@@ -1053,7 +1026,3 @@ def run(argv=None):
 
 def main(argv=None):
     return run(argv)[0]
-
-
-if __name__ == "__main__":
-    sys.exit(main())

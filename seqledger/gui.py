@@ -17,10 +17,9 @@ import subprocess
 import sys
 import time
 
-from .db import check_directive
+from .db import CONFIG_DEFAULTS, qsub_header
 
 APP_PATH = os.path.join(os.path.dirname(__file__), "app", "streamlit_app.py")
-LOGIN_HOST = "hydra-login01.si.edu"
 
 
 def _tunnel_text(node, port, login_host, user, on_cluster):
@@ -59,7 +58,7 @@ def _free_port(preferred=None):
             s.close()
 
 
-def launch(db_path, port=8501, login_host=LOGIN_HOST):
+def launch(db_path, port=8501, login_host=CONFIG_DEFAULTS["login_host"]):
     """Run Streamlit headless on THIS node and print the tunnel command to reach it."""
     # Resolve to a port we've confirmed is free BEFORE printing the tunnel, so the
     # localhost:PORT we print matches what Streamlit actually binds (otherwise, if
@@ -98,18 +97,7 @@ def _gui_job_script(log_path, ready_path, queue, conda_env, mem_gb, db_abs, port
     we print always points at a live server. SEQLEDGER_DB points at the master DB
     on Store, which is reachable from lTIO -- no Scratch copy involved.
     """
-    log_path, queue = check_directive(log_path), check_directive(queue)
-    return f"""#!/bin/bash
-#$ -N seqledger_gui
-#$ -o {log_path}
-#$ -j y
-#$ -terse
-#$ -notify
-#$ -q {queue} -l ioq
-#$ -l mres={mem_gb}G,h_data={mem_gb}G,h_vmem={mem_gb}G
-#$ -S /bin/bash
-#$ -cwd
-
+    return qsub_header("seqledger_gui", log_path, queue, mem_gb) + f"""
 echo + `date` $JOB_NAME on $HOSTNAME in $QUEUE jobID=$JOB_ID
 source ~/.bashrc
 conda activate {shlex.quote(conda_env)}
@@ -153,8 +141,9 @@ def _prune_rundir(rundir, max_age_days=7):
                 pass
 
 
-def launch_qsub(db_path, port=8501, login_host=LOGIN_HOST, queue="lTIO.sq",
-                conda_env="seqledger", mem_gb=6, wait=300):
+def launch_qsub(db_path, port=8501, login_host=CONFIG_DEFAULTS["login_host"],
+                queue=CONFIG_DEFAULTS["io_queue"], conda_env=CONFIG_DEFAULTS["conda_env"],
+                mem_gb=6, wait=300):
     """Submit the GUI as a job on the I/O queue, wait for it to serve, print the tunnel.
 
     Runs on a Hydra login node. Returns after printing the tunnel; the GUI keeps

@@ -16,7 +16,6 @@ import os
 import re
 import sqlite3
 import sys
-import time
 
 import pandas as pd
 import streamlit as st
@@ -27,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from seqledger import rclone as orclone  # noqa: E402
 from seqledger import mitopilot as omito  # noqa: E402
 from seqledger import db as odb  # noqa: E402
+from seqledger import validate as ovalidate  # noqa: E402
 
 NCBI_TAX_URL = "https://www.ncbi.nlm.nih.gov/datasets/taxonomy/"
 RANK_COLS = ["tax_domain", "tax_kingdom", "tax_phylum", "tax_class",
@@ -117,23 +117,6 @@ _MAPFILE_LABEL = {
     "invalid_mapfile": "no usable rows",
     "flagged":         "flagged rows",
 }
-def _ro_connect(db_path):
-    """Open the catalog read-only (the GUI never writes).
-
-    mode=ro (not immutable) so it stays correct whether the DB is a static Scratch
-    replica OR the live master read directly on the I/O queue (`gui --qsub`), where
-    the CLI may be writing concurrently -- ro respects locking; immutable would not.
-    It also prevents a typo'd path from auto-creating an empty DB file.
-    """
-    con = sqlite3.connect(odb.ro_uri(db_path), uri=True)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA query_only = ON")
-    # The GUI may read the live master while the CLI writes (gui --qsub); wait out
-    # a short write lock inside SQLite before the app-level retry kicks in.
-    con.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-    return con
-
-
 # Tables -> columns the GUI queries; an older catalog copy missing any is refused.
 _REQUIRED_SCHEMA = {
     "projects": ["project_id", "source", "description", "seq_data_relpath",
@@ -155,77 +138,34 @@ _REQUIRED_SCHEMA = {
 
 def _missing_schema(db_path):
     """List of required tables / table.columns absent from the catalog."""
-    def run():
-        con = _ro_connect(db_path)
-        try:
-            tables = {r[0] for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'")}
-            missing = []
-            for table, cols in _REQUIRED_SCHEMA.items():
-                if table not in tables:
-                    missing.append(table)
-                    continue
-                have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
-                missing += [f"{table}.{c}" for c in cols if c not in have]
-            return missing
-        finally:
-            con.close()
-    return _with_retry(run)
-
-
-# Lock-contention handling for reads against the live master. busy_timeout (above)
-# waits out a short write lock inside SQLite; this adds a small app-level retry on top
-# so a stubborn lock surfaces a friendly notice rather than a raw traceback.
-# Worst case about 15 s: 4 tries x 3 s busy wait + 3 s of backoff.
-_BUSY_TIMEOUT_MS = 3000
-_LOCK_RETRIES = 4
-_LOCK_BACKOFF = 0.5  # seconds; grows linearly per attempt
-
-
-class _CatalogLocked(Exception):
-    """Raised when the catalog stays locked past the retry budget (caught in main)."""
-
-
-def _is_locked_error(exc):
-    """True for a transient 'database is locked'/'busy' contention worth retrying,
-    vs. a genuine operational error (bad SQL, missing column) that should propagate."""
-    return (isinstance(exc, sqlite3.OperationalError)
-            and ("locked" in str(exc).lower() or "busy" in str(exc).lower()))
-
-
-def _with_retry(fn):
-    """Run a read, retrying briefly on a lock/busy error. Raises _CatalogLocked once
-    the retry budget is spent so the caller can show a friendly message."""
+    con = odb.connect_ro(db_path)
     try:
-        return fn()
-    except sqlite3.OperationalError as e:
-        if not _is_locked_error(e):
-            raise
-    with st.spinner("Catalog is being updated, retrying..."):
-        for attempt in range(1, _LOCK_RETRIES):
-            time.sleep(_LOCK_BACKOFF * attempt)
-            try:
-                return fn()
-            except sqlite3.OperationalError as e:
-                if not _is_locked_error(e):
-                    raise
-    raise _CatalogLocked()
+        tables = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        missing = []
+        for table, cols in _REQUIRED_SCHEMA.items():
+            if table not in tables:
+                missing.append(table)
+                continue
+            have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+            missing += [f"{table}.{c}" for c in cols if c not in have]
+        return missing
+    finally:
+        con.close()
 
 
 def _sql(db_path, query):
-    def run():
-        con = _ro_connect(db_path)
-        try:
-            return pd.read_sql_query(query, con)
-        finally:
-            con.close()
-    return _with_retry(run)
+    con = odb.connect_ro(db_path)
+    try:
+        return pd.read_sql_query(query, con)
+    finally:
+        con.close()
 
 
 def _config(db_path, key):
     """Per-catalog config value (falls back to seqledger defaults)."""
     try:
-        con = _ro_connect(db_path)
+        con = odb.connect_ro(db_path)
         try:
             return odb.get_config(con, key)
         finally:
@@ -388,30 +328,6 @@ def load_integrity_issues(db_path, mtime):
 def backup_label(v):
     """Plain-english P-drive backup state from the 1/0 backups.verified flag."""
     return "Verified" if v == 1 else "Not verified"
-
-
-def data_files_label(row):
-    status = row["data_check_status"]
-    if status == "ok":
-        return "OK"
-    if status != "issues":
-        return "unchecked"
-    parts = []
-    if row["data_check_n_missing"]:
-        parts.append(f"{int(row['data_check_n_missing'])} missing from disk")
-    if row["data_check_n_orphan"]:
-        parts.append(f"{int(row['data_check_n_orphan'])} missing from mapfile")
-    return ", ".join(parts) or "issues"
-
-
-def checksum_label(row):
-    if row["n_files"] == 0:
-        return "no files"
-    if row["n_mismatch"]:
-        return f"{int(row['n_mismatch'])} mismatch"
-    if row["n_uncompared"]:
-        return f"incomplete ({int(row['n_uncompared'])} uncompared)"
-    return "verified"
 
 
 def mapfile_label(row):
@@ -672,8 +588,10 @@ def projects_view(df, issues, integ_issues):
 
     show = view.copy()
     show["mapfile"] = show.apply(mapfile_label, axis=1) if len(show) else []
-    show["data_files"] = show.apply(data_files_label, axis=1) if len(show) else []
-    show["checksum"] = show.apply(checksum_label, axis=1) if len(show) else []
+    show["data_files"] = show.apply(lambda r: ovalidate.data_label(
+        {"status": r["data_check_status"], "n_missing": r["data_check_n_missing"],
+         "n_orphan": r["data_check_n_orphan"]}), axis=1) if len(show) else []
+    show["checksum"] = show.apply(ovalidate.checksum_label, axis=1) if len(show) else []
     show["integrity"] = show.apply(integrity_label, axis=1) if len(show) else []
     cols = ["project_id", "source", "description", "n_samples", "n_files",
             "mapfile", "data_files", "checksum", "integrity", "owner_name", "data_dir",
@@ -1406,10 +1324,10 @@ def main():
             taxonomy_view(DB_PATH, mtime)
         else:
             custom_table_view(load_samples(DB_PATH, mtime), load_file_paths(DB_PATH, mtime))
-    except _CatalogLocked:
-        # A concurrent CLI write held the lock past our retry budget; show a friendly
-        # notice and stop rather than surfacing a raw 'database is locked' traceback.
-        st.warning("Catalog is being updated — retry shortly.")
+    except sqlite3.OperationalError as e:
+        if "locked" not in str(e).lower() and "busy" not in str(e).lower():
+            raise
+        st.warning("Catalog is being updated, retry shortly.")
         st.stop()
 
 

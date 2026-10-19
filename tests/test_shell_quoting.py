@@ -38,11 +38,11 @@ def test_init_db_set_rejects_bad_value(tmp_path):
 
 
 def test_batch_script_quotes_conda_env_and_rejects_queue_newline():
-    s = cli._batch_script("p", "/l/p.log", 2, 4, 8, "true",
+    s = cli._batch_script("p", "/l/p.log", 2, 4, "true",
                           conda_env="seqledger; touch A B #")
     assert "conda activate 'seqledger; touch A B #'" in s
     with pytest.raises(ValueError):
-        cli._batch_script("p", "/l/p.log", 2, 4, 8, "true",
+        cli._batch_script("p", "/l/p.log", 2, 4, "true",
                           io_queue="lTIO.sq\n#$ -M x@y")
 
 

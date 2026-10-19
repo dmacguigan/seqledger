@@ -451,7 +451,6 @@ def test_apply_review_wrong_file_type(tmp_path):
 
 def test_worms_only_row_still_ncbi_new(tmp_path):
     from seqledger import cli as ocli
-    from seqledger import query as oquery
     from seqledger import worms as oworms
     taxdir = _write_taxdump(str(tmp_path / "tax"))
     conn = odb.connect(os.path.join(tmp_path, "cat.db"))
@@ -464,14 +463,14 @@ def test_worms_only_row_still_ncbi_new(tmp_path):
     otax._write_taxa(conn, [d], oworms._WORMS_DB_COLS, "worms_")
     row = conn.execute("SELECT date_resolved FROM taxa WHERE taxon='Gadus morhua'").fetchone()
     assert row["date_resolved"] is None
-    assert [r["taxon"] for r in oquery.unresolved_taxa(conn)] == ["Gadus morhua"]
+    assert [r["taxon"] for r in ocli.run_query(conn, "taxa")] == ["Gadus morhua"]
     assert ocli._has_unresolved_taxa(conn)
     res = otax.resolve_catalog(conn, taxdir, scope="new")
     assert [r["taxon"] for r in res] == ["Gadus morhua"]
     row = conn.execute("SELECT taxid, aphia_id FROM taxa WHERE taxon='Gadus morhua'").fetchone()
     assert row["taxid"] == 8049 and row["aphia_id"] == 126436
     assert not ocli._has_unresolved_taxa(conn)
-    assert oquery.unresolved_taxa(conn) == []
+    assert ocli.run_query(conn, "taxa") == []
 
 
 # --- genus homonym on the genus-anchored fuzzy path ---------------------------

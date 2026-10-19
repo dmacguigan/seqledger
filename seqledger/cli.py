@@ -26,7 +26,6 @@ from urllib.error import URLError
 from seqledger import db as odb
 from seqledger import ingest as oingest
 from seqledger import checksums as ochecksums
-from seqledger import query as oquery
 from seqledger import validate as ovalidate
 
 
@@ -712,27 +711,51 @@ def cmd_integrity(args):
     return _print_integrity(results, args.verbose)
 
 
+_SAMPLE_COLS = ["project_id", "sample_id", "taxon", "uniq_id"]
+_QUERIES = {
+    "uniq-id": ("SELECT project_id, sample_id, taxon, uniq_id FROM samples "
+                "WHERE uniq_id = :term ORDER BY project_id", _SAMPLE_COLS),
+    "search": ("SELECT project_id, sample_id, taxon, uniq_id FROM samples "
+               "WHERE sample_id LIKE :like OR taxon LIKE :like OR uniq_id LIKE :like "
+               "ORDER BY project_id, sample_id", _SAMPLE_COLS),
+    "unbacked": ("""SELECT p.project_id, COALESCE(b.verified, 0) AS verified,
+                           b.n_files, b.n_mismatch
+                    FROM projects p
+                    LEFT JOIN backups b ON b.project_id = p.project_id AND b.location = :loc
+                    WHERE COALESCE(b.verified, 0) = 0 ORDER BY p.project_id""",
+                 ["project_id", "verified", "n_files", "n_mismatch"]),
+    "mismatches": ("SELECT project_id, filename, store_md5, pdrive_md5 FROM files "
+                   "WHERE md5_match = 0 ORDER BY project_id, filename",
+                   ["project_id", "filename", "store_md5", "pdrive_md5"]),
+    "taxa": ("""SELECT taxon, COALESCE(match_type, 'unresolved') AS match_type,
+                       taxid, sci_name, rank FROM taxa
+                WHERE COALESCE(match_type, 'unresolved') NOT IN ('exact', 'confirmed')
+                ORDER BY match_type, taxon""",
+             ["taxon", "match_type", "taxid", "sci_name", "rank"]),
+    "summary": ("""SELECT p.project_id, p.source,
+                   (SELECT COUNT(*) FROM samples s WHERE s.project_id = p.project_id) AS n_samples,
+                   (SELECT COUNT(*) FROM files f WHERE f.project_id = p.project_id) AS n_files,
+                   COALESCE(p.data_check_status, 'unchecked') AS data_check_status,
+                   (SELECT COUNT(*) FROM files f
+                      WHERE f.project_id = p.project_id AND f.md5_match = 0) AS n_mismatch,
+                   (SELECT COUNT(*) FROM files f
+                      WHERE f.project_id = p.project_id AND f.md5_match IS NULL) AS n_uncompared,
+                   p.owner_name
+                FROM projects p ORDER BY p.project_id""",
+                ["project_id", "source", "n_samples", "n_files",
+                 "data_check_status", "n_mismatch", "n_uncompared", "owner_name"]),
+}
+
+
+def run_query(conn, what, term=""):
+    return conn.execute(_QUERIES[what][0], {
+        "term": term, "like": f"%{term}%",
+        "loc": odb.get_config(conn, "backup_location")}).fetchall()
+
+
 def cmd_query(args):
     conn = odb.connect_ro(args.db)  # read-only: a typo can't create a stray empty DB
-    if args.what == "uniq-id":
-        _print_rows(oquery.find_by_uniq_id(conn, args.term),
-                    ["project_id", "sample_id", "taxon", "uniq_id"])
-    elif args.what == "search":
-        _print_rows(oquery.find_sample(conn, args.term),
-                    ["project_id", "sample_id", "taxon", "uniq_id"])
-    elif args.what == "unbacked":
-        _print_rows(oquery.unbacked_projects(conn),
-                    ["project_id", "verified", "n_files", "n_mismatch"])
-    elif args.what == "mismatches":
-        _print_rows(oquery.mismatched_files(conn),
-                    ["project_id", "filename", "store_md5", "pdrive_md5"])
-    elif args.what == "taxa":
-        _print_rows(oquery.unresolved_taxa(conn),
-                    ["taxon", "match_type", "taxid", "sci_name", "rank"])
-    elif args.what == "summary":
-        _print_rows(oquery.project_summary(conn),
-                    ["project_id", "source", "n_samples", "n_files",
-                     "data_check_status", "n_mismatch", "n_uncompared", "owner_name"])
+    _print_rows(run_query(conn, args.what, args.term), _QUERIES[args.what][1])
     conn.close()
 
 

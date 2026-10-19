@@ -247,7 +247,7 @@ def test_dot_slash_and_backslash_paths_match(tmp_path):
 
 
 def test_backup_location_config_honored(tmp_path):
-    from seqledger import query as oquery
+    from seqledger.cli import run_query
     conn, _ = _setup_project(tmp_path)
     odb.set_config(conn, "backup_location", "nas")
     entries = _md5_entries()
@@ -255,6 +255,6 @@ def test_backup_location_config_honored(tmp_path):
                               write_md5(str(tmp_path / "p.md5"), entries))
     locs = [r[0] for r in conn.execute("SELECT location FROM backups")]
     assert locs == ["nas"]
-    assert oquery.unbacked_projects(conn) == []
+    assert run_query(conn, "unbacked") == []
     odb.set_config(conn, "backup_location", "pdrive")
-    assert [r["project_id"] for r in oquery.unbacked_projects(conn)] == ["genohub-1_X"]
+    assert [r["project_id"] for r in run_query(conn, "unbacked")] == ["genohub-1_X"]

@@ -181,10 +181,13 @@ Computed per sample in the Grab & Go table from its files:
 | Label | Meaning |
 |---|---|
 | ok | All files ok |
+| ok * | All files ok once dismissed problems are set aside |
 | N corrupt | gzip or format error |
 | N empty | 0 reads |
 | N missing | Listed in the mapfile, not on disk |
 | unchecked | At least one file not checked yet |
 | no files | No files cataloged |
 
-Several can appear together, for example `1 corrupt, unchecked`.
+Several can appear together, for example `1 corrupt, unchecked`. A trailing
+` *` means at least one file's problem was dismissed; those files are copied
+like ok files.

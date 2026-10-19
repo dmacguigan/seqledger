@@ -250,3 +250,10 @@ def test_integrity_default_names_damaged_file(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "1 damaged file:" in out and "genohub-1_A/s1_1.fastq.gz: gzip error" in out
     assert "[OK]" not in out
+
+
+def test_version_flag(capsys):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--version"])
+    assert e.value.code == 0
+    assert capsys.readouterr().out.startswith("seqledger ")

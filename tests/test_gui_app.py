@@ -354,7 +354,7 @@ def test_grab_and_go_flags_problem_files_and_lane_splits(tmp_path, monkeypatch):
     at.sidebar.radio[0].set_value("Grab & Go").run()
     warnings = " ".join(w.value for w in at.warning)
     assert "2 of 6 files in the cart are corrupt, empty, or missing on disk" in warnings
-    assert "1 samples in the cart are lane-split" in warnings and "(s1)" in warnings
+    assert "1 sample(s) in the cart have more than one read pair" in warnings and "(s1)" in warnings
     assert at.checkbox[0].value is True
     dest = next(t for t in at.text_input if t.label.startswith("Destination"))
     dest.set_value("/pool/dest").run()

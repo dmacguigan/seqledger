@@ -205,6 +205,16 @@ def test_verbose_flag_before_or_after_subcommand(argv, n):
     assert cli.build_parser().parse_args(argv).verbose == n
 
 
+@pytest.mark.parametrize("argv", [["--debug", "validate"], ["validate", "--debug"]])
+def test_debug_flag_before_or_after_subcommand(argv):
+    assert cli.build_parser().parse_args(argv).debug is True
+
+
+def test_set_refuses_unknown_key(tmp_path):
+    with pytest.raises(SystemExit, match="unknown config key 'nope'"):
+        cli.main(["--db", str(tmp_path / "c.db"), "init-db", "--set", "nope=1"])
+
+
 def test_ingest_default_is_summary_and_v_lists_projects(tmp_path, capsys):
     db, root = _ingested(tmp_path, ("genohub-1_A", "genohub-2_B"))
     out = capsys.readouterr().out

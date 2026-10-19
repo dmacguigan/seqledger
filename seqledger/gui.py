@@ -2,7 +2,7 @@
 
 Two modes:
   local (default)  run Streamlit on the current node (a login or interactive node).
-  --qsub           submit Streamlit as a job on Hydra's I/O queue (lTIO.sq), which
+  --qsub           submit Streamlit as a job on the configured I/O queue (default lTIO.sq), which
                    is the only place a compute node can read the master catalog on
                    Store directly -- so no Scratch copy is needed. This waits for the
                    job to actually start serving, then prints the ready-to-run SSH

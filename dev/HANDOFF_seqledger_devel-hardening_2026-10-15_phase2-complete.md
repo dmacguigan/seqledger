@@ -1,10 +1,10 @@
-# Handoff: seqledger review-driven hardening, Phases 1, 2, and 2b complete
+# Handoff: seqledger review-driven hardening, Phases 1, 2, 2b, and 3 complete
 
 - **Branch:** `devel`, cut from `main` at `f3174b6`.
-- **Tip:** `c0d99dd` (Phase 2b merged 2026-10-16). **Not pushed. No PR.**
-- **Tests:** `python -m pytest -q` gives 311 passed, 1 skipped (the skip needs plotly). The base miniforge3 `python` on this machine has every dependency; there is no `seqledger` conda env here.
+- **Tip:** see `git log devel` (Phase 3 merged 2026-10-18). **Not pushed. No PR.**
+- **Tests:** `python -m pytest -q` gives 298 passed, 1 skipped (the skip needs plotly). The base miniforge3 `python` on this machine has every dependency; there is no `seqledger` conda env here.
 - **Date:** 2026-10-15
-- **Status:** Phases 1, 2, and 2b are merged. Phase 3 (ponytail simplification) is next, then Phase 4 (docs).
+- **Status:** Phases 1, 2, 2b, and 3 are merged. Phase 4 (docs) is next.
 
 ## How work is organised
 
@@ -57,6 +57,13 @@ Repro and PoC scripts from the reviews are in the session scratchpad only (not i
 - `feat/cli-output`: progress counters only when stderr is a terminal, and on stderr; "(none)" and notes on stderr so `query` stdout is pure TSV; checksums warnings sorted; `-v`/`-vv` (count flag on the top parser and the `dbp` parent, SUPPRESS trick); every non-query command prints one summary block with a Problems list capped at 10 via `_problems()`, a "Next:" line only when there is one, and "More detail: add -v" only when something was hidden; integrity names damaged files (`aggregate_from_db` adds `bad_files`); plain-language labels (orphan, uncompared, format-error, parity) and the force=True refusal reworded; `query -h` epilog explains the column names. `integrity --collect` and `--batch` still print one line per project (deliberate).
 - `feat/interactive`: `seqledger/interactive.py` (240 lines, stdlib only). `seqledger` with no subcommand on a TTY opens the menu; off a TTY it prints usage and exits 2. Each action echoes "Same thing without the menu:" with the real command and runs it through `cli.run`. Prune only after a plain ingest and a typed DELETE. Taxonomy apply is not in the menu (prints the command instead). README paragraph points novices at the menu and `export SEQLEDGER_DB`.
 
+### Phase 3 (three branches, merged 2026-10-18; net about -720 lines)
+
+- `chore/ponytail-taxa`: taxonomy.py and worms.py share `_dedup`, `_taxa_in_scope`, `_write_review`, `_review_reader`, `_apply_rows`, `_write_taxa` (column prefix "" or "worms_"); small items 28, 30, 32, 35, 44. WoRMS `--scope unconfirmed` now follows the NCBI rule (also picks rows with no WoRMS date).
+- `chore/ponytail-legacy`: legacy migrations, role-to-direction rename and files rebuild deleted; `idx_files_mismatch` lives in schema.sql; `init_db` compares each table against schema.sql and raises "run init-db with seqledger 0.1.0 first" on an old catalog. Two-column map-file mode deleted (ingest always auto-discovers; `--seqdata-root` and `--metadata-root` required or configured). GUI `_table_columns` shims, `_MAPFILE_DETAIL`, and 'unknown' status fill deleted. `db.read_text` is the one tolerant reader. uid lookup via `functools.lru_cache`. Tests: `fresh_db` fixture in conftest, `helpers.ingested_project`, `helpers.write_gz`, pyproject `pythonpath`. requirements.txt deleted (use `pip install -e .[test]`).
+- `chore/ponytail-safe`: query.py deleted, `cmd_query` is a dict dispatch plus `run_query(conn, what, term)`; GUI lock retry code replaced by `connect_ro` timeout 15 s and one except in main; init-db flags cut to `--name`, `--seqdata-root`, `--metadata-root`, `--set`, `--show` (removed: `--slug`, `--conda-env`, `--rclone-module`, `--login-host`, `--io-queue`, `--backup-location`, `--fastq-ext`; the epilog lists keys from `CONFIG_DEFAULTS`); `db.qsub_header` shared by batch, rclone, and GUI job scripts; defaults read from `CONFIG_DEFAULTS` (`RCLONE_MODULE`, `LOGIN_HOST`, `_DEFAULT_FASTQ_GLOBS` gone); `validate.data_label`/`checksum_label` shared by CLI and GUI; CLAUDE.md schema bullet reworded.
+- Not done from the audit, by maintainer decision: items 2 (Treemap), 7 (regex toggle), 11 (sidebar search). Not done, unassigned: 9, 12, 16, 19 to 27, 29, 34, 36 to 43, 51, 52.
+
 ## Done: Phase 2b, CLI output and interactive mode (for reference, the original plan)
 
 Design and evidence are in `03_cli_output_and_interactive.md`. Four or five small branches in this order:
@@ -91,7 +98,6 @@ From `01_ponytail_audit.md` and `00_SUMMARY.md`:
 
 ## Resuming
 
-1. `git switch devel`, confirm tip `c0d99dd`, run `python -m pytest -q` (base python works).
-2. Start Phase 3 (`chore/ponytail-safe`, then `chore/ponytail-legacy`) from `01_ponytail_audit.md`; the interactive menu now imports `cli.run`, `cli._default_taxdir`, `taxonomy._index_path`, and `db.get_config`, so keep those names when simplifying.
-3. Then Phase 4.
+1. `git switch devel`, run `python -m pytest -q` (base python works).
+2. Start Phase 4 (docs) from `02_documentation.md` section (c) and the Phase 4 list above. Note the CLI changed a lot in 2b and 3: no map-file mode, fewer init-db flags, `-v/-vv`, the menu, plain-language labels. Build the docs from `--help` output and the current code, not from the old README.
 4. Release only when the maintainer decides: bump `version` in `pyproject.toml`, turn `[Unreleased]` into a dated heading, PR `devel` to `main`, then merge `main` back into `devel`.

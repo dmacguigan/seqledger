@@ -100,7 +100,7 @@ cd seqledger
 conda env create -f environment.yml     # creates an env named seqledger
 conda activate seqledger
 pip install -e '.[gui]'
-seqledger --version    # prints "seqledger 0.2.0"
+seqledger --version    # prints the installed version
 ```
 
 The `seqledger` command is available whenever the `seqledger` env is active;
@@ -129,8 +129,16 @@ the catalog's `conda_env` to match ([config](reference/config.md)), and make sur
    unless dependencies changed; then run `conda env update -f environment.yml`.
 4. Run `seqledger init-db`. It creates any new tables and is safe to re-run. It
    does not migrate old tables: if it stops with `catalog table '<name>' is from
-   an older seqledger`, follow the upgrade notes for that release in the
-   CHANGELOG.
+   an older seqledger`, run `init-db` once with the 0.1.0 code, which still
+   carries the migrations, then again with the current code:
+
+   ```bash
+   cd seqledger
+   git checkout f3174b6          # the 0.1.0 release
+   seqledger init-db
+   git checkout main
+   seqledger init-db
+   ```
 
 ### Back up
 
@@ -619,8 +627,8 @@ against the same file on a network filesystem.
 ([restore](#restore)), fix the mapfile or mount, ingest again.
 
 **`init-db` says a table is from an older seqledger.** The catalog was made by
-an older release. Restore a backup if you ran a newer version by mistake, or
-follow the CHANGELOG upgrade notes for that release.
+an older release. Run `init-db` once with the 0.1.0 code and once with the
+current code ([Update](#update) step 4).
 
 **First ingest on an offline node.** Ingest succeeds and skips taxonomy. Later,
 on a login node with internet: `seqledger taxonomy resolve`. To prepare the

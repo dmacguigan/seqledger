@@ -13,6 +13,16 @@ def test_init_db_refuses_old_catalog(tmp_path):
         odb.init_db(conn)
 
 
+def test_init_db_refuses_old_files_key(tmp_path):
+    schema = open(odb.SCHEMA_PATH).read()
+    old = schema.replace("UNIQUE (project_id, rel_path)", "UNIQUE (project_id, filename)")
+    assert old != schema
+    conn = odb.connect(os.path.join(tmp_path, "old.db"))
+    conn.executescript(old)
+    with pytest.raises(RuntimeError, match="older seqledger"):
+        odb.init_db(conn)
+
+
 # --- #15: CHECK constraints on freshly-created catalogs ---
 
 def test_check_rejects_bad_files_flags(fresh_db):

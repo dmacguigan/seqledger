@@ -428,6 +428,9 @@ def test_severity_and_tint():
     assert sv("unchecked") == "pending" and sv("incomplete (2 unchecked)") == "pending"
     assert sv("OK *") == "dismissed" and sv("OK") == "ok" and sv("") == "ok" and sv("Verified") == "ok"
     assert sv("1 corrupt *") == "error"
+    assert sv("ok *") == "dismissed"
+    assert sv("unchecked (data folder not found: /x/empty_runs)") == "pending"
+    assert sv("1 corrupt (2 dismissed)") == "dismissed" and sv("flagged rows (dismissed)") == "dismissed"
     styler = app._tint(pd.DataFrame({"integrity": ["gzip error", "ok"], "x": [1, 2]}), ["integrity", "nope"])
     html = styler.to_html()
     assert "rgba(213, 94, 0, 0.30)" in html
@@ -452,3 +455,93 @@ def test_md5_issues_loader(tmp_path):
     assert list(df["kind"]) == ["md5 mismatch"] and list(df["filename"]) == ["P1/s2_R2.fastq.gz"]
     integ = app.load_integrity_issues(p, os.path.getmtime(p))
     assert list(integ["filename"]) == ["P1/s2_R1.fastq.gz"]   # rel_path, not basename
+
+
+def _issues_catalog(tmp_path):
+    p = _grab_catalog(tmp_path)
+    con = sqlite3.connect(p)
+    con.execute("UPDATE projects SET data_check_status='issues', data_check_n_missing=1, "
+                "metadata_status='flagged', metadata_detail='1 row flagged' WHERE project_id='P1'")
+    con.execute("UPDATE files SET md5_match=(rel_path != 'P1/s2_R2.fastq.gz')")
+    con.commit(); con.close()
+    return p
+
+def _select(at, key, rows):
+    # A browser keeps table selections across reruns; AppTest drops them, so re-apply.
+    from streamlit.proto.WidgetStates_pb2 import WidgetStates
+    from streamlit.testing.v1.element_tree import get_widget_state
+    if not hasattr(at, "_sel"):
+        at._sel, run = {}, at._run
+
+        def _run(*a, **kw):
+            for k, r in at._sel.items():
+                at.session_state[k] = {"selection": {"rows": r, "columns": []}}
+            return run(*a, **kw)
+        at._run = _run
+    at._sel[key] = rows
+    # AppTest keeps widgets that an st.rerun() removed; skip them.
+    ws = WidgetStates()
+    for node in at._tree:
+        try:
+            w = get_widget_state(node)
+        except KeyError:
+            continue
+        if w is not None:
+            ws.widgets.append(w)
+    return at._run(ws)
+
+def _button(at, label):
+    return next(b for b in at.button if b.label.startswith(label))
+
+def test_projects_dismiss_all_then_show_and_undo(tmp_path, monkeypatch):
+    from seqledger import dismiss
+    p = _issues_catalog(tmp_path)
+    at = _apptest(monkeypatch, p, "Projects")
+    _select(at, _table_key(at, "projects_table_"), [0])
+    assert at.dataframe[0].value.iloc[0]["data_files"] == "1 file(s) in mapfile not on disk"
+    assert any("1 row flagged" in w.value for w in at.warning)
+    issues = at.dataframe[1].value
+    assert sorted(issues["issue"]) == ["gzip error", "md5 mismatch", "missing from disk"]
+    _button(at, "Dismiss all (3)").click().run()
+    _select(at, _table_key(at, "projects_table_"), [0])
+    row = at.dataframe[0].value.iloc[0]
+    assert row["data_files"] == "OK *" and row["integrity"] == "OK *" and row["checksum"] == "OK *"
+    assert "Data-files issues" in " ".join(h.value for h in at.subheader)
+    assert len(at.dataframe) == 1   # no live rows: table replaced by an info line
+    assert any("3 issue(s) dismissed" in i.value for i in at.info)
+    log, _ = dismiss.read(dismiss.default_log_path(p))
+    assert len(log) == 3
+    # mapfile dismiss
+    _button(at, "Dismiss mapfile issue").click().run()
+    _select(at, _table_key(at, "projects_table_"), [0])
+    assert at.dataframe[0].value.iloc[0]["mapfile"] == "OK *"
+    assert not at.warning
+    assert any("Mapfile: OK *" in i.value for i in at.info)
+    # show dismissed -> rows back with who/when, undo one
+    at.sidebar.checkbox[-1].check().run()
+    _select(at, _table_key(at, "projects_table_"), [0])
+    issues = at.dataframe[1].value
+    assert len(issues) == 3 and set(issues["dismissed_by"]) != {""}
+    assert at.dataframe[0].value.iloc[0]["mapfile"] == "flagged rows (dismissed)"
+    _select(at, f"issues_table_P1", [0])
+    _button(at, "Undo selected (1)").click().run()
+    assert len(dismiss.read(dismiss.default_log_path(p))[0]) == 3   # 4 dismissed, 1 undone
+
+def test_projects_dismiss_unwritable_log_shows_hint(tmp_path, monkeypatch):
+    p = _issues_catalog(tmp_path)
+    log = tmp_path / ".cat_dismissed.tsv"
+    log.write_text("")
+    log.chmod(0o444)
+    if os.access(str(log), os.W_OK):
+        pytest.skip("running as root")
+    at = _apptest(monkeypatch, p, "Projects")
+    _select(at, _table_key(at, "projects_table_"), [0])
+    _button(at, "Dismiss all").click().run()
+    assert not at.exception
+    assert any("chmod 664" in e.value for e in at.error)
+
+def test_projects_sidebar_reports_unreadable_lines(tmp_path, monkeypatch):
+    p = _issues_catalog(tmp_path)
+    (tmp_path / ".cat_dismissed.tsv").write_text("junk\n")
+    at = _apptest(monkeypatch, p, "Projects")
+    assert any("1 unreadable line(s)" in c.value for c in at.sidebar.caption)

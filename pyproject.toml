@@ -20,8 +20,8 @@ keywords = ["bioinformatics", "fastq", "catalog", "hpc", "hydra", "data-manageme
 dependencies = []
 
 [project.optional-dependencies]
-gui = ["streamlit>=1.40", "pandas>=2.0", "plotly>=5.20"]
-test = ["pytest>=7.0", "streamlit>=1.40", "pandas>=2.0", "plotly>=5.20"]
+gui = ["streamlit>=1.40", "pandas>=2.1", "plotly>=5.20"]
+test = ["pytest>=7.0", "streamlit>=1.40", "pandas>=2.1", "plotly>=5.20"]
 
 [project.scripts]
 seqledger = "seqledger.cli:main"

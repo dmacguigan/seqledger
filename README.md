@@ -156,8 +156,8 @@ Gaps this addresses:
 
 Core tooling (ingest / checksums / validate / query) uses only the Python stdlib,
 so it runs on a Hydra login node or a Mac with no install step. Only the GUI needs
-`streamlit` + `pandas`, provided as a conda env (`environment.yml`; `requirements.txt`
-kept for pip users).
+`streamlit` + `pandas`, provided as a conda env (`environment.yml`; pip users:
+`pip install -e .[test]`).
 
 ## Install
 
@@ -369,8 +369,8 @@ One-time env setup on Hydra:
 conda env create -f environment.yml     # creates the `seqledger` env
 conda activate seqledger                 # or: mamba env create -f environment.yml
 ```
-(Existing env? `conda env update -f environment.yml`. Pip users: `pip install -r
-requirements.txt`.)
+(Existing env? `conda env update -f environment.yml`. Pip users: `pip install -e
+.[test]`.)
 
 **Recommended -- serve it on the I/O queue** (reads the master on Store directly,
 no Scratch copy). From a login node:

@@ -24,8 +24,7 @@ import re
 from datetime import date
 
 from .db import (METADATA_SUFFIX, REQUIRED_COLUMNS, fastq_globs, get_config,
-                 header_uniqid_column, parse_project_id)
-from .db import read_text as _read_text
+                 header_uniqid_column, parse_project_id, read_text)
 from .validate import (Finding, FAIL, WARN, NA_VALUE, FLAG_MESSAGES,
                        plan_rows, validate_metadata, overall_status)
 
@@ -157,7 +156,7 @@ def _discover_disk_files(data_dir, seqdata_root, globs):
 
 
 def _read_csv(metadata_path):
-    reader = csv.reader(io.StringIO(_read_text(metadata_path)))
+    reader = csv.reader(io.StringIO(read_text(metadata_path)))
     header = next(reader, [])
     rows = []
     for raw in reader:

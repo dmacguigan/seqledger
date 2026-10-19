@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from datetime import date, datetime
 
-from seqledger.ingest import _read_text
+from seqledger.db import read_text
 
 TAXDUMP_URL = "https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz"
 _DOWNLOAD_TIMEOUT = 60  # seconds; a stalled connection must not hang the run forever
@@ -589,7 +589,7 @@ def _write_review(results, path, fields, id_col, match_col):
 
 
 def _review_reader(csv_path, col, hint):
-    reader = csv.DictReader(io.StringIO(_read_text(csv_path)))
+    reader = csv.DictReader(io.StringIO(read_text(csv_path)))
     if col not in (reader.fieldnames or []):
         raise ValueError(f"{csv_path} has no '{col}' column; {hint}")
     return reader

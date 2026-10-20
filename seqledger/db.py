@@ -35,6 +35,8 @@ CONFIG_DEFAULTS = {
     "backup_location": "pdrive",                            # 'verified backup' location label
     "fastq_extensions": "fastq.gz,fq.gz",                  # comma-sep FASTQ suffixes
     "dismiss_log":     "",                                 # GUI dismissals log (set by init-db)
+    "pdrive_root":     "",                                 # P-drive raw_sequence_data path (Windows) for md5-jobs
+    "rclone_exe":      "rclone",                           # rclone program on the P-drive machine for md5-jobs
 }
 
 

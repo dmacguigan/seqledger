@@ -13,9 +13,10 @@ which recreates the same tree under the destination.
 """
 
 import datetime
+import re
 import shlex
 
-from .db import CONFIG_DEFAULTS, qsub_header
+from .db import CONFIG_DEFAULTS, get_config, qsub_header
 
 
 def _missing(v):
@@ -150,3 +151,99 @@ rc_fail=0
 echo = `date` $JOB_NAME done
 exit $rc_fail
 """
+
+
+# --- md5 listings for backup verification ---------------------------------
+# `seqledger md5-jobs` writes two scripts that make the per-side `rclone md5sum`
+# listings `seqledger checksums` loads: a qsub job for Store (I/O queue) and a
+# Windows batch file for the P-drive. Each lists one project at a time into its
+# own file, skipping projects already listed, so a killed run resumes; the last
+# step concatenates them into store.md5 / pdrive.md5.
+
+_PROJECT_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+PDRIVE_PLACEHOLDER = "REPLACE_WITH_PDRIVE_ROOT"
+
+
+def md5_projects(conn, all_projects=False):
+    """Projects needing an md5 listing: rows (project_id, seqdata_root, verified, n_files,
+    n_mismatch), unverified only unless all_projects."""
+    loc = get_config(conn, "backup_location")
+    return conn.execute(
+        """SELECT p.project_id, p.seqdata_root, COALESCE(b.verified, 0) AS verified,
+                  (SELECT COUNT(*) FROM files f WHERE f.project_id = p.project_id) AS n_files,
+                  COALESCE(b.n_mismatch, 0) AS n_mismatch
+           FROM projects p
+           LEFT JOIN backups b ON b.project_id = p.project_id AND b.location = ?
+           WHERE ? OR COALESCE(b.verified, 0) = 0
+           ORDER BY p.project_id""", (loc, int(bool(all_projects)))).fetchall()
+
+
+def _check_project_ids(project_ids):
+    for pid in project_ids:
+        if not _PROJECT_ID_RE.fullmatch(str(pid)):
+            raise ValueError(f"project id {pid!r} is not safe for a script; "
+                             "only letters, digits, . _ - are allowed")
+
+
+def build_md5_store_script(projects, mem=2, job_name="seqledger_md5_store",
+                           rclone_module=CONFIG_DEFAULTS["rclone_module"],
+                           io_queue=CONFIG_DEFAULTS["io_queue"], stamp=None):
+    """qsub script listing each (project_id, seqdata_root) with `rclone md5sum` into
+    store_<project>.md5, then concatenating into store.md5."""
+    _check_project_ids(pid for pid, _ in projects)
+    log_name = f"{job_name}_{stamp or timestamp()}.log"
+    blocks = []
+    for pid, root in projects:
+        if not root:
+            raise ValueError(f"project {pid}: no sequence-data root recorded; re-run ingest")
+        out = f"store_{pid}.md5"
+        blocks.append(f"""if [ -s {out} ]; then echo "skip {pid}: {out} already made"; else
+    echo "= `date` {pid}"
+    rclone md5sum {shlex.quote(root)} --include {shlex.quote(pid + '/**')} > {out}.tmp \\
+        && mv {out}.tmp {out} || {{ rc_fail=$?; rm -f {out}.tmp; echo "ERROR: {pid} failed (rc=$rc_fail)" >&2; }}
+fi
+""")
+    body = "\n".join(blocks) if blocks else "echo 'no projects'; exit 1\n"
+    return qsub_header(job_name, log_name, io_queue, mem) + f"""
+echo + `date` $JOB_NAME running on $HOSTNAME in $QUEUE with jobID=$JOB_ID
+# -notify sends SIGUSR1/2 before a wall-cap kill; resubmitting the SAME script
+# resumes (projects with a finished store_<project>.md5 are skipped).
+trap 'echo "= `date` notified (approaching the 72h wall) -- stopping; resubmit this script to resume"; exit 2' SIGUSR1 SIGUSR2
+module load {shlex.quote(rclone_module)}
+
+rc_fail=0
+{body}
+cat store_*.md5 > store.md5
+echo = `date` $JOB_NAME done: $(wc -l < store.md5) files listed in store.md5
+exit $rc_fail
+"""
+
+
+def build_md5_pdrive_bat(project_ids, pdrive_root, rclone_exe="rclone"):
+    """Windows batch file listing each project under pdrive_root with `rclone md5sum`
+    into pdrive_<project>.md5, then concatenating into pdrive.md5 (CRLF line ends)."""
+    _check_project_ids(project_ids)
+    lines = ["@echo off",
+             f'set "ROOT={pdrive_root or PDRIVE_PLACEHOLDER}"',
+             f'set "RCLONE={rclone_exe or "rclone"}"',
+             f'if "%ROOT%"=="{PDRIVE_PLACEHOLDER}" (',
+             '    echo ERROR: no P-drive root set -- edit ROOT at the top of this file and rerun.',
+             '    exit /b 1', ')',
+             'if not exist "%ROOT%\\" (',
+             '    echo ERROR: P-drive root "%ROOT%" not found -- is the drive mapped?',
+             '    exit /b 1', ')',
+             'set FAIL=0']
+    for pid in project_ids:
+        out = f"pdrive_{pid}.md5"
+        lines += [f'if exist "{out}" (',
+                  f'    echo skip {pid}: {out} already made',
+                  ') else (',
+                  f'    echo {pid}',
+                  f'    "%RCLONE%" md5sum "%ROOT%" --include "{pid}/**" > "{out}.tmp" '
+                  f'&& move /y "{out}.tmp" "{out}" > nul || (set FAIL=1 & del "{out}.tmp" 2>nul '
+                  f'& echo ERROR: {pid} failed)',
+                  ')']
+    lines += ['type pdrive_*.md5 > pdrive.md5 2>nul',
+              'echo done: pdrive.md5 written',
+              'exit /b %FAIL%']
+    return "\r\n".join(lines) + "\r\n"

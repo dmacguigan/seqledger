@@ -84,7 +84,7 @@ Run `seqledger` with no subcommand in a terminal for a text menu:
   Data manager tasks
     4  Add or update projects from the mapfiles (ingest)
     5  Check files for damage (integrity)
-    6  Verify backups from md5 listings (checksums)
+    6  Verify backups (make md5 listings, then load them)
     7  Look up species names (taxonomy)
     c  Use a different catalog, or create one
     q  Quit

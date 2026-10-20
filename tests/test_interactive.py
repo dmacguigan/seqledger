@@ -110,3 +110,47 @@ def test_create_catalog_abspaths_roots(tmp_path, monkeypatch, capsys):
     conn = odb.connect(str(tmp_path / "new.db"))
     assert odb.get_config(conn, "seqdata_root") == str(tmp_path / "raw")
     assert f"export SEQLEDGER_DB={tmp_path / 'new.db'}" in capsys.readouterr().out
+
+
+def test_menu_md5_jobs_toggle_and_show_all(tmp_path, monkeypatch, capsys):
+    db, root = _catalog(tmp_path)
+    make_project(root, "genohub-2_B", "genohub-2_B_mapfile.csv", ROWS)
+    make_project(root, "genohub-3_C", "genohub-3_C_mapfile.csv", ROWS)
+    cli.main(["--db", db, "ingest", "--skip-taxonomy"])
+    conn = odb.connect(db)
+    conn.execute("INSERT INTO backups (project_id, location, verified, n_files, n_mismatch) "
+                 "VALUES ('genohub-1_A', 'pdrive', 1, 6, 0)")
+    conn.commit()
+    conn.close()
+    capsys.readouterr()
+    out_dir = str(tmp_path / "jobs")
+    # 6 -> sub-menu 1 (make scripts); untick 2 (genohub-3_C); show all; tick 1 (genohub-1_A);
+    # Enter = done; output dir; pdrive root; rclone exe
+    _feed(monkeypatch, "6", "1", "2", "a", "1", "", out_dir, r"P:\raw", "", "")
+    assert interactive.run(db) == 0
+    out = capsys.readouterr().out
+    assert "[x]  1  genohub-2_B" in out and "[x]  2  genohub-3_C" in out
+    assert "[ ]  2  genohub-3_C" in out
+    assert "[ ]  1  genohub-1_A" in out  # verified project appears unticked after 'a'
+    assert "--project genohub-1_A --project genohub-2_B" in out
+    assert "genohub-3_C" not in open(os.path.join(out_dir, "store_md5.sh")).read()
+
+
+def test_menu_md5_jobs_default_runs_all_unverified(tmp_path, monkeypatch, capsys):
+    db, root = _catalog(tmp_path)
+    capsys.readouterr()
+    out_dir = str(tmp_path / "jobs")
+    _feed(monkeypatch, "6", "1", "", out_dir, "", "", "")
+    assert interactive.run(db) == 0
+    out = capsys.readouterr().out
+    assert f"seqledger --db {db} md5-jobs --out {out_dir}" in out
+    assert "--project" not in out
+    assert os.path.exists(os.path.join(out_dir, "pdrive_md5.bat"))
+
+
+def test_menu_checksums_load_still_works(tmp_path, monkeypatch, capsys):
+    db, _ = _catalog(tmp_path)
+    capsys.readouterr()
+    _feed(monkeypatch, "6", "2", "/nonexistent", "/nonexistent", "")
+    assert interactive.run(db) == 0
+    assert "No file at" in capsys.readouterr().out

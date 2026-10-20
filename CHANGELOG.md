@@ -5,6 +5,21 @@ All notable changes to seqledger are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-20
+
+### Added
+
+- `md5-jobs` writes the scripts that make the md5 listings `checksums` needs:
+  a qsub job for Store on the I/O queue and a Windows batch file for the
+  P-drive. Projects whose backup is not verified are included by default
+  (`--project` to pick, `--all` for every project). Each project is listed to
+  its own file and skipped when already done, so a stopped run resumes; the
+  scripts end by merging into `store.md5` / `pdrive.md5`.
+- Menu option 6 now offers "make the listing scripts" with a tick list of
+  unverified projects (`a` shows all), then "load finished listings".
+- Config keys `pdrive_root` (P-drive path as Windows sees it) and `rclone_exe`
+  (rclone on the Windows machine, default on PATH).
+
 ## [0.3.1] - 2026-10-20
 
 ### Added

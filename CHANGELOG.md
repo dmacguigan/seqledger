@@ -12,10 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dismissable GUI issues. Any user can dismiss a mapfile issue, a data-files
   problem, a sample's flags, or a file's problem from Projects, Samples, and
   Files. Dismissals are shared and only hide the issue; the catalog is not
-  changed. Cells read `OK *` (or the live text plus ` *`), **Show dismissed**
-  brings them back with an **Undo** button, and files with only dismissed
-  problems are included in Grab & Go copies. Dismissals live in a hidden
-  `.<catalog name>_dismissed.tsv` next to the catalog.
+  changed. Each issue gets a boxed panel under the table with a **Reason
+  (optional)** box and a Dismiss button; once dismissed, the panel shows who,
+  when, and why with a **Restore** button. Cells read `gzip error (dismissed)`
+  or `OK (+n dismissed)`, **Show dismissed issues** lists dismissed rows in the
+  Projects issues table, and files with only dismissed problems are included in
+  Grab & Go copies. Dismissals live in a hidden `.<catalog name>_dismissed.tsv`
+  next to the catalog.
 - Status cells are tinted: vermillion for errors, orange for warnings, sky blue
   for dismissed, grey for not yet checked.
 - `init-db` records the dismissals log path in the config key `dismiss_log`, so

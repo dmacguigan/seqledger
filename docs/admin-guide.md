@@ -312,8 +312,28 @@ two md5 listings with `rclone md5sum` (one per side), then load and compare them
 
 ### Make the listings
 
-Both listings must be rooted at the `raw_sequence_data` level, so that every
-path starts with the project folder:
+The easy way: `seqledger md5-jobs` (menu: 6, then 1) writes two scripts for the
+projects whose backup is not verified:
+
+```bash
+seqledger md5-jobs            # or: seqledger md5-jobs --project genohub-2054899_OKEX01
+cd md5_jobs && qsub store_md5.sh
+```
+
+- `store_md5.sh` runs on the I/O queue and lists each project on Store.
+- `pdrive_md5.bat` is for the Windows machine (remote desktop) that has the
+  P-drive mapped: copy it there, run it, and copy the `pdrive.md5` it makes back
+  into `md5_jobs/`. Set the P-drive path once with
+  `seqledger init-db --set pdrive_root='P:\...\raw_sequence_data'`, and the
+  rclone location with `--set rclone_exe=...` if it is not on PATH.
+
+Both scripts list one project at a time into `store_<project>.md5` /
+`pdrive_<project>.md5`, skip projects already done, and end by merging into
+`store.md5` / `pdrive.md5`. If a run is killed, run the same script again. The
+menu lets you tick which projects to include (`a` shows verified ones too).
+
+Made by hand, both listings must be rooted at the `raw_sequence_data` level, so
+that every path starts with the project folder:
 
 ```
 b8e43f335c0fb6954f32e9d0da7c12ad  genohub-2054899_OKEX01/22030-14-01/S01_L001_R1_001.fastq.gz
@@ -560,7 +580,7 @@ A weekly round, after new data and new mapfiles land:
 3. If it printed a review CSV, review it and `seqledger taxonomy apply --review <path>`.
 4. `seqledger integrity --batch --only-unchecked`. When the jobs finish:
    `seqledger integrity --collect integrity_batch/results`.
-5. After the P-drive backup has run: make both md5 listings, then
+5. After the P-drive backup has run: `seqledger md5-jobs`, run the two scripts, then
    `seqledger checksums --store store.md5 --pdrive pdrive.md5`.
 6. `seqledger validate`, then `seqledger query unbacked` for projects still not
    backed up.

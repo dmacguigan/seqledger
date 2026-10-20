@@ -88,3 +88,71 @@ def test_build_copy_script_no_destination_uses_placeholder():
     script = orclone.build_copy_script([("/store/x", ["p/a.fastq.gz"])], "")
     assert "DEST=REPLACE_WITH_DESTINATION" in script
     assert 'if [ -z "$DEST" ]' in script
+
+
+# --- md5 listing scripts for unverified backups ---
+
+def _projects():
+    return [("genohub-1_A", "/store/root"), ("genohub-2_B", "/store/other")]
+
+
+def test_build_md5_store_script_one_rclone_per_project_then_cat():
+    script = orclone.build_md5_store_script(_projects(), mem=2)
+    assert script.startswith("#!/bin/bash")
+    assert "#$ -q lTIO.sq -l ioq" in script
+    assert "module load tools/rclone/1.66.0" in script
+    assert script.count("rclone md5sum") == 2
+    assert 'rclone md5sum /store/root --include genohub-1_A/\'**\'' in script \
+        or "rclone md5sum /store/root --include 'genohub-1_A/**'" in script
+    assert "store_genohub-2_B.md5" in script
+    # a finished per-project listing is skipped on resubmit; partial output never kept
+    assert '[ -s store_genohub-1_A.md5 ]' in script
+    assert ".tmp" in script
+    assert "cat store_*.md5 > store.md5" in script
+
+
+def test_build_md5_store_script_rejects_unsafe_project_id():
+    import pytest
+    with pytest.raises(ValueError):
+        orclone.build_md5_store_script([("bad id;rm", "/store/root")])
+
+
+def test_build_md5_pdrive_bat_uses_root_and_rclone_exe():
+    bat = orclone.build_md5_pdrive_bat(["genohub-1_A", "genohub-2_B"],
+                                       r"P:\Hydra_backup\store\raw_sequence_data",
+                                       rclone_exe=r"C:\tools\rclone.exe")
+    assert bat.startswith("@echo off")
+    assert "\r\n" in bat
+    assert 'set "ROOT=P:\\Hydra_backup\\store\\raw_sequence_data"' in bat
+    assert 'set "RCLONE=C:\\tools\\rclone.exe"' in bat
+    assert bat.count('"%RCLONE%" md5sum "%ROOT%" --include') == 2
+    assert '--include "genohub-1_A/**" > "pdrive_genohub-1_A.md5.tmp"' in bat
+    assert 'if exist "pdrive_genohub-1_A.md5"' in bat
+    assert "type pdrive_*.md5 > pdrive.md5" in bat
+
+
+def test_build_md5_pdrive_bat_placeholder_when_root_unset():
+    bat = orclone.build_md5_pdrive_bat(["genohub-1_A"], "")
+    assert "REPLACE_WITH_PDRIVE_ROOT" in bat
+    assert 'set "RCLONE=rclone"' in bat
+
+
+def test_md5_projects_default_unverified_only(tmp_path):
+    from seqledger import db as odb
+    conn = odb.connect(str(tmp_path / "cat.db"))
+    odb.init_db(conn)
+    for pid in ("genohub-1_A", "genohub-2_B", "genohub-3_C"):
+        conn.execute("INSERT INTO projects (project_id, seqdata_root) VALUES (?, ?)",
+                     (pid, "/store/root"))
+    conn.execute("INSERT INTO backups (project_id, location, verified, n_files, n_mismatch) "
+                 "VALUES ('genohub-1_A', 'pdrive', 1, 4, 0)")
+    conn.execute("INSERT INTO backups (project_id, location, verified, n_files, n_mismatch) "
+                 "VALUES ('genohub-2_B', 'pdrive', 0, 4, 1)")
+    conn.commit()
+    rows = orclone.md5_projects(conn)
+    assert [(r["project_id"], r["verified"]) for r in rows] == \
+        [("genohub-2_B", 0), ("genohub-3_C", 0)]
+    rows = orclone.md5_projects(conn, all_projects=True)
+    assert [(r["project_id"], r["verified"], r["seqdata_root"]) for r in rows] == \
+        [("genohub-1_A", 1, "/store/root"), ("genohub-2_B", 0, "/store/root"),
+         ("genohub-3_C", 0, "/store/root")]

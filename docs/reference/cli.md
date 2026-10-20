@@ -11,6 +11,7 @@ Contents
 - [The menu](#the-menu)
 - [init-db](#init-db)
 - [ingest](#ingest)
+- [md5-jobs](#md5-jobs)
 - [checksums](#checksums)
 - [validate](#validate)
 - [integrity](#integrity)
@@ -23,18 +24,20 @@ Contents
 
 ```
 usage: seqledger [-h] [--db DB] [--debug] [-v] [--version]
-                 {init-db,ingest,checksums,validate,integrity,query,taxonomy,gui}
+                 {init-db,ingest,md5-jobs,checksums,validate,integrity,query,taxonomy,gui}
                  ...
 
 seqledger: sequence-data catalog CLI
 
 positional arguments:
-  {init-db,ingest,checksums,validate,integrity,query,taxonomy,gui}
+  {init-db,ingest,md5-jobs,checksums,validate,integrity,query,taxonomy,gui}
     init-db             create the catalog schema; optionally set per-catalog
                         config
     ingest              auto-discover projects from a seqdata + metadata dir;
                         auto-run taxonomy, refresh data-files check (integrity
                         is a separate step)
+    md5-jobs            write the scripts that make rclone md5sum listings
+                        for checksums
     checksums           load + compare rclone md5sum output
     validate            re-check the catalog (data-files + checksum)
     integrity           gzip + FASTQ integrity check of cataloged files
@@ -197,6 +200,51 @@ options:
 - Both prune flags prompt in a terminal; without a terminal they are refused
   unless `--yes` is given.
 - Details: [admin guide, ingest](../admin-guide.md#ingest).
+
+## md5-jobs
+
+```
+usage: seqledger md5-jobs [-h] [--db DB] [--debug] [-v] [--out OUT]
+                          [--project PROJECT] [--all]
+                          [--pdrive-root PDRIVE_ROOT] [--rclone RCLONE]
+                          [--mem MEM]
+
+Write store_md5.sh (qsub, I/O queue) and pdrive_md5.bat (Windows) that make
+the rclone md5sum listings for projects whose backup is not verified, one
+project at a time, then merge them into store.md5 / pdrive.md5.
+
+options:
+  -h, --help            show this help message and exit
+  --db DB               path to catalog SQLite DB
+  --debug               show the full traceback on error
+  -v, --verbose         more detail: -v per project, -vv per file
+  --out OUT             folder for the scripts (default md5_jobs)
+  --project PROJECT     only this project (repeatable); default: every
+                        unverified project
+  --all                 include projects whose backup is already verified
+  --pdrive-root PDRIVE_ROOT
+                        raw_sequence_data path on the P-drive as Windows sees
+                        it (default: config pdrive_root)
+  --rclone RCLONE       rclone program on the Windows machine (default: config
+                        rclone_exe, i.e. rclone on PATH)
+  --mem MEM             memory GB for the Store job (default 2)
+```
+
+- Writes two scripts into `--out`: `store_md5.sh`, a qsub job for the I/O queue
+  that lists each project on Store, and `pdrive_md5.bat`, a Windows batch file
+  that lists each project on the P-drive. Each project goes to its own
+  `store_<project>.md5` / `pdrive_<project>.md5`; a project whose file already
+  exists is skipped, so a stopped run resumes when re-run. The last step merges
+  them into `store.md5` and `pdrive.md5` for `checksums`.
+- Default projects: every project whose backup is not verified (the
+  `query unbacked` set). `--project` (repeatable) names projects instead;
+  `--all` takes every project.
+- `--pdrive-root`, `--rclone`: override the `pdrive_root` and `rclone_exe` config
+  values. With no P-drive root, the batch file holds a `REPLACE_WITH_PDRIVE_ROOT`
+  placeholder and refuses to run until edited.
+- Prints the three next steps: `qsub` the Store job, run the batch file on the
+  Windows machine and copy `pdrive.md5` back, then `checksums`.
+- Details: [admin guide, checksums](../admin-guide.md#checksums).
 
 ## checksums
 

@@ -3,6 +3,7 @@
 Subcommands:
   init-db     create the catalog schema
   ingest      load metadata (auto-discover); auto-run taxonomy, refresh data-files check
+  md5-jobs    write the scripts that make the `rclone md5sum` listings
   checksums   load + compare `rclone md5sum` output from Store and P-drive
   validate    re-check the catalog and print findings
   integrity   gzip + FASTQ structural integrity check of cataloged files
@@ -27,6 +28,7 @@ from seqledger import db as odb
 from seqledger import dismiss
 from seqledger import ingest as oingest
 from seqledger import checksums as ochecksums
+from seqledger import rclone as orclone
 from seqledger import validate as ovalidate
 
 
@@ -435,6 +437,41 @@ def _problems(rows, verbose, cap=10, head=None):
     if more > 0:
         print(f"  ... and {more} more; add -v to list all")
     return more > 0 or (verbose < 2 and any(r[2] for r in shown))
+
+
+def cmd_md5_jobs(args):
+    conn = odb.connect_ro(args.db)
+    rows = orclone.md5_projects(conn, all_projects=args.all or bool(args.project))
+    cfg = {k: odb.get_config(conn, k) for k in ("pdrive_root", "rclone_exe", "rclone_module", "io_queue")}
+    conn.close()
+    if args.project:
+        by_id = {r["project_id"]: r for r in rows}
+        unknown = [p for p in args.project if p not in by_id]
+        if unknown:
+            raise ValueError(f"unknown project(s): {', '.join(unknown)}")
+        rows = [by_id[p] for p in dict.fromkeys(args.project)]
+    if not rows:
+        print("Every project's backup is verified; nothing to list.")
+        return 0
+    pdrive_root = args.pdrive_root or cfg["pdrive_root"]
+    os.makedirs(args.out, exist_ok=True)
+    sh = os.path.join(args.out, "store_md5.sh")
+    bat = os.path.join(args.out, "pdrive_md5.bat")
+    with open(sh, "w") as f:
+        f.write(orclone.build_md5_store_script(
+            [(r["project_id"], r["seqdata_root"]) for r in rows], mem=args.mem,
+            rclone_module=cfg["rclone_module"], io_queue=cfg["io_queue"]))
+    with open(bat, "w", newline="") as f:
+        f.write(orclone.build_md5_pdrive_bat(
+            [r["project_id"] for r in rows], pdrive_root, args.rclone or cfg["rclone_exe"]))
+    print(f"{len(rows)} project(s) to list; scripts written to {args.out}/")
+    print(f"Next:\n  1. Store: cd {shlex.quote(args.out)} && qsub store_md5.sh")
+    print(f"  2. P-drive: copy pdrive_md5.bat to the Windows machine with the P-drive mapped"
+          + (" (then edit ROOT at the top of it)" if not pdrive_root else "")
+          + ", run it, and copy pdrive.md5 back here")
+    print(f"  3. Load: seqledger --db {args.db} checksums --store {args.out}/store.md5 "
+          f"--pdrive {args.out}/pdrive.md5")
+    return 0
 
 
 def cmd_validate(args):
@@ -891,6 +928,25 @@ def build_parser():
     pc.add_argument("--force", action="store_true",
                     help="load even if a listing looks truncated")
     pc.set_defaults(func=cmd_checksums)
+
+    pm = sub.add_parser("md5-jobs", parents=[dbp],
+                        help="write the scripts that make rclone md5sum listings for checksums",
+                        description="Write store_md5.sh (qsub, I/O queue) and pdrive_md5.bat "
+                                    "(Windows) that make the rclone md5sum listings for "
+                                    "projects whose backup is not verified, one project at a "
+                                    "time, then merge them into store.md5 / pdrive.md5.")
+    pm.add_argument("--out", default="md5_jobs", help="folder for the scripts (default md5_jobs)")
+    pm.add_argument("--project", action="append", metavar="PROJECT",
+                    help="only this project (repeatable); default: every unverified project")
+    pm.add_argument("--all", action="store_true",
+                    help="include projects whose backup is already verified")
+    pm.add_argument("--pdrive-root", dest="pdrive_root",
+                    help="raw_sequence_data path on the P-drive as Windows sees it "
+                         "(default: config pdrive_root)")
+    pm.add_argument("--rclone", help="rclone program on the Windows machine "
+                                    "(default: config rclone_exe, i.e. rclone on PATH)")
+    pm.add_argument("--mem", type=int, default=2, help="memory GB for the Store job (default 2)")
+    pm.set_defaults(func=cmd_md5_jobs)
 
     pv = sub.add_parser("validate", parents=[dbp],
                         help="re-check the catalog (data-files + checksum)",

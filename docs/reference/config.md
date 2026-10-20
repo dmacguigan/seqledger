@@ -30,6 +30,8 @@ confirm with `--show`.
 | `rclone_module` | `tools/rclone/1.66.0` | `--set rclone_module=` | Grab & Go copy jobs (`module load`) | |
 | `backup_location` | `pdrive` | `--set backup_location=` | `checksums`, `query unbacked`, GUI backup columns | Name of the backup row in the `backups` table. Changing it after `checksums` has run hides the old rows until `checksums` runs again |
 | `fastq_extensions` | `fastq.gz,fq.gz` | `--set fastq_extensions=` | `ingest`, `validate` (which files count as FASTQs on disk) | Comma-separated. Files must be gzip-compressed: `integrity` reads them as gzip, and R1/R2 is only guessed from `.fastq.gz` / `.fq.gz` names |
+| `pdrive_root` | (empty) | `--set pdrive_root=` | `md5-jobs` | `raw_sequence_data` folder on the P-drive as the Windows machine sees it (drive letter or UNC path). `md5-jobs --pdrive-root` overrides it per run |
+| `rclone_exe` | `rclone` | `--set rclone_exe=` | `md5-jobs` | rclone program on the Windows machine; the default assumes it is on PATH. `md5-jobs --rclone` overrides it per run |
 | `dismiss_log` | (set by init-db) | `--set dismiss_log=` | GUI | Path of the hidden log where GUI users' dismissed issues are recorded. init-db fills it with the path next to the catalog it runs on, so copies of the catalog point back at the master's log. Change it only if the log must live elsewhere. |
 
 ## Precedence

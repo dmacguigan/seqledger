@@ -12,6 +12,7 @@ import sys
 
 from seqledger import cli
 from seqledger import db as odb
+from seqledger import rclone as orclone
 from seqledger import taxonomy as otax
 
 MENU = """
@@ -23,7 +24,7 @@ MENU = """
   Data manager tasks
     4  Add or update projects from the mapfiles (ingest)
     5  Check files for damage (integrity)
-    6  Verify backups from md5 listings (checksums)
+    6  Verify backups (make md5 listings, then load them)
     7  Look up species names (taxonomy)
 """
 TAIL = """    c  Use a different catalog, or create one
@@ -36,10 +37,10 @@ OVERVIEW = """
     5  Species names needing review"""
 DOWNLOAD = ("Look up new species names now? First time downloads about 72 MB and "
             "uses about 1.4 GB next to the catalog.")
-RCLONE = """Make the two md5 listings first, for example:
-  rclone md5sum SI-Hydra:/store/nmnh_ocean_dna/public/raw_sequence_data > store.md5
-  rclone md5sum /Volumes/nmnh-ocean-dna/Hydra_backup/store/raw_sequence_data > pdrive.md5
-"""
+CHECKSUMS = """
+    1  Make the md5 listing scripts (Store qsub job + P-drive batch file)
+    2  Load finished listings (store.md5 + pdrive.md5) and compare"""
+TOGGLE = "Toggle: numbers (e.g. 2 5-7), a = show all projects, Enter = done"
 
 
 def _abs(p):
@@ -162,7 +163,73 @@ def _integrity(db):
 
 
 def _checksums(db):
-    print(RCLONE)
+    print(CHECKSUMS)
+    if _ask("Choose", "1") == "1":
+        _md5_jobs(db)
+    else:
+        _checksums_load(db)
+
+
+def _nums(text):
+    """Numbers in '2 5-7, 9' -> {2, 5, 6, 7, 9}; anything else ignored."""
+    out = set()
+    for tok in text.replace(",", " ").split():
+        a, _, b = tok.partition("-")
+        if a.isdigit() and (b.isdigit() or not b):
+            out.update(range(int(a), int(b or a) + 1))
+    return out
+
+
+def _md5_jobs(db):
+    conn = odb.connect_ro(db)
+    try:
+        rows = {show_all: orclone.md5_projects(conn, all_projects=show_all)
+                for show_all in (False, True)}
+    finally:
+        conn.close()
+    show_all = False
+    ticked = {r["project_id"] for r in rows[False]}
+    while True:
+        cur = rows[show_all]
+        if not cur:
+            print("Every project's backup is verified; nothing to list.")
+            return
+        print()
+        for i, r in enumerate(cur, 1):
+            state = "verified" if r["verified"] else (
+                f"{r['n_mismatch']} mismatch(es)" if r["n_mismatch"] else "not verified")
+            mark = "x" if r["project_id"] in ticked else " "
+            print(f"  [{mark}]  {i:<2} {r['project_id']}  ({r['n_files']} files, {state})")
+        ans = _ask(TOGGLE).strip().lower()
+        if not ans:
+            break
+        if ans == "a":
+            show_all = True
+            continue
+        for i in _nums(ans):
+            if 1 <= i <= len(cur):
+                ticked ^= {cur[i - 1]["project_id"]}
+    chosen = [r["project_id"] for r in cur if r["project_id"] in ticked]
+    if not chosen:
+        print("No projects chosen.")
+        return
+    argv = ["md5-jobs", "--out", _abs(_ask("Folder for the scripts", "md5_jobs"))]
+    if chosen != [r["project_id"] for r in cur]:
+        for pid in chosen:
+            argv += ["--project", pid]
+    elif show_all:
+        argv.append("--all")
+    for flag, key, label in (("--pdrive-root", "pdrive_root",
+                              "P-drive raw_sequence_data path as Windows sees it"),
+                             ("--rclone", "rclone_exe", "rclone program on the Windows machine")):
+        cur_val = _cfg(db, key)
+        ans = _ask(label, cur_val)
+        if ans and ans != cur_val:
+            argv += [flag, ans]
+    _run(db, argv)
+
+
+def _checksums_load(db):
     paths = []
     for label in ("Store listing file", "P-drive listing file"):
         for _ in range(2):

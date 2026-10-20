@@ -281,3 +281,52 @@ def test_init_db_records_dismiss_log_once(tmp_path):
     con = odb.connect(db)
     assert odb.get_config(con, "dismiss_log") == "/store/x/.log.tsv"
     con.close()
+
+
+# --- md5-jobs ---
+
+def test_md5_jobs_writes_both_scripts_for_unverified(tmp_path, capsys):
+    db, _ = _ingested(tmp_path, ("genohub-1_A", "genohub-2_B"))
+    out = str(tmp_path / "jobs")
+    assert _run(["--db", db, "md5-jobs", "--out", out, "--pdrive-root", r"P:\raw"]) == 0
+    sh = open(os.path.join(out, "store_md5.sh")).read()
+    bat = open(os.path.join(out, "pdrive_md5.bat"), newline="").read()
+    assert "genohub-1_A" in sh and "genohub-2_B" in sh
+    assert "genohub-1_A" in bat and 'set "ROOT=P:\\raw"' in bat
+    o = capsys.readouterr().out
+    assert "qsub store_md5.sh" in o and "pdrive_md5.bat" in o
+    assert f"seqledger --db {db} checksums --store" in o
+
+
+def test_md5_jobs_project_flag_limits_and_rejects_unknown(tmp_path, capsys):
+    db, _ = _ingested(tmp_path, ("genohub-1_A", "genohub-2_B"))
+    out = str(tmp_path / "jobs")
+    assert _run(["--db", db, "md5-jobs", "--out", out, "--project", "genohub-2_B"]) == 0
+    sh = open(os.path.join(out, "store_md5.sh")).read()
+    assert "genohub-2_B" in sh and "genohub-1_A" not in sh
+    assert _run(["--db", db, "md5-jobs", "--out", out, "--project", "nope"]) == 1
+    assert "nope" in capsys.readouterr().err
+
+
+def test_md5_jobs_skips_verified_unless_all(tmp_path, capsys):
+    db, _ = _ingested(tmp_path, ("genohub-1_A", "genohub-2_B"))
+    conn = odb.connect(db)
+    conn.execute("INSERT INTO backups (project_id, location, verified, n_files, n_mismatch) "
+                 "VALUES ('genohub-1_A', 'pdrive', 1, 2, 0)")
+    conn.commit()
+    conn.close()
+    out = str(tmp_path / "jobs")
+    assert _run(["--db", db, "md5-jobs", "--out", out]) == 0
+    assert "genohub-1_A" not in open(os.path.join(out, "store_md5.sh")).read()
+    assert _run(["--db", db, "md5-jobs", "--out", out, "--all"]) == 0
+    assert "genohub-1_A" in open(os.path.join(out, "store_md5.sh")).read()
+
+
+def test_md5_jobs_uses_config_pdrive_root_and_rclone(tmp_path):
+    db, _ = _ingested(tmp_path)
+    assert _run(["--db", db, "init-db", "--set", r"pdrive_root=P:\cfg",
+                 "--set", r"rclone_exe=C:\r\rclone.exe"]) == 0
+    out = str(tmp_path / "jobs")
+    assert _run(["--db", db, "md5-jobs", "--out", out]) == 0
+    bat = open(os.path.join(out, "pdrive_md5.bat"), newline="").read()
+    assert 'set "ROOT=P:\\cfg"' in bat and 'set "RCLONE=C:\\r\\rclone.exe"' in bat

@@ -288,9 +288,9 @@ cannot be dismissed, because they are not problems yet.
 
 After dismissing, the panel shows who dismissed the issue, when, and why, with
 a **Restore** button next to it, so a mis-click is one click to undo. In the
-tables, a dismissed issue reads `gzip error (dismissed)`, `na_taxon
-(dismissed)`, and so on; a roll-up cell reads `OK (+2 dismissed)` or, if live
-problems remain, `1 corrupt (+1 dismissed)`. Dismissed cells are sky blue. Tick
+tables, a cell whose issues are all dismissed reads `OK (+n dismissed)`; if
+live problems remain it keeps their text, as in `1 corrupt (+1 dismissed)`.
+Dismissed cells are sky blue. Select the row to see what was dismissed. Tick
 **Show dismissed issues** in the sidebar to list dismissed rows in the Projects
 issues table with who, when, and the reason, and to restore several at once
 with **Restore n ticked issue(s)**.

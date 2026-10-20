@@ -433,7 +433,7 @@ def test_project_status_mapfile_and_incomplete_variants():
          dismiss.file_key("P1", "P1/c.gz", "md5 mismatch"): {"user": "u", "time": "t", "note": ""}}
     issues = app._mark_issues(issues, d)
     s = app._project_status(prow, issues, d)
-    assert s["mapfile"] == "flagged rows (dismissed)"
+    assert s["mapfile"] == "OK (+1 dismissed)"
     assert s["integrity"] == "incomplete (1 unchecked) (+1 dismissed)"
     assert s["checksum"] == "backup not yet verified (2 file(s)) (+1 dismissed)"
 
@@ -534,7 +534,7 @@ def test_projects_dismiss_all_then_show_and_undo(tmp_path, monkeypatch):
     at.text_input(key="note_mapfile_P1").set_value("**bold** [x](y)")
     _button(at, "Dismiss mapfile issue").click().run()
     _select(at, _table_key(at, "projects_table_"), [0])
-    assert at.dataframe[0].value.iloc[0]["mapfile"] == "flagged rows (dismissed)"
+    assert at.dataframe[0].value.iloc[0]["mapfile"] == "OK (+1 dismissed)"
     assert not at.warning
     assert any("mapfile issue dismissed by" in m.value
                and "\\*\\*bold\\*\\* \\[x\\]\\(y\\)" in m.value for m in at.markdown)
@@ -545,7 +545,7 @@ def test_projects_dismiss_all_then_show_and_undo(tmp_path, monkeypatch):
     issues = at.dataframe[1].value
     assert len(issues) == 3 and set(issues["dismissed_by"]) != {""}
     assert all(i.endswith(" (dismissed)") for i in issues["issue"])
-    assert at.dataframe[0].value.iloc[0]["mapfile"] == "flagged rows (dismissed)"
+    assert at.dataframe[0].value.iloc[0]["mapfile"] == "OK (+1 dismissed)"
     at.sidebar.checkbox[0].check().run()   # Only mapfile issues: tests live labels
     assert len(at.dataframe[0].value) == 0
     at.sidebar.checkbox[0].uncheck().run()
@@ -595,13 +595,13 @@ def test_samples_dismiss_flags(tmp_path, monkeypatch):
     i = list(at.dataframe[0].value["sample_id"]).index("s1")
     _select(at, key, [i])
     _button(at, "Dismiss flags").click().run()
-    assert at.dataframe[0].value.iloc[i]["flags"] == "na_uniqid (dismissed)"
+    assert at.dataframe[0].value.iloc[i]["flags"] == "OK (+1 dismissed)"
     assert any(b.label == "Restore flags" for b in at.button)
     assert dismiss.sample_key("P1", "s1", "na_uniqid") in dismiss.read(dismiss.default_log_path(p))[0]
     csv = _download_frame(got, "_samples.csv")
     assert csv.loc[csv["sample_id"] == "s1", "flags"].iloc[0] == "na_uniqid"
     at.sidebar.checkbox[-1].check().run()
-    assert at.dataframe[0].value.iloc[i]["flags"] == "na_uniqid (dismissed)"
+    assert at.dataframe[0].value.iloc[i]["flags"] == "OK (+1 dismissed)"
     at.sidebar.radio[0].set_value("Grab & Go").run()
     at.sidebar.radio[0].set_value("Samples").run()
     assert at.sidebar.checkbox[-1].value is True
@@ -617,12 +617,12 @@ def test_files_dismiss_integrity_and_md5(tmp_path, monkeypatch):
     _select(at, key, [i])
     at.text_input(key="note_file_P1_P1/s2_R1.fastq.gz").set_value("for R1 only")
     _button(at, "Dismiss gzip error").click().run()
-    assert at.dataframe[0].value.iloc[i]["integrity"] == "gzip error (dismissed)"
+    assert at.dataframe[0].value.iloc[i]["integrity"] == "OK (+1 dismissed)"
     j = list(at.dataframe[0].value["filename"]).index("s2_R2.fastq.gz")   # md5 mismatch
     _select(at, key, [j])
     assert at.text_input(key="note_file_P1_P1/s2_R2.fastq.gz").value == ""   # note did not follow
     _button(at, "Dismiss md5 mismatch").click().run()
-    assert at.dataframe[0].value.iloc[j]["backup"] == "md5 mismatch (dismissed)"
+    assert at.dataframe[0].value.iloc[j]["backup"] == "OK (+1 dismissed)"
     log, _ = dismiss.read(dismiss.default_log_path(p))
     assert log[dismiss.file_key("P1", "P1/s2_R1.fastq.gz", "gzip error")]["note"] == "for R1 only"
     assert log[dismiss.file_key("P1", "P1/s2_R2.fastq.gz", "md5 mismatch")]["note"] == ""

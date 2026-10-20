@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Files. Dismissals are shared and only hide the issue; the catalog is not
   changed. Each issue gets a boxed panel under the table with a **Reason
   (optional)** box and a Dismiss button; once dismissed, the panel shows who,
-  when, and why with a **Restore** button. Cells read `gzip error (dismissed)`
-  or `OK (+n dismissed)`, **Show dismissed issues** lists dismissed rows in the
+  when, and why with a **Restore** button. Cells read `OK (+n dismissed)`, or
+  the live text plus `(+n dismissed)`; **Show dismissed issues** lists dismissed rows in the
   Projects issues table, and files with only dismissed problems are included in
   Grab & Go copies. Dismissals live in a hidden `.<catalog name>_dismissed.tsv`
   next to the catalog.

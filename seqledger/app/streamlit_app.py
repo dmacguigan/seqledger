@@ -485,7 +485,7 @@ def _project_status(prow, issues, dismissed):
     mapfile = _MAPFILE_LABEL.get(status, status)
     if isinstance(status, str) and \
             dismiss.project_key(prow["project_id"], status, prow["metadata_detail"]) in dismissed:
-        mapfile = mapfile + " (dismissed)"
+        mapfile = _rollup("OK", 1)
 
     live = issues.loc[~issues["dismissed"], "kind"].value_counts()
     dis = issues.loc[issues["dismissed"], "kind"].value_counts()
@@ -701,7 +701,7 @@ def _mark_files(df, dismissed):
     for idx, r in zip(df.index, df.to_dict("records")):
         for col, kind in _file_issues(r):
             if dismiss.file_key(r["project_id"], r["rel_path"], kind) in dismissed:
-                out.at[idx, col] = kind + " (dismissed)"
+                out.at[idx, col] = _rollup("OK", 1)
     return out
 
 
@@ -741,7 +741,7 @@ def samples_view(df, files_df):
     show["backup"] = show["backup_verified"].map(backup_label)
     for idx, r in zip(show.index, show.to_dict("records")):
         if _sample_flags_key(r) in dismissed:
-            show.at[idx, "flags"] = r["flags"] + " (dismissed)"
+            show.at[idx, "flags"] = _rollup("OK", 1)
     on_screen = ["project_id", "sample_id", "taxon",
                  "ncbi_url", "tax_match", "worms_url", "worms_match", "worms_status",
                  "uniq_id", "uniq_id_url", "flags", "backup"]

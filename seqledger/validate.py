@@ -34,6 +34,7 @@ FLAG_MESSAGES = {
     "missing_r1": "R1 filename was empty (no R1 file cataloged)",
     "missing_r2": "R2 filename was empty (no R2 file cataloged)",
     "r1_eq_r2":   "R1 and R2 name the same file (only R1 cataloged)",
+    "extra_cells": "Row had more cells than the header (unquoted comma?)",
 }
 
 

@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- GUI: samples flagged `extra_cells` were not tinted as warnings.
+
 - `init-db` now also refuses a catalog whose `files` table still has the old
   basename unique key (it only checked for missing columns), so `ingest` no
   longer fails with "ON CONFLICT clause does not match". Fix: run `init-db` once

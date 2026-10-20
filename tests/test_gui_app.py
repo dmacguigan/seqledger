@@ -664,6 +664,7 @@ def _labels():
         ("missing from disk", "error"), ("missing from mapfile", "warning"),
         ("md5 mismatch", "error"), ("empty (0 reads)", "error"),
         ("gzip error (dismissed)", "dismissed"), ("missing from mapfile (dismissed)", "dismissed"),
+        ("extra_cells", "warning"), ("na_taxon;extra_cells", "warning"),
     ]
 
 @pytest.mark.parametrize("label,severity", _labels())

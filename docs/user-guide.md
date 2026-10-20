@@ -145,8 +145,9 @@ Pick a view in the left sidebar. The top of every page shows which catalog file
 you are reading and when it was last updated.
 
 Every table can be sorted by clicking a column header, and has a **Download CSV**
-button. Projects, Samples, and Files also have a **Filter columns** bar above the
-table: one box per column, type any text to keep only matching rows.
+button. Projects, Samples, Files, and the Grab & Go table also have a **Filter
+columns** bar above the table: one box per column, type any text to keep only
+matching rows.
 
 ### Projects
 

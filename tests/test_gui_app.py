@@ -394,7 +394,7 @@ def test_grab_and_go_includes_files_with_dismissed_problems(tmp_path, monkeypatc
     at.run()
     at.sidebar.radio[0].set_value("Grab & Go").run()
     table = at.dataframe[1].value
-    assert table[table["sample_id"] == "s2"].iloc[0]["files_ok"] == "ok *"
+    assert table[table["sample_id"] == "s2"].iloc[0]["files_ok"] == "ok (+2 dismissed)"
     assert not any("files in the cart are corrupt" in w.value for w in at.warning)
     dest = next(t for t in at.text_input if t.label.startswith("Destination"))
     dest.set_value("/pool/dest").run()
@@ -422,7 +422,7 @@ def test_project_status_rolls_up_live_and_dismissed():
     prow = _prow(data_check_n_missing=1, data_check_n_orphan=2, n_integrity_bad=1,
                  n_integrity_ok=3, n_mismatch=1)
     none = app._mark_issues(issues, {})
-    s = app._project_status(prow, none, {}, False)
+    s = app._project_status(prow, none, {})
     assert s["data_files"] == "1 file(s) in mapfile not on disk, 2 file(s) on disk, not in mapfile"
     assert s["integrity"] == "1 corrupt" and s["checksum"] == "1 file(s) differ between Store and P-drive"
     d = {dismiss.file_key("P1", "P1/Run1/a.gz", "missing from mapfile"): {"user": "u", "time": "t", "note": ""},
@@ -430,13 +430,10 @@ def test_project_status_rolls_up_live_and_dismissed():
          dismiss.file_key("P1", "P1/c.gz", "gzip error"): {"user": "u", "time": "t", "note": ""}}
     marked = app._mark_issues(issues, d)
     assert list(marked["dismissed"]) == [True, False, True, False, True]
-    s = app._project_status(prow, marked, d, False)
-    assert s["data_files"] == "1 file(s) on disk, not in mapfile *"
-    assert s["integrity"] == "OK *"
+    s = app._project_status(prow, marked, d)
+    assert s["data_files"] == "1 file(s) on disk, not in mapfile (+2 dismissed)"
+    assert s["integrity"] == "verified (+1 dismissed)"
     assert s["checksum"] == "1 file(s) differ between Store and P-drive"   # md5 key untouched
-    s = app._project_status(prow, marked, d, True)
-    assert s["data_files"] == "1 file(s) in mapfile not on disk, 2 file(s) on disk, not in mapfile (2 dismissed)"
-    assert s["integrity"] == "1 corrupt (1 dismissed)"
 
 def test_project_status_mapfile_and_incomplete_variants():
     from seqledger import dismiss
@@ -444,28 +441,27 @@ def test_project_status_mapfile_and_incomplete_variants():
                  n_integrity_bad=1, n_uncompared=2, n_mismatch=1)
     issues = app._mark_issues(_issues_df([("P1", "gzip error", "P1/c.gz"),
                                           ("P1", "md5 mismatch", "P1/c.gz")]), {})
-    s = app._project_status(prow, issues, {}, False)
+    s = app._project_status(prow, issues, {})
     assert s["mapfile"] == "flagged rows"
     d = {dismiss.project_key("P1", "flagged", "3 rows\tflagged"): {"user": "u", "time": "t", "note": ""},
          dismiss.file_key("P1", "P1/c.gz", "gzip error"): {"user": "u", "time": "t", "note": ""},
          dismiss.file_key("P1", "P1/c.gz", "md5 mismatch"): {"user": "u", "time": "t", "note": ""}}
     issues = app._mark_issues(issues, d)
-    s = app._project_status(prow, issues, d, False)
-    assert s["mapfile"] == "OK *"
-    assert s["integrity"] == "incomplete (1 unchecked) *"
-    assert s["checksum"] == "incomplete (2 not compared) *"
-    assert app._project_status(prow, issues, d, True)["mapfile"] == "flagged rows (dismissed)"
+    s = app._project_status(prow, issues, d)
+    assert s["mapfile"] == "OK (+1 dismissed)"
+    assert s["integrity"] == "incomplete (1 unchecked) (+1 dismissed)"
+    assert s["checksum"] == "backup not yet verified (2 file(s)) (+1 dismissed)"
 
 def test_severity_and_tint():
     sv = app._severity
     assert sv("gzip error") == "error" and sv("1 corrupt") == "error" and sv("Mismatch") == "error"
     assert sv("missing from mapfile") == "warning" and sv("na_uniqid") == "warning"
     assert sv("unchecked") == "pending" and sv("incomplete (2 unchecked)") == "pending"
-    assert sv("OK *") == "dismissed" and sv("OK") == "ok" and sv("") == "ok" and sv("Verified") == "ok"
-    assert sv("1 corrupt *") == "error"
-    assert sv("ok *") == "dismissed"
+    assert sv("OK (+1 dismissed)") == "dismissed" and sv("OK") == "ok" and sv("") == "ok" and sv("Verified") == "ok"
+    assert sv("1 corrupt (+1 dismissed)") == "error"
+    assert sv("ok (+2 dismissed)") == "dismissed"
     assert sv("unchecked (data folder not found: /x/empty_runs)") == "pending"
-    assert sv("1 corrupt (2 dismissed)") == "dismissed" and sv("flagged rows (dismissed)") == "dismissed"
+    assert sv("verified (+2 dismissed)") == "dismissed" and sv("flagged rows (dismissed)") == "dismissed"
     styler = app._tint(pd.DataFrame({"integrity": ["gzip error", "ok"], "x": [1, 2]}), ["integrity", "nope"])
     html = styler.to_html()
     assert "rgba(213, 94, 0, 0.30)" in html
@@ -478,8 +474,8 @@ def test_file_problem_honours_dismissals():
     assert app._file_problem(r, d) == "dismissed"
     m = {"project_id": "P1", "rel_path": "P1/y.gz", "integrity_status": "ok", "n_reads": 5, "missing_on_disk": 1}
     assert app._file_problem(m, {dismiss.file_key("P1", "P1/y.gz", "missing from disk"): {}}) == "dismissed"
-    assert app._files_ok(["ok", "dismissed"]) == "ok *"
-    assert app._files_ok(["corrupt", "dismissed"]) == "1 corrupt *"
+    assert app._files_ok(["ok", "dismissed"]) == "ok (+1 dismissed)"
+    assert app._files_ok(["corrupt", "dismissed"]) == "1 corrupt (+1 dismissed)"
 
 def test_md5_issues_loader(tmp_path):
     p = _grab_catalog(tmp_path)
@@ -537,36 +533,40 @@ def test_projects_dismiss_all_then_show_and_undo(tmp_path, monkeypatch):
     assert any("1 row flagged" in w.value for w in at.warning)
     issues = at.dataframe[1].value
     assert sorted(issues["issue"]) == ["gzip error", "md5 mismatch", "missing from disk"]
-    _button(at, "Dismiss all (3)").click().run()
+    at.text_input(key="note_issues_P1").set_value("bulk")
+    _button(at, "Yes, dismiss all").click().run()
     _select(at, _table_key(at, "projects_table_"), [0])
     row = at.dataframe[0].value.iloc[0]
-    assert row["data_files"] == "OK *" and row["integrity"] == "OK *" and row["checksum"] == "OK *"
+    assert row["data_files"] == "OK (+1 dismissed)"
+    assert row["integrity"] == "verified (+1 dismissed)"
+    assert row["checksum"] == "backup verified (+1 dismissed)"
     assert "Data-files issues" in " ".join(h.value for h in at.subheader)
-    assert len(at.dataframe) == 1   # no live rows: table replaced by an info line
-    assert any("3 issue(s) dismissed" in i.value for i in at.info)
+    assert len(at.dataframe) == 1   # no live rows: table replaced by a caption
+    assert any("3 dismissed issue(s) hidden" in c.value for c in at.caption)
     log, _ = dismiss.read(dismiss.default_log_path(p))
-    assert len(log) == 3
+    assert len(log) == 3 and all(v["note"] == "bulk" for v in log.values())
     # mapfile dismiss
-    at.text_input(key="note_mapfile").set_value("**bold** [x](y)")
+    at.text_input(key="note_mapfile_P1").set_value("**bold** [x](y)")
     _button(at, "Dismiss mapfile issue").click().run()
     _select(at, _table_key(at, "projects_table_"), [0])
-    assert at.dataframe[0].value.iloc[0]["mapfile"] == "OK *"
+    assert at.dataframe[0].value.iloc[0]["mapfile"] == "OK (+1 dismissed)"
     assert not at.warning
-    assert any("Mapfile: OK *" in i.value and "\\*\\*bold\\*\\* \\[x\\]\\(y\\)" in i.value
-               for i in at.info)
+    assert any("mapfile issue dismissed by" in m.value
+               and "\\*\\*bold\\*\\* \\[x\\]\\(y\\)" in m.value for m in at.markdown)
+    assert any(b.label == "Restore mapfile issue" for b in at.button)
     # show dismissed -> rows back with who/when, undo one
     at.sidebar.checkbox[-1].check().run()
     _select(at, _table_key(at, "projects_table_"), [0])
     issues = at.dataframe[1].value
     assert len(issues) == 3 and set(issues["dismissed_by"]) != {""}
     assert all(i.endswith(" (dismissed)") for i in issues["issue"])
-    assert at.dataframe[0].value.iloc[0]["mapfile"] == "flagged rows (dismissed)"
+    assert at.dataframe[0].value.iloc[0]["mapfile"] == "OK (+1 dismissed)"
     at.sidebar.checkbox[0].check().run()   # Only mapfile issues: tests live labels
     assert len(at.dataframe[0].value) == 0
     at.sidebar.checkbox[0].uncheck().run()
     _select(at, _table_key(at, "projects_table_"), [0])
     _select(at, _table_key(at, "issues_table_P1"), [0])
-    _button(at, "Undo selected (1)").click().run()
+    _button(at, "Restore 1 ticked").click().run()
     assert len(dismiss.read(dismiss.default_log_path(p))[0]) == 3   # 4 dismissed, 1 undone
 
 def test_projects_dismiss_unwritable_log_shows_hint(tmp_path, monkeypatch):
@@ -578,7 +578,7 @@ def test_projects_dismiss_unwritable_log_shows_hint(tmp_path, monkeypatch):
         pytest.skip("running as root")
     at = _apptest(monkeypatch, p, "Projects")
     _select(at, _table_key(at, "projects_table_"), [0])
-    _button(at, "Dismiss all").click().run()
+    _button(at, "Yes, dismiss all").click().run()
     assert not at.exception
     assert any("chmod 664" in e.value for e in at.error)
 
@@ -609,19 +609,20 @@ def test_samples_dismiss_flags(tmp_path, monkeypatch):
     key = _table_key(at, "samples_table_")
     i = list(at.dataframe[0].value["sample_id"]).index("s1")
     _select(at, key, [i])
-    _button(at, "Dismiss flags for this sample").click().run()
-    assert at.dataframe[0].value.iloc[i]["flags"] == "OK *"
+    _button(at, "Dismiss flags").click().run()
+    assert at.dataframe[0].value.iloc[i]["flags"] == "OK (+1 dismissed)"
+    assert any(b.label == "Restore flags" for b in at.button)
     assert dismiss.sample_key("P1", "s1", "na_uniqid") in dismiss.read(dismiss.default_log_path(p))[0]
     csv = _download_frame(got, "_samples.csv")
     assert csv.loc[csv["sample_id"] == "s1", "flags"].iloc[0] == "na_uniqid"
-    assert any("turn on 'Show dismissed' to see it" in c.value for c in at.caption)
     at.sidebar.checkbox[-1].check().run()
-    assert at.dataframe[0].value.iloc[i]["flags"] == "na_uniqid (dismissed)"
+    assert at.dataframe[0].value.iloc[i]["flags"] == "OK (+1 dismissed)"
     at.sidebar.radio[0].set_value("Grab & Go").run()
     at.sidebar.radio[0].set_value("Samples").run()
     assert at.sidebar.checkbox[-1].value is True
 
 def test_files_dismiss_integrity_and_md5(tmp_path, monkeypatch):
+    from seqledger import dismiss
     p = _issues_catalog(tmp_path)
     got = _capture_downloads(monkeypatch)
     at = _apptest(monkeypatch, p, "Files")
@@ -629,16 +630,20 @@ def test_files_dismiss_integrity_and_md5(tmp_path, monkeypatch):
     df = at.dataframe[0].value
     i = list(df["filename"]).index("s2_R1.fastq.gz")   # gzip_error
     _select(at, key, [i])
+    at.text_input(key="note_file_P1_P1/s2_R1.fastq.gz").set_value("for R1 only")
     _button(at, "Dismiss gzip error").click().run()
-    assert at.dataframe[0].value.iloc[i]["integrity"] == "OK *"
+    assert at.dataframe[0].value.iloc[i]["integrity"] == "OK (+1 dismissed)"
     j = list(at.dataframe[0].value["filename"]).index("s2_R2.fastq.gz")   # md5 mismatch
     _select(at, key, [j])
+    assert at.text_input(key="note_file_P1_P1/s2_R2.fastq.gz").value == ""   # note did not follow
     _button(at, "Dismiss md5 mismatch").click().run()
-    assert at.dataframe[0].value.iloc[j]["backup"] == "OK *"
+    assert at.dataframe[0].value.iloc[j]["backup"] == "OK (+1 dismissed)"
+    log, _ = dismiss.read(dismiss.default_log_path(p))
+    assert log[dismiss.file_key("P1", "P1/s2_R1.fastq.gz", "gzip error")]["note"] == "for R1 only"
+    assert log[dismiss.file_key("P1", "P1/s2_R2.fastq.gz", "md5 mismatch")]["note"] == ""
     csv = _download_frame(got, "_files.csv").set_index("filename")
     assert csv.loc["s2_R1.fastq.gz", "integrity"] == "gzip_error"
     assert csv.loc["s2_R2.fastq.gz", "backup"] == "Mismatch"
-    assert any("turn on 'Show dismissed' to see it" in c.value for c in at.caption)
     # the integrity filter no longer returns the dismissed file
     sel = next(s for s in at.sidebar.selectbox if s.label == "Integrity")
     sel.set_value("gzip_error").run()
@@ -702,7 +707,7 @@ def test_projects_unavailable_log_hides_dismiss(tmp_path, monkeypatch):
     assert not at.exception
     assert any("Dismissals unavailable" in c.value for c in at.sidebar.caption)
     assert len(at.dataframe) == 2
-    assert not any(b.label.startswith(("Dismiss", "Undo")) for b in at.button)
+    assert not any(b.label.startswith(("Dismiss", "Restore", "Yes, dismiss")) for b in at.button)
 
 def test_projects_only_checksum_keeps_uncompared(tmp_path, monkeypatch):
     at = _apptest(monkeypatch, _make_catalog(tmp_path), "Projects")

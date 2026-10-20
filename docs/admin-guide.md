@@ -547,7 +547,7 @@ the GUI says so and asks for a re-sync.
 `dismiss_log`, so a Scratch copy uses the master's log. Re-run `init-db` on the
 master once so the key is set. If the log's folder does not exist or the log
 cannot be read, the GUI sidebar shows "Dismissals unavailable" and every Dismiss
-and Undo button is hidden.
+and Restore button is hidden.
 
 The config travels inside the `.db` file, so a copy has the same settings.
 

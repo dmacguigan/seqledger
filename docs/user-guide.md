@@ -272,28 +272,34 @@ Some problems are known and harmless, for example a file you never plan to
 fix. Any GUI user can dismiss an issue. Dismissing only hides it: nothing in the
 catalog changes. Dismissals are shared, so everyone sees them.
 
-- **Projects**: select a project. Next to the mapfile warning is **Dismiss
-  mapfile issue**. In the **Data-files issues** table, tick rows and press
-  **Dismiss selected (n)**, or press **Dismiss all (N)**. The table also lists
-  md5 mismatches, and shows each file's path.
-- **Samples**: select a sample, then **Dismiss flags for this sample** under the
-  table.
-- **Files**: select a file, then press the Dismiss button next to each problem
-  listed under the table (gzip error, format error, empty, md5 mismatch).
+Select a row, and a boxed panel appears under the table for each issue it has:
 
-Add a short **Note** to say why. "Unchecked", "Not verified", and "Not
-compared" cannot be dismissed, because they are not problems yet.
+- **Projects**: a **Mapfile issue** panel with **Dismiss mapfile issue**, and
+  under the **Data-files issues** table a **Dismiss known issues** panel: tick
+  rows and press **Dismiss n ticked issue(s)**, or open **Dismiss all N
+  issue(s)** and confirm. The table also lists md5 mismatches and each file's
+  path.
+- **Samples**: a **Flags for ...** panel with **Dismiss flags**.
+- **Files**: a **Problems with ...** panel with one Dismiss button per problem
+  (gzip error, format error, empty, md5 mismatch).
 
-A cell whose issues are all dismissed reads `OK *`. A cell with some issues
-dismissed keeps its live text plus ` *`. Tick **Show dismissed** in the sidebar
-to see everything again: cells show the full text plus `(n dismissed)`, dismissed
-rows come back in the issues table with who dismissed them, when, and the note,
-and an **Undo** button appears.
+Each panel has a **Reason (optional)** box; the reason is saved with your
+username and shown to everyone. "Unchecked", "Not verified", and "Not compared"
+cannot be dismissed, because they are not problems yet.
+
+After dismissing, the panel shows who dismissed the issue, when, and why, with
+a **Restore** button next to it, so a mis-click is one click to undo. In the
+tables, a cell whose issues are all dismissed reads `OK (+n dismissed)`; if
+live problems remain it keeps their text, as in `1 corrupt (+1 dismissed)`.
+Dismissed cells are sky blue. Select the row to see what was dismissed. Tick
+**Show dismissed issues** in the sidebar to list dismissed rows in the Projects
+issues table with who, when, and the reason, and to restore several at once
+with **Restore n ticked issue(s)**.
 
 A dismissal covers the exact state you dismissed. If the problem changes (more
 flagged rows, a different error), it shows again. A dismissal stays until
-someone undoes it. In Grab & Go, a file whose problems are all dismissed is
-copied like any other, and its sample reads `ok *`.
+someone restores it. In Grab & Go, a file whose problems are all dismissed is
+copied like any other, and its sample reads `ok (+n dismissed)`.
 
 Status cells in Projects, Samples, and Files are tinted by what they say:
 

@@ -206,8 +206,11 @@ def _dismiss_state():
 def _dismiss_sidebar():
     """(dismissed, show_dismissed, available, log_path)"""
     path, dismissed, problem = _dismiss_state()
-    show = st.checkbox("Show dismissed", key="show_dismissed",
-                       value=st.session_state.get("show_dismissed_value", False))
+    st.divider()
+    show = st.checkbox("Show dismissed issues", key="show_dismissed",
+                       value=st.session_state.get("show_dismissed_value", False),
+                       help="List dismissed issues in the Projects issue table, with who "
+                            "dismissed them, when, and why, and let you restore them.")
     st.session_state["show_dismissed_value"] = show
     if problem:
         st.caption(problem)
@@ -227,6 +230,43 @@ def _record(log_path, action, keys, note):
         return False
     load_dismissals.clear()
     return True
+
+
+_PANEL_HELP = ("Dismissing hides the issue for everyone. Nothing in the catalog changes, "
+               "and it can be restored. The reason is saved with your username in the "
+               "shared dismissal log and shown when 'Show dismissed issues' is on.")
+
+
+def _act(log_path, action, keys, note_key, msg):
+    """Button callback: record, clear the note box, confirm with a toast."""
+    note = st.session_state.get(note_key, "") if note_key else ""
+    if _record(log_path, action, keys, note):
+        if note_key:
+            st.session_state[note_key] = ""
+        st.toast(msg)
+
+
+def _panel(title):
+    box = st.container(border=True)
+    box.markdown(f"**{title}**", help=_PANEL_HELP)
+    return box
+
+
+def _note_row(box, note_key):
+    """One row: buttons on the left (returned container), reason box filling the right."""
+    row = box.container(horizontal=True, vertical_alignment="center")
+    btns = row.container(horizontal=True, width="content")
+    row.text_input("Reason (optional)", key=note_key, label_visibility="collapsed",
+                   width="stretch", placeholder="Reason (optional), e.g. re-sequenced as P12")
+    return btns
+
+
+def _restore_row(box, hit, what, log_path, key):
+    row = box.container(horizontal=True, vertical_alignment="center")
+    extra = ": " + _md(hit["note"]) if hit["note"] else ""
+    row.button(f"Restore {what}", on_click=_act,
+               args=(log_path, "undo", [key], None, f"Restored {what}."))
+    row.markdown(f"{what} dismissed by {_md(hit['user'])} on {hit['time'][:10]}{extra}")
 
 
 # A UniqID is sometimes a URL (e.g. a specimen record page). Render those as a
@@ -436,20 +476,16 @@ def integrity_label(row):
     return "verified"
 
 
-def _rollup(live_label, full_label, n_dis, has_live, clear_label, show_dismissed):
-    if not n_dis:
-        return full_label
-    if show_dismissed:
-        return f"{full_label} ({n_dis} dismissed)"
-    return live_label + " *" if has_live else clear_label
+def _rollup(live_label, n_dis):
+    return f"{live_label} (+{n_dis} dismissed)" if n_dis else live_label
 
 
-def _project_status(prow, issues, dismissed, show_dismissed):
+def _project_status(prow, issues, dismissed):
     status = prow["metadata_status"]
     mapfile = _MAPFILE_LABEL.get(status, status)
     if isinstance(status, str) and \
             dismiss.project_key(prow["project_id"], status, prow["metadata_detail"]) in dismissed:
-        mapfile = mapfile + " (dismissed)" if show_dismissed else "OK *"
+        mapfile = _rollup("OK", 1)
 
     live = issues.loc[~issues["dismissed"], "kind"].value_counts()
     dis = issues.loc[issues["dismissed"], "kind"].value_counts()
@@ -459,29 +495,25 @@ def _project_status(prow, issues, dismissed, show_dismissed):
 
     data = {"status": prow["data_check_status"], "n_missing": prow["data_check_n_missing"],
             "n_orphan": prow["data_check_n_orphan"]}
-    data_full = ovalidate.data_label(data)
+    data_files = ovalidate.data_label(data)
     if prow["data_check_status"] == "issues":
         lm, lo = n(live, "missing from disk"), n(live, "missing from mapfile")
-        data_files = _rollup(ovalidate.data_label({**data, "n_missing": lm, "n_orphan": lo}),
-                             data_full, n(dis, "missing from disk", "missing from mapfile"),
-                             lm + lo > 0, "OK *", show_dismissed)
-    else:
-        data_files = data_full
+        live_data = ovalidate.data_label({**data, "n_missing": lm, "n_orphan": lo})
+        data_files = _rollup("OK" if live_data == "issues" else live_data,
+                             n(dis, "missing from disk", "missing from mapfile"))
 
     lb, le = n(live, "gzip error", "format error"), n(live, "empty (0 reads)")
-    rest = (int(prow["n_files"] or 0) - int(prow["n_integrity_ok"] or 0)
-            - int(prow["n_integrity_bad"] or 0))
+    # Dismissed corrupt files count as checked, not as 'unchecked' remainder.
+    ok = int(prow["n_integrity_ok"] or 0) + int(prow["n_integrity_bad"] or 0) - lb
     integrity = _rollup(
-        integrity_label({**prow, "n_integrity_bad": lb, "n_integrity_empty": le}),
-        integrity_label(prow), n(dis, "gzip error", "format error", "empty (0 reads)"),
-        lb + le > 0, "OK *" if rest == 0 else f"incomplete ({rest} unchecked) *", show_dismissed)
+        integrity_label({**prow, "n_integrity_bad": lb, "n_integrity_empty": le,
+                         "n_integrity_ok": ok}),
+        n(dis, "gzip error", "format error", "empty (0 reads)"))
 
     lmm, n_unc = n(live, "md5 mismatch"), int(prow["n_uncompared"] or 0)
     cs = {"n_files": prow["n_files"], "n_mismatch": prow["n_mismatch"], "n_uncompared": n_unc}
-    checksum = _rollup(
-        ovalidate.checksum_label({**cs, "n_mismatch": lmm}), ovalidate.checksum_label(cs),
-        n(dis, "md5 mismatch"), lmm > 0,
-        "OK *" if n_unc == 0 else f"incomplete ({n_unc} not compared) *", show_dismissed)
+    checksum = _rollup(ovalidate.checksum_label({**cs, "n_mismatch": lmm}),
+                       n(dis, "md5 mismatch"))
 
     return {"mapfile": mapfile, "data_files": data_files, "checksum": checksum,
             "integrity": integrity}
@@ -503,9 +535,9 @@ _TINT = {"error": "background-color: rgba(213, 94, 0, 0.30)",
 def _severity(label):
     if not isinstance(label, str) or not label:
         return "ok"
-    if label.lower() == "ok *" or label.endswith("dismissed)"):
+    s, n_dis = re.subn(r" \(\+\d+ dismissed\)$", "", label)
+    if s.endswith("(dismissed)"):
         return "dismissed"
-    s = label.removesuffix(" *")
     if s in _PENDING_LABELS or s.startswith(_PENDING_PREFIXES):
         return "pending"
     if s in _ERROR_LABELS or any(p in s for p in _ERROR_PARTS) or \
@@ -514,7 +546,7 @@ def _severity(label):
     if s in ("flagged rows", "missing from mapfile") or "not in mapfile" in s or \
             all(t.strip() in ovalidate.FLAG_MESSAGES for t in s.split(";")):
         return "warning"
-    return "ok"
+    return "dismissed" if n_dis else "ok"
 
 
 def _tint(df, columns):
@@ -662,14 +694,14 @@ def _file_issues(r):
     return out
 
 
-def _mark_files(df, dismissed, show_dismissed):
+def _mark_files(df, dismissed):
     out = df.copy()
     if not dismissed:
         return out
     for idx, r in zip(df.index, df.to_dict("records")):
         for col, kind in _file_issues(r):
             if dismiss.file_key(r["project_id"], r["rel_path"], kind) in dismissed:
-                out.at[idx, col] = kind + " (dismissed)" if show_dismissed else "OK *"
+                out.at[idx, col] = _rollup("OK", 1)
     return out
 
 
@@ -709,7 +741,7 @@ def samples_view(df, files_df):
     show["backup"] = show["backup_verified"].map(backup_label)
     for idx, r in zip(show.index, show.to_dict("records")):
         if _sample_flags_key(r) in dismissed:
-            show.at[idx, "flags"] = r["flags"] + " (dismissed)" if show_dismissed else "OK *"
+            show.at[idx, "flags"] = _rollup("OK", 1)
     on_screen = ["project_id", "sample_id", "taxon",
                  "ncbi_url", "tax_match", "worms_url", "worms_match", "worms_status",
                  "uniq_id", "uniq_id_url", "flags", "backup"]
@@ -728,8 +760,8 @@ def samples_view(df, files_df):
                  "tax_match": tax_lab, "worms_match": worms_lab,
                  "uniq_id_url": show["uniq_id"]})
     st.caption(f"{len(show)} of {len(df)} samples (full R1/R2 paths, taxid + "
-               "lineage are in the CSV export). Select a row to list its files below. "
-               "* an issue here was dismissed; turn on 'Show dismissed' to see it.")
+               "lineage are in the CSV export). Select a row to list its files below, "
+               "or to dismiss its flags.")
     disp = show[on_screen].assign(tax_match=tax_lab.loc[show.index],
                                   worms_match=worms_lab.loc[show.index])
     event = st.dataframe(
@@ -755,16 +787,17 @@ def samples_view(df, files_df):
     r = show.iloc[sel[0]]
     pid, sid = r["project_id"], r["sample_id"]
     fkey = _sample_flags_key(df.loc[r.name]) if available else None
-    if fkey and fkey not in dismissed:
-        note = st.text_input("Note", key="note_flags")
-        if st.button("Dismiss flags for this sample") and \
-                _record(log_path, "dismiss", [fkey], note):
-            st.rerun()
-    elif fkey and show_dismissed and st.button("Undo") and \
-            _record(log_path, "undo", [fkey], ""):
-        st.rerun()
+    if fkey:
+        box = _panel(f"Flags for {sid}: {df.loc[r.name, 'flags']}")
+        if fkey in dismissed:
+            _restore_row(box, dismissed[fkey], "flags", log_path, fkey)
+        else:
+            nkey = f"note_flags_{pid}_{sid}"
+            _note_row(box, nkey).button(
+                "Dismiss flags", on_click=_act,
+                args=(log_path, "dismiss", [fkey], nkey, f"Dismissed flags for {sid}."))
     fsub = _mark_files(files_df[(files_df["project_id"] == pid)
-                                & (files_df["sample_id"] == sid)], dismissed, show_dismissed)
+                                & (files_df["sample_id"] == sid)], dismissed)
     st.subheader(f"Files for sample {sid} ({pid})")
     if len(fsub):
         fsub["size"] = fsub["size_bytes"].map(human_size)
@@ -794,13 +827,10 @@ def projects_view(df, issues, integ_issues, md5_issues):
     all_issues = _mark_issues(pd.concat([issues, integ_issues, md5_issues], ignore_index=True),
                               dismissed)
     by_pid = dict(list(all_issues.groupby("project_id")))
-    def statuses(show):
-        return pd.DataFrame([_project_status(r, by_pid.get(r["project_id"], all_issues.iloc[:0]),
-                                             dismissed, show) for r in df.to_dict("records")],
+    live_lab = pd.DataFrame([_project_status(r, by_pid.get(r["project_id"], all_issues.iloc[:0]),
+                                             dismissed) for r in df.to_dict("records")],
                             columns=_STATUS_COLS, index=df.index)
-
-    live_lab = statuses(False)
-    view = df.join(statuses(True) if show_dismissed else live_lab)
+    view = df.join(live_lab)
     if search:
         s = search.lower()
         mask = (_contains(view["project_id"], s) | _contains(view["description"], s))
@@ -810,7 +840,7 @@ def projects_view(df, issues, integ_issues, md5_issues):
         return live_lab.loc[view.index, col].map(_severity).isin(["error", "warning"])
 
     if mapfile_only:
-        view = view[~live_lab.loc[view.index, "mapfile"].astype(str).str.startswith("OK")]
+        view = view[~live_lab.loc[view.index, "mapfile"].map(_severity).isin(["ok", "dismissed"])]
     if data_only:
         view = view[bad("data_files")]
     if cs_only:
@@ -825,10 +855,9 @@ def projects_view(df, issues, integ_issues, md5_issues):
     show = _column_filters(show, cols, "projects")
     st.caption(f"{len(show)} of {len(df)} projects. 'mapfile' flags a folder with no "
                "mapfile, a mapfile with no folder, a broken mapfile, flagged rows, or "
-               "no usable rows. Select a row for "
-               "its mapfile explanation + data-files & integrity issues below. "
-               "'owner_name' is the filesystem owner (a personal identifier). "
-               "* an issue here was dismissed; turn on 'Show dismissed' to see it.")
+               "no usable rows. Select a row for its mapfile explanation and its "
+               "data-files & integrity issues below, where known issues can be dismissed. "
+               "'owner_name' is the filesystem owner (a personal identifier).")
     event = st.dataframe(_tint(show[cols].reset_index(drop=True), _STATUS_COLS),
                          width="stretch", hide_index=True,
                          on_select="rerun", selection_mode="single-row",
@@ -845,21 +874,16 @@ def projects_view(df, issues, integ_issues, md5_issues):
     if isinstance(mstatus, str) and mstatus != "ok":
         mkey = dismiss.project_key(pid, mstatus, prow["metadata_detail"])
         hit = dismissed.get(mkey)
+        box = _panel(f"Mapfile issue: {_MAPFILE_LABEL.get(mstatus, mstatus)}")
         if hit is None:
-            st.warning(f"**Mapfile issue ({_MAPFILE_LABEL.get(mstatus, mstatus)}):** "
-                       f"{prow['metadata_detail']}")
+            box.warning(prow["metadata_detail"])
             if available:
-                note = st.text_input("Note", key="note_mapfile")
-                if st.button("Dismiss mapfile issue") and \
-                        _record(log_path, "dismiss", [mkey], note):
-                    st.rerun()
-        else:
-            extra = ": " + _md(hit["note"]) if hit["note"] else ""
-            st.info(f"Mapfile: OK * (dismissed by {_md(hit['user'])} on "
-                    f"{hit['time'][:10]}{extra})")
-            if available and show_dismissed and st.button("Undo") and \
-                    _record(log_path, "undo", [mkey], ""):
-                st.rerun()
+                nkey = f"note_mapfile_{pid}"
+                _note_row(box, nkey).button(
+                    "Dismiss mapfile issue", on_click=_act,
+                    args=(log_path, "dismiss", [mkey], nkey, f"Dismissed mapfile issue for {pid}."))
+        elif available:
+            _restore_row(box, hit, "mapfile issue", log_path, mkey)
 
     # Disk/mapfile checks, integrity failures, and md5 mismatches live in different
     # tables but answer one question ("what's wrong with this project's files?").
@@ -868,10 +892,12 @@ def projects_view(df, issues, integ_issues, md5_issues):
     live = sub[~sub["dismissed"]]
     rows = (sub if show_dismissed else live).reset_index(drop=True)
     st.subheader(f"Data-files issues: {pid}")
+    n_hidden = len(sub) - len(rows)
+    if n_hidden:
+        st.caption(f"{n_hidden} dismissed issue(s) hidden. Tick 'Show dismissed issues' in "
+                   "the sidebar to see or restore them.")
     if not len(rows):
-        if len(sub):
-            st.info(f"{len(sub)} issue(s) dismissed; turn on 'Show dismissed' to see them.")
-        else:
+        if not len(sub):
             st.info("No recorded data-files or integrity issues. Run "
                     "`validate --seqdata-root` and `integrity --collect` to refresh.")
         return
@@ -897,17 +923,22 @@ def projects_view(df, issues, integ_issues, md5_issues):
     def keys(frame):
         return [_issue_key(r) for r in frame.to_dict("records")]
 
-    note = st.text_input("Note", key="note_issues")
-    if st.button(f"Dismiss selected ({len(live_sel)})", disabled=live_sel.empty) and \
-            _record(log_path, "dismiss", keys(live_sel), note):
-        st.rerun()
-    if st.button(f"Dismiss all ({len(live)})", disabled=live.empty) and \
-            _record(log_path, "dismiss", keys(live), note):
-        st.rerun()
-    if show_dismissed and \
-            st.button(f"Undo selected ({len(dis_sel)})", disabled=dis_sel.empty) and \
-            _record(log_path, "undo", keys(dis_sel), ""):
-        st.rerun()
+    nkey = f"note_issues_{pid}"
+    btns = _note_row(_panel("Dismiss known issues"), nkey)
+    btns.button(f"Dismiss {len(live_sel)} ticked issue(s)", disabled=live_sel.empty,
+                help="Tick rows in the table above first.", on_click=_act,
+                args=(log_path, "dismiss", keys(live_sel), nkey,
+                      f"Dismissed {len(live_sel)} issue(s)."))
+    with btns.popover(f"Dismiss all {len(live)} issue(s)", disabled=live.empty):
+        st.write(f"Hide all {len(live)} issue(s) in {pid} from everyone? Grab & Go will "
+                 "copy these files as if they were OK.")
+        st.button("Yes, dismiss all", type="primary", on_click=_act,
+                  args=(log_path, "dismiss", keys(live), nkey,
+                        f"Dismissed {len(live)} issue(s)."))
+    if show_dismissed:
+        btns.button(f"Restore {len(dis_sel)} ticked issue(s)", disabled=dis_sel.empty,
+                  on_click=_act, args=(log_path, "undo", keys(dis_sel), None,
+                                       f"Restored {len(dis_sel)} issue(s)."))
 
 
 def files_view(df, samples_df):
@@ -920,8 +951,7 @@ def files_view(df, samples_df):
             "Integrity", ["All", "ok", "gzip_error", "format_error", "unchecked"])
         search = st.text_input("Search (sample, filename)")
         dismissed, show_dismissed, available, log_path = _dismiss_sidebar()
-    live = _mark_files(df, dismissed, False)
-    view = _mark_files(df, dismissed, True) if show_dismissed else live
+    live = view = _mark_files(df, dismissed)
     if chosen:
         view = view[view["project_id"].isin(chosen)]
     if backup != "All":
@@ -940,9 +970,8 @@ def files_view(df, samples_df):
     show = _column_filters(show, on_screen, "files",
                            labels={"n_reads": "reads", "integrity_date": "checked"})
     st.caption(f"{len(show)} of {len(df)} files. "
-               "Select a row to show its sample info below. "
-               "'owner_name' is the filesystem owner (a personal identifier). "
-               "* an issue here was dismissed; turn on 'Show dismissed' to see it.")
+               "Select a row to show its sample info below, or to dismiss its problems. "
+               "'owner_name' is the filesystem owner (a personal identifier).")
     event = st.dataframe(
         _tint(show[on_screen].reset_index(drop=True), ["backup", "integrity"]),
         width="stretch", hide_index=True,
@@ -960,17 +989,19 @@ def files_view(df, samples_df):
     pid, sid = r["project_id"], r["sample_id"]
     keys = [(kind, dismiss.file_key(pid, r["rel_path"], kind))
             for _, kind in _file_issues(df.loc[r.name])] if available else []
-    live_keys = [(k, key) for k, key in keys if key not in dismissed]
-    if live_keys:
-        note = st.text_input("Note", key="note_file")
-        for kind, key in live_keys:
-            if st.button(f"Dismiss {kind}") and _record(log_path, "dismiss", [key], note):
-                st.rerun()
-    if show_dismissed:
+    if keys:
+        box = _panel(f"Problems with {r['filename']}")
+        live_keys = [(k, key) for k, key in keys if key not in dismissed]
+        if live_keys:
+            nkey = f"note_file_{pid}_{r['rel_path']}"
+            btns = _note_row(box, nkey)
+            for kind, key in live_keys:
+                btns.button(f"Dismiss {kind}", on_click=_act,
+                          args=(log_path, "dismiss", [key], nkey,
+                                f"Dismissed {kind} for {r['filename']}."))
         for kind, key in keys:
-            if key in dismissed and st.button(f"Undo {kind}") and \
-                    _record(log_path, "undo", [key], ""):
-                st.rerun()
+            if key in dismissed:
+                _restore_row(box, dismissed[key], kind, log_path, key)
     ssub = samples_df[(samples_df["project_id"] == pid)
                       & (samples_df["sample_id"] == sid)]
     st.subheader(f"Sample info: {sid} ({pid})")
@@ -1321,8 +1352,7 @@ def _files_ok(problems):
     parts = [f"{problems.count(k)} {k}" for k in _PROBLEM_KINDS if k in problems]
     if "unchecked" in problems:
         parts.append("unchecked")
-    out = ", ".join(parts) or "ok"
-    return out + " *" if "dismissed" in problems else out
+    return _rollup(", ".join(parts) or "ok", problems.count("dismissed"))
 
 
 def custom_table_view(samples_df, paths_df):

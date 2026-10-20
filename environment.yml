@@ -6,6 +6,6 @@ channels:
 dependencies:
   - python>=3.10
   - streamlit>=1.40
-  - pandas>=2.0
+  - pandas>=2.1
   - plotly>=5.20
   - pytest>=7.0

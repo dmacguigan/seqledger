@@ -5,7 +5,32 @@ All notable changes to seqledger are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.1] - 2026-10-20
+
+### Added
+
+- GUI: 'Filter columns' bar on the Grab & Go table, like the other tables.
+- Dismissable GUI issues. Any user can dismiss a mapfile issue, a data-files
+  problem, a sample's flags, or a file's problem from Projects, Samples, and
+  Files. Dismissals are shared and only hide the issue; the catalog is not
+  changed. Each issue gets a boxed panel under the table with a **Reason
+  (optional)** box and a Dismiss button; once dismissed, the panel shows who,
+  when, and why with a **Restore** button. Cells read `OK (+n dismissed)`, or
+  the live text plus `(+n dismissed)`; **Show dismissed issues** lists dismissed
+  rows in the Projects issues table, and files with only dismissed problems are
+  included in Grab & Go copies. Dismissals live in a hidden
+  `.<catalog name>_dismissed.tsv` next to the catalog.
+- Status cells are tinted: vermillion for errors, orange for warnings, sky blue
+  for dismissed, grey for not yet checked.
+- `init-db` records the dismissals log path in the config key `dismiss_log`, so
+  Scratch copies of the catalog use the master's log. Back up the catalog, then
+  re-run `init-db` on the master so copies find the log.
+
+### Changed
+
+- The Projects "Data-files issues" table also lists md5 mismatches, and the
+  integrity rows show each file's relative path.
+- Minimum pandas is now 2.1 (was 2.0).
 
 ## [0.3.0] - 2026-10-19
 
@@ -19,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.1] - 2026-10-19
 
 ### Fixed
+
+- GUI: samples flagged `extra_cells` were not tinted as warnings.
 
 - `init-db` now also refuses a catalog whose `files` table still has the old
   basename unique key (it only checked for missing columns), so `ingest` no

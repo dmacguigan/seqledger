@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "seqledger"
-version = "0.3.0"
+version = "0.3.1"
 description = "A SQLite-backed catalog + CLI + browse GUI for raw sequencing (FASTQ) data management on an HPC cluster"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,8 +20,8 @@ keywords = ["bioinformatics", "fastq", "catalog", "hpc", "hydra", "data-manageme
 dependencies = []
 
 [project.optional-dependencies]
-gui = ["streamlit>=1.40", "pandas>=2.0", "plotly>=5.20"]
-test = ["pytest>=7.0", "streamlit>=1.40", "pandas>=2.0", "plotly>=5.20"]
+gui = ["streamlit>=1.40", "pandas>=2.1", "plotly>=5.20"]
+test = ["pytest>=7.0", "streamlit>=1.40", "pandas>=2.1", "plotly>=5.20"]
 
 [project.scripts]
 seqledger = "seqledger.cli:main"

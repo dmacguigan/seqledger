@@ -125,8 +125,10 @@ the catalog's `conda_env` to match ([config](reference/config.md)), and make sur
 
 1. Read the new entries in [CHANGELOG.md](../CHANGELOG.md).
 2. [Back up the catalog](#back-up).
-3. `cd seqledger && git pull`. The install is editable, so no reinstall is needed
-   unless dependencies changed; then run `conda env update -f environment.yml`.
+3. `cd seqledger && git pull`, then `pip install -e '.[gui]' --no-deps` so
+   `seqledger --version` reports the new release (the editable install picks up
+   code changes by itself, but not the version). If dependencies changed, run
+   `conda env update -f environment.yml` instead.
 4. Run `seqledger init-db`. It creates any new tables and is safe to re-run. It
    does not migrate old tables: if it stops with `catalog table '<name>' is from
    an older seqledger`, run `init-db` once with the 0.1.0 code, which still
@@ -540,6 +542,13 @@ never write to it. The GUI's banner shows the file's last-updated time, so users
 can see when a copy is stale. If the copy's tables are older than the GUI code,
 the GUI says so and asks for a re-sync.
 
+`init-db` also records the path of the dismissals log (see
+[Permissions and privacy](#permissions-and-privacy)) in the config key
+`dismiss_log`, so a Scratch copy uses the master's log. Re-run `init-db` on the
+master once so the key is set. If the log's folder does not exist or the log
+cannot be read, the GUI sidebar shows "Dismissals unavailable" and every Dismiss
+and Restore button is hidden.
+
 The config travels inside the `.db` file, so a copy has the same settings.
 
 ## Routine runbook
@@ -620,6 +629,15 @@ against the same file on a network filesystem.
 - `owner_name` (on projects and files) is the Unix user who owns the data on disk.
   It is personal information. It appears in the GUI and its CSV exports; do not
   publish those outside the lab.
+- GUI dismissals are kept in a hidden file next to the catalog, named
+  `.<catalog name>_dismissed.tsv` (for `oceandna_catalog.db` it is
+  `.oceandna_catalog_dismissed.tsv`). The first dismiss creates it with mode
+  664. To set it up ahead of time, run `touch <path> && chmod 664 <path>` (or 666
+  without a shared group). If the file is not writable, the GUI shows an error
+  with the `chmod` command. It is plain tab-separated text, one line per dismiss
+  or undo, with the columns time, user, action, scope, project, item, kind, and
+  note; the last line for an item wins. It is safe to edit or truncate.
+  It holds user names and notes, so treat it like the catalog.
 
 ## Recovery recipes
 

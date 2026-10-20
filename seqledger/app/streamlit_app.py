@@ -1447,8 +1447,17 @@ def custom_table_view(samples_df, paths_df):
              "total_size", "r1_reads", "r2_reads", "files_ok",
              "uniq_id", "uniq_id_url", "r1_path", "r2_path"]
     tcols = [c for c in tcols if c in table.columns]
+    link_text = {"ncbi_url": _link_text, "worms_url": _link_text,
+                 "uniq_id_url": lambda _: table["uniq_id"]}
+    show = _column_filters(
+        table, tcols, "cart",
+        labels={"ncbi_url": "NCBI_name", "taxid": "NCBI_taxid", "tax_match": "NCBI_match",
+                "worms_url": "WoRMS_name", "worms_match": "WoRMS_match",
+                "worms_status": "WoRMS_status", "total_size": "seq_data_size",
+                "uniq_id_url": "uniq_id_link"},
+        display={c: f(table[c]) for c, f in link_text.items() if c in table.columns})
     tevent = st.dataframe(
-        _tint(table[tcols], ["files_ok"]), width="stretch", hide_index=True,
+        _tint(show[tcols], ["files_ok"]), width="stretch", hide_index=True,
         on_select="rerun", selection_mode="multi-row", key="cart_table",
         column_config={
             "ncbi_url": st.column_config.LinkColumn("NCBI_name", display_text=r"#(.+)$"),
@@ -1462,7 +1471,7 @@ def custom_table_view(samples_df, paths_df):
     tsel = tevent.selection.rows if tevent and tevent.selection else []
     if st.button(f"➖ Remove selected ({len(tsel)})", disabled=not tsel):
         for i in tsel:
-            r = table.iloc[i]
+            r = show.iloc[i]
             cart.pop(_cart_key(r["project_id"], r["sample_id"]), None)
         st.rerun()
     bad = fpaths["problem"].isin(_PROBLEM_KINDS)
@@ -1489,7 +1498,7 @@ def custom_table_view(samples_df, paths_df):
         "total_size": "seq_data_size_gb",
         "r1_path": "r1_path", "r2_path": "r2_path"}
     export_cols = [c for c in export_map if c in table.columns]
-    export_df = table[export_cols].rename(columns=export_map)
+    export_df = show[export_cols].rename(columns=export_map)
     st.download_button("Download table CSV",
                        _csv_safe_df(export_df).to_csv(index=False).encode(),
                        f"{_config(DB_PATH, 'catalog_slug')}_grab_and_go.csv", "text/csv")

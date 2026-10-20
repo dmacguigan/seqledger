@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- GUI: 'Filter columns' bar on the Grab & Go table, like the other tables.
+
 - Dismissable GUI issues. Any user can dismiss a mapfile issue, a data-files
   problem, a sample's flags, or a file's problem from Projects, Samples, and
   Files. Dismissals are shared and only hide the issue; the catalog is not

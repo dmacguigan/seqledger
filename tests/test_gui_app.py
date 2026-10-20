@@ -366,6 +366,21 @@ def test_grab_and_go_flags_problem_files_and_lane_splits(tmp_path, monkeypatch):
     assert any("Script preview (6 files total" in e.label for e in at.expander)
 
 
+def test_grab_and_go_filter_columns_narrows_table(tmp_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    p = _grab_catalog(tmp_path)
+    monkeypatch.setenv("SEQLEDGER_DB", p)
+    at = AppTest.from_file(_APP_PATH, default_timeout=30)
+    at.session_state["cart"] = {
+        f"P1\t{s}": {"project_id": "P1", "sample_id": s} for s in ("s1", "s2")}
+    at.run()
+    at.sidebar.radio[0].set_value("Grab & Go").run()
+    assert len(at.dataframe[1].value) == 2
+    at.text_input(key="colf_cart_sample_id").set_value("s2").run()
+    table = at.dataframe[1].value
+    assert list(table["sample_id"]) == ["s2"]
+
+
 def test_grab_and_go_includes_files_with_dismissed_problems(tmp_path, monkeypatch):
     from streamlit.testing.v1 import AppTest
     from seqledger import dismiss

@@ -232,10 +232,9 @@ def _record(log_path, action, keys, note):
     return True
 
 
-_NOTE_HELP = ("Saved with your username in the shared dismissal log. Everyone sees it "
-              "when 'Show dismissed issues' is on.")
 _DISMISS_HELP = ("Hides this issue for everyone. Nothing in the catalog changes, and it "
-                 "can be restored.")
+                 "can be restored. The reason is saved with your username and shown to "
+                 "everyone.")
 
 
 def _act(log_path, action, keys, note_key, msg):
@@ -254,19 +253,19 @@ def _panel(title):
 
 
 def _note_row(box, note_key):
-    """Reason box on the left; returns the right-hand column for the buttons."""
-    c1, c2 = box.columns([3, 2], vertical_alignment="bottom")
-    c1.text_input("Reason (optional)", key=note_key, help=_NOTE_HELP,
-                  placeholder="e.g. known truncated delivery; re-sequenced as P12")
-    return c2
+    """Reason box on the right, button height; returns the left column for the buttons."""
+    c1, c2 = box.columns([2, 3], vertical_alignment="center")
+    c2.text_input("Reason (optional)", key=note_key, label_visibility="collapsed",
+                  placeholder="Reason (optional), e.g. re-sequenced as P12")
+    return c1
 
 
 def _restore_row(box, hit, what, log_path, key):
-    c1, c2 = box.columns([3, 2], vertical_alignment="center")
+    c1, c2 = box.columns([2, 3], vertical_alignment="center")
     extra = ": " + _md(hit["note"]) if hit["note"] else ""
-    c1.markdown(f"{what} dismissed by {_md(hit['user'])} on {hit['time'][:10]}{extra}")
-    c2.button(f"Restore {what}", on_click=_act,
+    c1.button(f"Restore {what}", on_click=_act,
               args=(log_path, "undo", [key], None, f"Restored {what}."))
+    c2.markdown(f"{what} dismissed by {_md(hit['user'])} on {hit['time'][:10]}{extra}")
 
 
 # A UniqID is sometimes a URL (e.g. a specimen record page). Render those as a
@@ -924,19 +923,19 @@ def projects_view(df, issues, integ_issues, md5_issues):
         return [_issue_key(r) for r in frame.to_dict("records")]
 
     nkey = f"note_issues_{pid}"
-    c2 = _note_row(_panel("Dismiss known issues"), nkey)
-    c2.button(f"Dismiss {len(live_sel)} ticked issue(s)", disabled=live_sel.empty,
+    btns = _note_row(_panel("Dismiss known issues"), nkey)
+    btns.button(f"Dismiss {len(live_sel)} ticked issue(s)", disabled=live_sel.empty,
               help="Tick rows in the table above first. " + _DISMISS_HELP, on_click=_act,
               args=(log_path, "dismiss", keys(live_sel), nkey,
                     f"Dismissed {len(live_sel)} issue(s)."))
-    with c2.popover(f"Dismiss all {len(live)} issue(s)", disabled=live.empty):
+    with btns.popover(f"Dismiss all {len(live)} issue(s)", disabled=live.empty):
         st.write(f"Hide all {len(live)} issue(s) in {pid} from everyone? Grab & Go will "
                  "copy these files as if they were OK.")
         st.button("Yes, dismiss all", type="primary", on_click=_act,
                   args=(log_path, "dismiss", keys(live), nkey,
                         f"Dismissed {len(live)} issue(s)."))
     if show_dismissed:
-        c2.button(f"Restore {len(dis_sel)} ticked issue(s)", disabled=dis_sel.empty,
+        btns.button(f"Restore {len(dis_sel)} ticked issue(s)", disabled=dis_sel.empty,
                   on_click=_act, args=(log_path, "undo", keys(dis_sel), None,
                                        f"Restored {len(dis_sel)} issue(s)."))
 
@@ -994,9 +993,9 @@ def files_view(df, samples_df):
         live_keys = [(k, key) for k, key in keys if key not in dismissed]
         if live_keys:
             nkey = f"note_file_{pid}_{r['rel_path']}"
-            c2 = _note_row(box, nkey)
+            btns = _note_row(box, nkey)
             for kind, key in live_keys:
-                c2.button(f"Dismiss {kind}", help=_DISMISS_HELP, on_click=_act,
+                btns.button(f"Dismiss {kind}", help=_DISMISS_HELP, on_click=_act,
                           args=(log_path, "dismiss", [key], nkey,
                                 f"Dismissed {kind} for {r['filename']}."))
         for kind, key in keys:

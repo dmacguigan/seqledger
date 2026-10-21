@@ -23,6 +23,7 @@ import pwd
 import re
 from datetime import date
 
+from .checksums import refresh_backup
 from .db import (METADATA_SUFFIX, REQUIRED_COLUMNS, fastq_globs, get_config,
                  header_uniqid_column, parse_project_id, read_text)
 from .validate import (Finding, FAIL, WARN, NA_VALUE, FLAG_MESSAGES,
@@ -483,6 +484,7 @@ def ingest_project(conn, metadata_path, seq_data_relpath, seqdata_root=None, pru
             [(project_id, sid) for sid in orphans])
         stats["pruned_samples"] = list(orphans)
 
+    refresh_backup(conn, project_id)
     conn.commit()
     return project_id, findings, status, stats
 
@@ -522,6 +524,7 @@ def _ingest_diskonly(conn, project_id, data_dir, seqdata_root, metadata_status, 
                         owner_uid=info["uid"], owner_name=info["name"],
                         disk_confirmed=True, on_disk=on_disk)[0]:
             stats["new_files"] += 1
+    refresh_backup(conn, project_id_)
     conn.commit()
     return stats
 

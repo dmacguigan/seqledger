@@ -148,6 +148,14 @@ def load_checksums(conn, store_md5_path, pdrive_md5_path, source="backfill",
             "projects": sorted(touched_projects), "absent": absent}
 
 
+def refresh_backup(conn, project_id):
+    """Recount an existing backups row after files changed (ingest). Never creates one."""
+    row = conn.execute("SELECT backup_date FROM backups WHERE project_id=? AND location=?",
+                       (project_id, get_config(conn, "backup_location"))).fetchone()
+    if row:
+        _update_backup(conn, project_id, row["backup_date"])
+
+
 def _update_backup(conn, project_id, backup_date):
     """Recompute the backup row for a project from its files."""
     cur = conn.execute(

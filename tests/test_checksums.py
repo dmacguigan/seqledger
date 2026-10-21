@@ -258,3 +258,20 @@ def test_backup_location_config_honored(tmp_path):
     assert run_query(conn, "unbacked") == []
     odb.set_config(conn, "backup_location", "pdrive")
     assert [r["project_id"] for r in run_query(conn, "unbacked")] == ["genohub-1_X"]
+
+
+def test_ingest_unverifies_backup_when_files_are_added(tmp_path):
+    from seqledger import rclone as orclone
+    conn, root = _setup_project(tmp_path)
+    entries = _md5_entries()
+    ochecksums.load_checksums(conn, write_md5(str(tmp_path / "s.md5"), entries),
+                              write_md5(str(tmp_path / "p.md5"), entries))
+    assert orclone.md5_projects(conn) == []
+    make_project(root, "genohub-1_X", "genohub-1_X_mapfile.csv", [
+        ("i1", "i1_1.fastq.gz", "i1_2.fastq.gz", "Gadus", "U1"),
+        ("i2", "i2_1.fastq.gz", "i2_2.fastq.gz", "Gadus", "U2"),
+        ("i3", "i3_1.fastq.gz", "i3_2.fastq.gz", "Gadus", "U3")])
+    oingest.ingest_tree(conn, root, root)
+    verified = conn.execute("SELECT verified FROM backups").fetchone()[0]
+    assert verified == 0
+    assert [r["project_id"] for r in orclone.md5_projects(conn)] == ["genohub-1_X"]

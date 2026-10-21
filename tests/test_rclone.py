@@ -156,3 +156,11 @@ def test_md5_projects_default_unverified_only(tmp_path):
     assert [(r["project_id"], r["verified"], r["seqdata_root"]) for r in rows] == \
         [("genohub-1_A", 1, "/store/root"), ("genohub-2_B", 0, "/store/root"),
          ("genohub-3_C", 0, "/store/root")]
+
+
+def test_md5_scripts_end_with_load_command():
+    cmd = "seqledger --db /c.db checksums --store /j/store.md5 --pdrive /j/pdrive.md5"
+    sh = orclone.build_md5_store_script([("genohub-1_A", "/store/root")], load_cmd=cmd)
+    assert sh.rstrip().endswith(f"echo '  {cmd}'\nexit $rc_fail")
+    bat = orclone.build_md5_pdrive_bat(["genohub-1_A"], r"P:\raw", load_cmd=cmd)
+    assert f"echo   {cmd}\r\nexit /b %FAIL%" in bat

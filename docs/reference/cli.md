@@ -243,7 +243,9 @@ options:
   values. With no P-drive root, the batch file holds a `REPLACE_WITH_PDRIVE_ROOT`
   placeholder and refuses to run until edited.
 - Prints the three next steps: `qsub` the Store job, run the batch file on the
-  Windows machine and copy `pdrive.md5` back, then `checksums`.
+  Windows machine and copy `pdrive.md5` back, then `checksums`. The Store job
+  log and the batch file's output end with that same `checksums` command, with
+  absolute paths, so it can be copied from either.
 - Details: [admin guide, checksums](../admin-guide.md#checksums).
 
 ## checksums

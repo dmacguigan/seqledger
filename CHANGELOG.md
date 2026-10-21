@@ -5,6 +5,20 @@ All notable changes to seqledger are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-21
+
+### Changed
+
+- `md5-jobs` scripts end by printing the `seqledger checksums` command that
+  loads the finished listings, so the Store job log and the batch file's output
+  say what to do next. The command uses absolute paths.
+
+### Fixed
+
+- A verified backup stayed "verified" after ingest added files to the project,
+  so `md5-jobs` and `query unbacked` skipped it while the GUI showed it as not
+  verified. Ingest now recounts the project's backup status.
+
 ## [0.4.0] - 2026-10-20
 
 ### Added

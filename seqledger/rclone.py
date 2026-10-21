@@ -187,9 +187,10 @@ def _check_project_ids(project_ids):
 
 def build_md5_store_script(projects, mem=2, job_name="seqledger_md5_store",
                            rclone_module=CONFIG_DEFAULTS["rclone_module"],
-                           io_queue=CONFIG_DEFAULTS["io_queue"], stamp=None):
+                           io_queue=CONFIG_DEFAULTS["io_queue"], stamp=None, load_cmd=""):
     """qsub script listing each (project_id, seqdata_root) with `rclone md5sum` into
-    store_<project>.md5, then concatenating into store.md5."""
+    store_<project>.md5, then concatenating into store.md5. The log ends with
+    load_cmd (the `seqledger checksums` command) as the next step."""
     _check_project_ids(pid for pid, _ in projects)
     log_name = f"{job_name}_{stamp or timestamp()}.log"
     blocks = []
@@ -215,13 +216,16 @@ rc_fail=0
 {body}
 cat store_*.md5 > store.md5
 echo = `date` $JOB_NAME done: $(wc -l < store.md5) files listed in store.md5
+echo "Next: once pdrive.md5 from the Windows run is in this folder too, load both with:"
+echo {shlex.quote("  " + load_cmd)}
 exit $rc_fail
 """
 
 
-def build_md5_pdrive_bat(project_ids, pdrive_root, rclone_exe="rclone"):
+def build_md5_pdrive_bat(project_ids, pdrive_root, rclone_exe="rclone", load_cmd=""):
     """Windows batch file listing each project under pdrive_root with `rclone md5sum`
-    into pdrive_<project>.md5, then concatenating into pdrive.md5 (CRLF line ends)."""
+    into pdrive_<project>.md5, then concatenating into pdrive.md5 (CRLF line ends).
+    Ends by printing load_cmd (the `seqledger checksums` command) as the next step."""
     _check_project_ids(project_ids)
     lines = ["@echo off",
              f'set "ROOT={pdrive_root or PDRIVE_PLACEHOLDER}"',
@@ -245,5 +249,7 @@ def build_md5_pdrive_bat(project_ids, pdrive_root, rclone_exe="rclone"):
                   ')']
     lines += ['type pdrive_*.md5 > pdrive.md5 2>nul',
               'echo done: pdrive.md5 written',
+              'echo Next: copy pdrive.md5 to the folder holding store.md5 on Hydra, then run there:',
+              f'echo   {load_cmd}',
               'exit /b %FAIL%']
     return "\r\n".join(lines) + "\r\n"

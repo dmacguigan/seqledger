@@ -455,22 +455,26 @@ def cmd_md5_jobs(args):
         return 0
     pdrive_root = args.pdrive_root or cfg["pdrive_root"]
     os.makedirs(args.out, exist_ok=True)
+    out_abs = os.path.abspath(args.out)
+    load_cmd = (f"seqledger --db {os.path.abspath(args.db)} checksums "
+                f"--store {out_abs}/store.md5 --pdrive {out_abs}/pdrive.md5")
     sh = os.path.join(args.out, "store_md5.sh")
     bat = os.path.join(args.out, "pdrive_md5.bat")
     with open(sh, "w") as f:
         f.write(orclone.build_md5_store_script(
             [(r["project_id"], r["seqdata_root"]) for r in rows], mem=args.mem,
-            rclone_module=cfg["rclone_module"], io_queue=cfg["io_queue"]))
+            rclone_module=cfg["rclone_module"], io_queue=cfg["io_queue"], load_cmd=load_cmd))
     with open(bat, "w", newline="") as f:
         f.write(orclone.build_md5_pdrive_bat(
-            [r["project_id"] for r in rows], pdrive_root, args.rclone or cfg["rclone_exe"]))
+            [r["project_id"] for r in rows], pdrive_root, args.rclone or cfg["rclone_exe"],
+            load_cmd=load_cmd))
     print(f"{len(rows)} project(s) to list; scripts written to {args.out}/")
     print(f"Next:\n  1. Store: cd {shlex.quote(args.out)} && qsub store_md5.sh")
     print(f"  2. P-drive: copy pdrive_md5.bat to the Windows machine with the P-drive mapped"
           + (" (then edit ROOT at the top of it)" if not pdrive_root else "")
           + ", run it, and copy pdrive.md5 back here")
-    print(f"  3. Load: seqledger --db {args.db} checksums --store {args.out}/store.md5 "
-          f"--pdrive {args.out}/pdrive.md5")
+    print(f"  3. Load: {load_cmd}")
+    print("     (the job log and the batch file's output end with this command too)")
     return 0
 
 

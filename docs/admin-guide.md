@@ -332,6 +332,11 @@ Both scripts list one project at a time into `store_<project>.md5` /
 `store.md5` / `pdrive.md5`. If a run is killed, run the same script again. The
 menu lets you tick which projects to include (`a` shows verified ones too).
 
+When both are done, load them with the `seqledger checksums` command printed
+by `md5-jobs`; the Store job log and the batch file's output end with the same
+command. A verified project drops back to "not verified" when a later ingest
+adds files to it, and `md5-jobs` picks it up again on the next run.
+
 Made by hand, both listings must be rooted at the `raw_sequence_data` level, so
 that every path starts with the project folder:
 
